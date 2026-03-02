@@ -13,6 +13,9 @@ const CHARS_PER_TOKEN = 2  // Game JSON tokenizes at ~1.7 chars/token; 2 is a sa
 const CONTEXT_BUDGET_RATIO = 0.45  // Trigger compaction earlier to leave room
 const MIN_RECENT_MESSAGES = 10
 const SUMMARY_MAX_TOKENS = 1024
+const MAX_LLM_LOG_MESSAGES = 24
+const MAX_LLM_LOG_TEXT_CHARS = 600
+const MAX_LLM_LOG_DETAIL_CHARS = 16_000
 
 export interface LoopOptions {
   signal?: AbortSignal
@@ -89,29 +92,7 @@ export async function runAgentTurn(
           messageCount: context.messages.length,
           estimatedTokens: totalMessageTokens(context.messages),
           systemPromptTokens: context.systemPrompt ? estimateTokens(context.systemPrompt) : 0,
-          messages: context.messages.map(msg => {
-            if (msg.role === 'user') {
-              const text = typeof msg.content === 'string' ? msg.content : '(complex)'
-              return { role: 'user', text }
-            }
-            if (msg.role === 'assistant') {
-              const parts: string[] = []
-              for (const b of msg.content) {
-                if ('text' in b && (b as any).text?.trim()) parts.push((b as any).text.trim())
-                else if ('name' in b) {
-                  const args = JSON.stringify((b as any).arguments || {})
-                  parts.push(`tool: ${(b as any).name}(${args})`)
-                }
-                else if ('thinking' in b) parts.push(`thinking: ${(b as any).thinking?.trim()}`)
-              }
-              return { role: 'assistant', text: parts.join(' | ') || '(empty)' }
-            }
-            if (msg.role === 'toolResult') {
-              const text = Array.isArray(msg.content) ? msg.content.map((b: any) => b.text || '').join('') : ''
-              return { role: 'toolResult', tool: msg.toolName, error: msg.isError || undefined, text }
-            }
-            return { role: (msg as any).role }
-          }),
+          recentMessages: summarizeContextForLog(context.messages),
         },
         content: {
           text: textBlocks,
@@ -120,7 +101,7 @@ export async function runAgentTurn(
         },
       }, null, 2)
 
-      log('llm_call', summary, detail)
+      log('llm_call', summary, truncateForLog(detail, MAX_LLM_LOG_DETAIL_CHARS))
     }
 
     context.messages.push(response)
@@ -183,6 +164,45 @@ export async function runAgentTurn(
   }
 
   log('system', `Reached max tool rounds (${maxRounds}), ending turn`)
+}
+
+function truncateForLog(text: string, max: number): string {
+  if (text.length <= max) return text
+  return `${text.slice(0, max)}\n\n... (truncated for log storage)`
+}
+
+function summarizeContextForLog(messages: Message[]): Array<Record<string, unknown>> {
+  const recent = messages.slice(-MAX_LLM_LOG_MESSAGES)
+  return recent.map(msg => {
+    if (msg.role === 'user') {
+      const text = typeof msg.content === 'string' ? msg.content : '(complex)'
+      return { role: 'user', text: truncateForLog(text, MAX_LLM_LOG_TEXT_CHARS) }
+    }
+    if (msg.role === 'assistant') {
+      const parts: string[] = []
+      for (const b of msg.content) {
+        if ('text' in b && (b as any).text?.trim()) {
+          parts.push((b as any).text.trim())
+        } else if ('name' in b) {
+          const args = JSON.stringify((b as any).arguments || {})
+          parts.push(`tool: ${(b as any).name}(${args})`)
+        } else if ('thinking' in b && (b as any).thinking?.trim()) {
+          parts.push(`thinking: ${(b as any).thinking.trim()}`)
+        }
+      }
+      return { role: 'assistant', text: truncateForLog(parts.join(' | ') || '(empty)', MAX_LLM_LOG_TEXT_CHARS) }
+    }
+    if (msg.role === 'toolResult') {
+      const text = Array.isArray(msg.content) ? msg.content.map((b: any) => b.text || '').join('') : ''
+      return {
+        role: 'toolResult',
+        tool: msg.toolName,
+        error: msg.isError || undefined,
+        text: truncateForLog(text, MAX_LLM_LOG_TEXT_CHARS),
+      }
+    }
+    return { role: (msg as any).role }
+  })
 }
 
 // --- Context compaction ---

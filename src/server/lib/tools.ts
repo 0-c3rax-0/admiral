@@ -51,6 +51,7 @@ export const allTools: Tool[] = [
 const LOCAL_TOOLS = new Set(['save_credentials', 'update_todo', 'read_todo', 'status_log'])
 
 const MAX_RESULT_CHARS = 4000
+const MAX_TOOL_RESULT_LOG_DETAIL_CHARS = 8000
 
 export type LogFn = (type: string, summary: string, detail?: string) => void
 
@@ -96,7 +97,7 @@ export async function executeTool(
     }
 
     const result = formatToolResult(command, resp.result, resp.notifications)
-    ctx.log('tool_result', truncate(result, 200), result)
+    ctx.log('tool_result', truncate(result, 200), truncateResultForLog(result))
     return truncateResult(result)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -150,6 +151,11 @@ function truncateResult(text: string): string {
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text
   return text.slice(0, max - 3) + '...'
+}
+
+function truncateResultForLog(text: string): string {
+  if (text.length <= MAX_TOOL_RESULT_LOG_DETAIL_CHARS) return text
+  return text.slice(0, MAX_TOOL_RESULT_LOG_DETAIL_CHARS) + '\n\n... (truncated for log storage)'
 }
 
 const REDACTED_KEYS = new Set(['password', 'token', 'secret', 'api_key'])

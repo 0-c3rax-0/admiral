@@ -12,6 +12,9 @@ export function Home() {
   const [gameserverUrl, setGameserverUrl] = useState('https://game.spacemolt.com')
   const [maxTurns, setMaxTurns] = useState(30)
   const [llmTimeout, setLlmTimeout] = useState(300)
+  const [startupAutoconnectEnabled, setStartupAutoconnectEnabled] = useState(true)
+  const [startupAutoconnectMinDelaySec, setStartupAutoconnectMinDelaySec] = useState(60)
+  const [startupAutoconnectMaxDelaySec, setStartupAutoconnectMaxDelaySec] = useState(120)
 
   useEffect(() => {
     loadData()
@@ -42,6 +45,17 @@ export function Home() {
       if (prefs.llm_timeout) {
         const v = parseInt(prefs.llm_timeout, 10)
         if (!isNaN(v) && v > 0) setLlmTimeout(v)
+      }
+      if (prefs.startup_autoconnect_enabled) {
+        setStartupAutoconnectEnabled(prefs.startup_autoconnect_enabled === 'true')
+      }
+      if (prefs.startup_autoconnect_min_delay_sec) {
+        const v = parseInt(prefs.startup_autoconnect_min_delay_sec, 10)
+        if (!isNaN(v) && v > 0) setStartupAutoconnectMinDelaySec(v)
+      }
+      if (prefs.startup_autoconnect_max_delay_sec) {
+        const v = parseInt(prefs.startup_autoconnect_max_delay_sec, 10)
+        if (!isNaN(v) && v > 0) setStartupAutoconnectMaxDelaySec(v)
       }
 
       // Show settings if no profiles and no configured providers
@@ -107,6 +121,45 @@ export function Home() {
     }
   }, [])
 
+  const handleSetStartupAutoconnectEnabled = useCallback(async (enabled: boolean) => {
+    setStartupAutoconnectEnabled(enabled)
+    try {
+      await fetch('/api/preferences', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: 'startup_autoconnect_enabled', value: String(enabled) }),
+      })
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  const handleSetStartupAutoconnectMinDelaySec = useCallback(async (seconds: number) => {
+    setStartupAutoconnectMinDelaySec(seconds)
+    try {
+      await fetch('/api/preferences', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: 'startup_autoconnect_min_delay_sec', value: String(seconds) }),
+      })
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  const handleSetStartupAutoconnectMaxDelaySec = useCallback(async (seconds: number) => {
+    setStartupAutoconnectMaxDelaySec(seconds)
+    try {
+      await fetch('/api/preferences', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: 'startup_autoconnect_max_delay_sec', value: String(seconds) }),
+      })
+    } catch {
+      // ignore
+    }
+  }, [])
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-screen">
@@ -136,6 +189,12 @@ export function Home() {
           onMaxTurnsChange={handleSetMaxTurns}
           llmTimeout={llmTimeout}
           onLlmTimeoutChange={handleSetLlmTimeout}
+          startupAutoconnectEnabled={startupAutoconnectEnabled}
+          onStartupAutoconnectEnabledChange={handleSetStartupAutoconnectEnabled}
+          startupAutoconnectMinDelaySec={startupAutoconnectMinDelaySec}
+          onStartupAutoconnectMinDelaySecChange={handleSetStartupAutoconnectMinDelaySec}
+          startupAutoconnectMaxDelaySec={startupAutoconnectMaxDelaySec}
+          onStartupAutoconnectMaxDelaySecChange={handleSetStartupAutoconnectMaxDelaySec}
           onClose={() => {
             setShowSettings(false)
             loadData()

@@ -36,10 +36,33 @@ interface Props {
   onMaxTurnsChange: (turns: number) => void
   llmTimeout: number
   onLlmTimeoutChange: (seconds: number) => void
+  startupAutoconnectEnabled: boolean
+  onStartupAutoconnectEnabledChange: (enabled: boolean) => void
+  startupAutoconnectMinDelaySec: number
+  onStartupAutoconnectMinDelaySecChange: (seconds: number) => void
+  startupAutoconnectMaxDelaySec: number
+  onStartupAutoconnectMaxDelaySecChange: (seconds: number) => void
   onClose: () => void
 }
 
-export function ProviderSetup({ providers: initialProviders, registrationCode, onRegistrationCodeChange, gameserverUrl, onGameserverUrlChange, maxTurns, onMaxTurnsChange, llmTimeout, onLlmTimeoutChange, onClose }: Props) {
+export function ProviderSetup({
+  providers: initialProviders,
+  registrationCode,
+  onRegistrationCodeChange,
+  gameserverUrl,
+  onGameserverUrlChange,
+  maxTurns,
+  onMaxTurnsChange,
+  llmTimeout,
+  onLlmTimeoutChange,
+  startupAutoconnectEnabled,
+  onStartupAutoconnectEnabledChange,
+  startupAutoconnectMinDelaySec,
+  onStartupAutoconnectMinDelaySecChange,
+  startupAutoconnectMaxDelaySec,
+  onStartupAutoconnectMaxDelaySecChange,
+  onClose,
+}: Props) {
   const [providers, setProviders] = useState(initialProviders)
   const [keys, setKeys] = useState<Record<string, string>>(() => {
     const m: Record<string, string> = {}
@@ -228,6 +251,47 @@ export function ProviderSetup({ providers: initialProviders, registrationCode, o
                   className="w-20 h-7 text-xs"
                 />
                 <span className="text-[11px] text-muted-foreground">seconds per LLM call</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground w-28 shrink-0">Startup autoconnect</span>
+                <label className="inline-flex items-center gap-2 text-xs text-foreground cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={startupAutoconnectEnabled}
+                    onChange={e => onStartupAutoconnectEnabledChange(e.target.checked)}
+                  />
+                  Enable on restart
+                </label>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground w-28 shrink-0">Min delay</span>
+                <Input
+                  type="number"
+                  value={startupAutoconnectMinDelaySec}
+                  onChange={e => {
+                    const v = parseInt(e.target.value, 10)
+                    if (!isNaN(v) && v > 0) onStartupAutoconnectMinDelaySecChange(v)
+                  }}
+                  min={10}
+                  max={3600}
+                  className="w-20 h-7 text-xs"
+                />
+                <span className="text-[11px] text-muted-foreground">seconds between accounts</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground w-28 shrink-0">Max delay</span>
+                <Input
+                  type="number"
+                  value={startupAutoconnectMaxDelaySec}
+                  onChange={e => {
+                    const v = parseInt(e.target.value, 10)
+                    if (!isNaN(v) && v > 0) onStartupAutoconnectMaxDelaySecChange(v)
+                  }}
+                  min={10}
+                  max={3600}
+                  className="w-20 h-7 text-xs"
+                />
+                <span className="text-[11px] text-muted-foreground">seconds between accounts</span>
               </div>
             </div>
           </div>
