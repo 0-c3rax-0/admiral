@@ -5,6 +5,8 @@ import type { Provider, Profile, LogEntry } from '../../shared/types'
 
 const DB_DIR = path.join(process.cwd(), 'data')
 const DB_PATH = path.join(DB_DIR, 'admiral.db')
+const MAX_LOG_ROWS_PER_PROFILE = 5000
+const LOG_PRUNE_EVERY_N_INSERTS = 100
 
 let db: Database | null = null
 
@@ -196,7 +198,22 @@ export function addLogEntry(profileId: string, type: string, summary: string, de
   const result = getDb().query(
     'INSERT INTO log_entries (profile_id, type, summary, detail) VALUES (?, ?, ?, ?)'
   ).run(profileId, type, summary, detail ?? null)
-  return Number(result.lastInsertRowid)
+  const rowId = Number(result.lastInsertRowid)
+
+  if (rowId % LOG_PRUNE_EVERY_N_INSERTS === 0) {
+    getDb().query(
+      `DELETE FROM log_entries
+       WHERE profile_id = ?
+         AND id NOT IN (
+           SELECT id FROM log_entries
+           WHERE profile_id = ?
+           ORDER BY id DESC
+           LIMIT ?
+         )`
+    ).run(profileId, profileId, MAX_LOG_ROWS_PER_PROFILE)
+  }
+
+  return rowId
 }
 
 export function getLogEntries(profileId: string, afterId?: number, limit: number = 100): LogEntry[] {

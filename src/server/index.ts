@@ -9,9 +9,14 @@ import providers from './routes/providers'
 import models from './routes/models'
 import commands from './routes/commands'
 import preferences from './routes/preferences'
+import { getPreference, listProfiles } from './lib/db'
+import { agentManager } from './lib/agent-manager'
 
 const app = new Hono()
 app.use('*', cors())
+
+const AUTO_CONNECT_MIN_DELAY_MS = 60_000
+const AUTO_CONNECT_MAX_DELAY_MS = 120_000
 
 // API routes
 app.route('/api/profiles', profiles)
@@ -60,6 +65,51 @@ if (isDev) {
 
 const port = parseInt(process.env.PORT || '3031')
 console.log(`Admiral listening on http://0.0.0.0:${port}`)
+
+function parsePositiveInt(value: string | null, fallback: number): number {
+  if (!value) return fallback
+  const parsed = parseInt(value, 10)
+  if (Number.isNaN(parsed) || parsed <= 0) return fallback
+  return parsed
+}
+
+function scheduleAutoConnectOnStartup(): void {
+  const enabledPref = getPreference('startup_autoconnect_enabled')
+  const enabled = enabledPref === null ? true : enabledPref === 'true'
+  if (!enabled) return
+
+  const minSec = parsePositiveInt(getPreference('startup_autoconnect_min_delay_sec'), 60)
+  const maxSec = parsePositiveInt(getPreference('startup_autoconnect_max_delay_sec'), 120)
+  const minDelayMs = Math.min(minSec, maxSec) * 1000
+  const maxDelayMs = Math.max(minSec, maxSec) * 1000
+
+  const randomAutoConnectDelayMs = (): number => {
+    const span = maxDelayMs - minDelayMs
+    return minDelayMs + Math.floor(Math.random() * (span + 1))
+  }
+
+  const candidates = listProfiles().filter((p) => p.autoconnect && p.enabled)
+  if (candidates.length === 0) return
+
+  let accumulatedDelay = 0
+  for (const profile of candidates) {
+    accumulatedDelay += randomAutoConnectDelayMs()
+    setTimeout(async () => {
+      try {
+        await agentManager.connect(profile.id)
+        if (profile.provider && profile.provider !== 'manual' && profile.model) {
+          await agentManager.startLLM(profile.id)
+        }
+        console.log(`[startup] Auto-connected profile "${profile.name}"`)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error(`[startup] Auto-connect failed for "${profile.name}": ${msg}`)
+      }
+    }, accumulatedDelay)
+  }
+}
+
+scheduleAutoConnectOnStartup()
 
 export default {
   port,
