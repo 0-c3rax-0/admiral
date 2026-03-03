@@ -38,6 +38,67 @@ bun run dev
 
 This starts both the API server and Vite frontend with hot reload via `concurrently`.
 
+## Run as a systemd service (Linux)
+
+Use this if Admiral should survive SSH logout and restart automatically after reboots.
+
+### 1. Create a dedicated user and install path (example)
+
+```bash
+sudo useradd --system --create-home --home-dir /opt/admiral --shell /usr/sbin/nologin admiral || true
+sudo mkdir -p /opt/admiral
+sudo chown -R admiral:admiral /opt/admiral
+```
+
+Copy your `admiral` binary into `/opt/admiral` (or adjust paths below).
+
+### 2. systemd unit template
+
+Create `/etc/systemd/system/admiral.service`:
+
+```ini
+[Unit]
+Description=Admiral SpaceMolt Agent Manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=admiral
+Group=admiral
+WorkingDirectory=/opt/admiral
+ExecStart=/opt/admiral/admiral
+Restart=always
+RestartSec=5
+Environment=PORT=3031
+
+# Optional hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/admiral
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### 3. Enable and start
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now admiral
+sudo systemctl status admiral --no-pager
+```
+
+### 4. Logs and control
+
+```bash
+sudo journalctl -u admiral -f
+sudo systemctl restart admiral
+sudo systemctl stop admiral
+```
+
 ## Features
 
 ### Multiple Simultaneous Agents
