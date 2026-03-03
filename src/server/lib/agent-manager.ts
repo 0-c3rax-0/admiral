@@ -1,4 +1,4 @@
-import { Agent } from './agent'
+import { Agent, clearProfileMemory, readProfileMemory, writeProfileMemory } from './agent'
 import { getProfile, addLogEntry } from './db'
 
 const BACKOFF_BASE = 5_000      // 5 seconds
@@ -178,6 +178,30 @@ class AgentManager {
     return Array.from(this.agents.entries())
       .filter(([, agent]) => agent.isConnected)
       .map(([id]) => id)
+  }
+
+  getMemory(profileId: string): string {
+    const agent = this.agents.get(profileId)
+    if (agent) return agent.getMemory()
+    return readProfileMemory(profileId)
+  }
+
+  saveMemory(profileId: string): boolean {
+    const agent = this.agents.get(profileId)
+    if (agent) return agent.saveMemory()
+    const memory = readProfileMemory(profileId)
+    if (!memory.trim()) return false
+    writeProfileMemory(profileId, memory)
+    return true
+  }
+
+  resetMemory(profileId: string): void {
+    const agent = this.agents.get(profileId)
+    if (agent) {
+      agent.resetMemory()
+      return
+    }
+    clearProfileMemory(profileId)
   }
 }
 

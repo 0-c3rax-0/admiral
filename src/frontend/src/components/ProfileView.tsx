@@ -1,6 +1,6 @@
 
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { Square, Plug, PlugZap, Trash2, Pencil, Check, X, PanelLeft, PanelLeftClose, PanelRightClose, MessageSquare } from 'lucide-react'
+import { Square, Plug, PlugZap, Trash2, Pencil, Check, X, PanelLeft, PanelLeftClose, PanelRightClose, MessageSquare, Save, RotateCcw } from 'lucide-react'
 import type { Profile, Provider } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -106,6 +106,7 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
   })
   const [sidePaneWidth, setSidePaneWidth] = useState(288)
   const [connecting, setConnecting] = useState(false)
+  const [memoryBusy, setMemoryBusy] = useState(false)
   const [showDirectiveModal, setShowDirectiveModal] = useState(false)
   const [directiveValue, setDirectiveValue] = useState(profile.directive || '')
   const [showNudgeModal, setShowNudgeModal] = useState(false)
@@ -491,6 +492,29 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
     onRefresh()
   }
 
+  async function handleSaveMemory() {
+    setMemoryBusy(true)
+    try {
+      const resp = await fetch(`/api/profiles/${profile.id}/memory/save`, { method: 'POST' })
+      const data = await resp.json().catch(() => ({} as Record<string, unknown>))
+      if ((data as { saved?: boolean }).saved === false) {
+        window.alert('No summary available yet. Let the agent run a bit longer, then try Save Memory again.')
+      }
+    } finally {
+      setMemoryBusy(false)
+    }
+  }
+
+  async function handleResetMemory() {
+    if (!window.confirm('Reset persistent memory for this profile?')) return
+    setMemoryBusy(true)
+    try {
+      await fetch(`/api/profiles/${profile.id}/memory`, { method: 'DELETE' })
+    } finally {
+      setMemoryBusy(false)
+    }
+  }
+
   const handleSendCommand = useCallback(async (command: string, args?: Record<string, unknown>) => {
     try {
       const resp = await fetch(`/api/profiles/${profile.id}/command`, {
@@ -799,6 +823,30 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
         )}
 
         <div className="flex-1" />
+
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={handleSaveMemory}
+          disabled={memoryBusy}
+          className="gap-1.5 h-7 text-[10px] text-muted-foreground hover:text-foreground"
+          title="Save persistent memory"
+        >
+          <Save size={12} />
+          Save Memory
+        </Button>
+
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={handleResetMemory}
+          disabled={memoryBusy}
+          className="gap-1.5 h-7 text-[10px] text-muted-foreground hover:text-destructive"
+          title="Reset persistent memory"
+        >
+          <RotateCcw size={12} />
+          Reset Memory
+        </Button>
 
         {!status.connected ? (
           <Button

@@ -158,4 +158,31 @@ profiles.post('/:id/nudge', async (c) => {
   return c.json({ ok: true })
 })
 
+// GET /api/profiles/:id/memory
+profiles.get('/:id/memory', (c) => {
+  const id = c.req.param('id')
+  const profile = getProfile(id)
+  if (!profile) return c.json({ error: 'Profile not found' }, 404)
+  const content = agentManager.getMemory(id)
+  return c.json({ content })
+})
+
+// POST /api/profiles/:id/memory/save
+profiles.post('/:id/memory/save', (c) => {
+  const id = c.req.param('id')
+  const profile = getProfile(id)
+  if (!profile) return c.json({ error: 'Profile not found' }, 404)
+  const saved = agentManager.saveMemory(id)
+  return c.json({ ok: true, saved })
+})
+
+// DELETE /api/profiles/:id/memory
+profiles.delete('/:id/memory', (c) => {
+  const id = c.req.param('id')
+  const profile = getProfile(id)
+  if (!profile) return c.json({ error: 'Profile not found' }, 404)
+  agentManager.resetMemory(id)
+  return c.json({ ok: true })
+})
+
 export default profiles
