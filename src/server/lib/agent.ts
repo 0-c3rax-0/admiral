@@ -360,8 +360,8 @@ function profileMemoryPath(profileId: string): string {
 function loadProfileMemory(profileId: string): string {
   const file = profileMemoryPath(profileId)
   try {
-    const data = fs.readFileSync(file, 'utf-8').trim()
-    return data
+    const raw = fs.readFileSync(file, 'utf-8').trim()
+    return stripMemoryHeader(raw)
   } catch {
     return ''
   }
@@ -369,8 +369,11 @@ function loadProfileMemory(profileId: string): string {
 
 function saveProfileMemory(profileId: string, summary: string): void {
   const file = profileMemoryPath(profileId)
+  const profile = getProfile(profileId)
+  const profileName = profile?.name || 'unknown'
+  const content = formatMemoryFile(profileId, profileName, summary)
   fs.mkdirSync(MEMORY_DIR, { recursive: true })
-  fs.writeFileSync(file, summary, 'utf-8')
+  fs.writeFileSync(file, content, 'utf-8')
 }
 
 function resetProfileMemory(profileId: string): void {
@@ -392,6 +395,28 @@ export function writeProfileMemory(profileId: string, summary: string): void {
 
 export function clearProfileMemory(profileId: string): void {
   resetProfileMemory(profileId)
+}
+
+function formatMemoryFile(profileId: string, profileName: string, summary: string): string {
+  const ts = new Date().toISOString()
+  return [
+    '<!-- admiral-memory-v1 -->',
+    `<!-- profile-id: ${profileId} -->`,
+    `<!-- profile-name: ${profileName} -->`,
+    `<!-- updated-at: ${ts} -->`,
+    '',
+    summary.trim(),
+    '',
+  ].join('\n')
+}
+
+function stripMemoryHeader(content: string): string {
+  if (!content.startsWith('<!-- admiral-memory-v1 -->')) return content
+  const lines = content.split('\n')
+  let i = 0
+  while (i < lines.length && lines[i].trim().startsWith('<!--')) i++
+  while (i < lines.length && lines[i].trim() === '') i++
+  return lines.slice(i).join('\n').trim()
 }
 
 function createConnection(profile: Profile): GameConnection {
