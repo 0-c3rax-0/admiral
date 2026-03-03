@@ -18,6 +18,7 @@ import path from 'path'
 
 const TURN_INTERVAL = 2000
 const PROMPT_PATH = path.join(process.cwd(), 'prompt.md')
+const MEMORY_DIR = path.join(process.cwd(), 'data', 'memory')
 
 let _promptMd: string | null = null
 function getPromptMd(): string {
@@ -39,6 +40,8 @@ export class Agent {
   private restartRequested = false
   private pendingNudges: string[] = []
   private _activity: string = 'idle'
+  private memorySummary: string = ''
+  private lastSavedMemory: string = ''
   constructor(profileId: string) {
     this.profileId = profileId
   }
@@ -149,7 +152,18 @@ export class Agent {
       tools: allTools,
     }
 
-    const compaction: CompactionState = { summary: '' }
+    this.memorySummary = loadProfileMemory(this.profileId)
+    this.lastSavedMemory = this.memorySummary
+    if (this.memorySummary) {
+      context.messages.push({
+        role: 'user' as const,
+        content: `## Session History Summary\n\n${this.memorySummary}\n\n---\nUse this as persistent memory from earlier runs.`,
+        timestamp: Date.now(),
+      })
+      this.log('system', 'Loaded persistent profile memory')
+    }
+
+    const compaction: CompactionState = { summary: this.memorySummary }
     const todo = { value: profile.todo || '' }
 
     while (this.running) {
@@ -195,6 +209,12 @@ export class Agent {
           },
           compaction,
         )
+
+        if (compaction.summary && compaction.summary !== this.lastSavedMemory) {
+          saveProfileMemory(this.profileId, compaction.summary)
+          this.memorySummary = compaction.summary
+          this.lastSavedMemory = compaction.summary
+        }
       } catch (err) {
         if (!this.running) break
         if (this.restartRequested) continue
@@ -254,7 +274,36 @@ export class Agent {
 
     this.running = false
     this.setActivity('idle')
+    if (compaction.summary && compaction.summary !== this.lastSavedMemory) {
+      saveProfileMemory(this.profileId, compaction.summary)
+      this.memorySummary = compaction.summary
+      this.lastSavedMemory = compaction.summary
+    }
     this.log('system', 'Agent loop stopped')
+  }
+
+  getMemory(): string {
+    if (this.memorySummary) return this.memorySummary
+    const loaded = loadProfileMemory(this.profileId)
+    this.memorySummary = loaded
+    this.lastSavedMemory = loaded
+    return loaded
+  }
+
+  saveMemory(): boolean {
+    const memory = this.getMemory()
+    if (!memory.trim()) return false
+    saveProfileMemory(this.profileId, memory)
+    this.lastSavedMemory = memory
+    this.log('system', 'Persistent memory saved')
+    return true
+  }
+
+  resetMemory(): void {
+    resetProfileMemory(this.profileId)
+    this.memorySummary = ''
+    this.lastSavedMemory = ''
+    this.log('system', 'Persistent memory reset')
   }
 
   async executeCommand(command: string, args?: Record<string, unknown>): Promise<CommandResult> {
@@ -301,6 +350,48 @@ export class Agent {
       this.log('connection', 'Disconnected')
     }
   }
+}
+
+function profileMemoryPath(profileId: string): string {
+  const safeId = profileId.replace(/[^a-zA-Z0-9_-]/g, '_')
+  return path.join(MEMORY_DIR, `${safeId}.md`)
+}
+
+function loadProfileMemory(profileId: string): string {
+  const file = profileMemoryPath(profileId)
+  try {
+    const data = fs.readFileSync(file, 'utf-8').trim()
+    return data
+  } catch {
+    return ''
+  }
+}
+
+function saveProfileMemory(profileId: string, summary: string): void {
+  const file = profileMemoryPath(profileId)
+  fs.mkdirSync(MEMORY_DIR, { recursive: true })
+  fs.writeFileSync(file, summary, 'utf-8')
+}
+
+function resetProfileMemory(profileId: string): void {
+  const file = profileMemoryPath(profileId)
+  try {
+    fs.unlinkSync(file)
+  } catch {
+    // ignore
+  }
+}
+
+export function readProfileMemory(profileId: string): string {
+  return loadProfileMemory(profileId)
+}
+
+export function writeProfileMemory(profileId: string, summary: string): void {
+  saveProfileMemory(profileId, summary)
+}
+
+export function clearProfileMemory(profileId: string): void {
+  resetProfileMemory(profileId)
 }
 
 function createConnection(profile: Profile): GameConnection {
