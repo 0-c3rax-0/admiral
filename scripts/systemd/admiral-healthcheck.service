@@ -1,0 +1,9 @@
+[Unit]
+Description=Admiral API healthcheck
+After=network-online.target admiral.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/admiral/admiral-healthcheck.sh http://127.0.0.1:3031/api/health

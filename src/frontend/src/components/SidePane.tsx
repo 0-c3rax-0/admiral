@@ -118,6 +118,15 @@ export function SidePane({ profileId, todo: initialTodo, connected, playerData, 
     if (connected) fetchCaptainsLog()
   }, [connected, fetchCaptainsLog])
 
+  // Keep captain's log fresh while connected.
+  useEffect(() => {
+    if (!connected) return
+    const interval = setInterval(() => {
+      fetchCaptainsLog()
+    }, 15 * 60 * 1000)
+    return () => clearInterval(interval)
+  }, [connected, fetchCaptainsLog])
+
   // Poll todo every 10s
   useEffect(() => {
     refreshTodo()
@@ -128,6 +137,22 @@ export function SidePane({ profileId, todo: initialTodo, connected, playerData, 
   const statusMessage = playerData
     ? (playerData.player as Record<string, unknown> | undefined)?.status_message as string | undefined
     : undefined
+  const player = playerData?.player as Record<string, unknown> | undefined
+  const ship = playerData?.ship as Record<string, unknown> | undefined
+  const fallbackStatus = playerData ? [
+    player?.current_poi || player?.current_system
+      ? `Location: ${String(player?.current_poi || player?.current_system)}`
+      : null,
+    typeof player?.credits === 'number'
+      ? `Credits: ${Number(player.credits).toLocaleString()}`
+      : null,
+    (typeof ship?.fuel === 'number' && typeof ship?.max_fuel === 'number')
+      ? `Fuel: ${ship.fuel}/${ship.max_fuel}`
+      : null,
+    (typeof ship?.cargo_used === 'number' && typeof ship?.cargo_capacity === 'number')
+      ? `Cargo: ${ship.cargo_used}/${ship.cargo_capacity}`
+      : null,
+  ].filter(Boolean) as string[] : []
 
   // Vertical resize handler -- adjusts both adjacent sections simultaneously
   const handleResizeStart = useCallback((section: string, e: React.MouseEvent) => {
@@ -212,6 +237,12 @@ export function SidePane({ profileId, todo: initialTodo, connected, playerData, 
           <div className="flex-1 min-h-0 overflow-y-auto px-3 py-2">
             {statusMessage ? (
               <span className="text-xs text-foreground/70">{statusMessage}</span>
+            ) : fallbackStatus.length > 0 ? (
+              <div className="space-y-1">
+                {fallbackStatus.map((line) => (
+                  <div key={line} className="text-xs text-foreground/70">{line}</div>
+                ))}
+              </div>
             ) : (
               <span className="text-[11px] text-muted-foreground/50 italic">No status set</span>
             )}

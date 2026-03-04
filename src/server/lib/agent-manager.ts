@@ -53,12 +53,20 @@ class AgentManager {
     }
   }
 
-  getStatus(profileId: string): { connected: boolean; running: boolean; activity: string } {
+  getStatus(profileId: string): {
+    connected: boolean
+    running: boolean
+    activity: string
+    adaptive_mode: 'normal' | 'soft' | 'high' | 'critical'
+    effective_context_budget_ratio: number | null
+  } {
     const agent = this.agents.get(profileId)
     return {
       connected: agent?.isConnected ?? false,
       running: agent?.isRunning ?? false,
       activity: agent?.activity ?? 'idle',
+      adaptive_mode: agent?.adaptiveMode ?? 'normal',
+      effective_context_budget_ratio: agent?.effectiveContextBudgetRatio ?? null,
     }
   }
 
