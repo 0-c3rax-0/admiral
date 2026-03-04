@@ -88,7 +88,12 @@ type EditingField = 'name' | 'mode' | 'provider' | 'credentials' | null
 interface Props {
   profile: Profile
   providers: Provider[]
-  status: { connected: boolean; running: boolean }
+  status: {
+    connected: boolean
+    running: boolean
+    adaptive_mode?: 'normal' | 'soft' | 'high' | 'critical'
+    effective_context_budget_ratio?: number | null
+  }
   registrationCode?: string
   playerData: Record<string, unknown> | null
   onPlayerData: (data: Record<string, unknown>) => void
@@ -131,6 +136,10 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
 
   const isManual = !profile.provider || profile.provider === 'manual' || !profile.model
   const availableProviders = ['manual', ...providers.filter(p => p.status === 'valid' || p.api_key).map(p => p.id)]
+  const adaptiveMode = status.adaptive_mode || 'normal'
+  const effectiveBudget = typeof status.effective_context_budget_ratio === 'number'
+    ? `${Math.round(status.effective_context_budget_ratio * 100)}%`
+    : null
 
   // Auto-open name edit for new profiles
   useEffect(() => {
@@ -820,6 +829,12 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
               </div>
             )}
           </div>
+        )}
+
+        {status.running && (
+          <span className="text-[10px] text-muted-foreground/60" title="Adaptive memory mode and effective context budget">
+            mem:{adaptiveMode}{effectiveBudget ? ` ${effectiveBudget}` : ''}
+          </span>
         )}
 
         <div className="flex-1" />

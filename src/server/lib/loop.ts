@@ -13,9 +13,13 @@ const CHARS_PER_TOKEN = 2  // Game JSON tokenizes at ~1.7 chars/token; 2 is a sa
 const CONTEXT_BUDGET_RATIO = 0.45  // Trigger compaction earlier to leave room
 const MIN_RECENT_MESSAGES = 10
 const SUMMARY_MAX_TOKENS = 1024
+const MAX_CONTEXT_MESSAGES = 120
 const MAX_LLM_LOG_MESSAGES = 24
 const MAX_LLM_LOG_TEXT_CHARS = 600
 const MAX_LLM_LOG_DETAIL_CHARS = 16_000
+const ADAPTIVE_RSS_SOFT_BYTES = 2_200_000_000
+const ADAPTIVE_RSS_HIGH_BYTES = 2_800_000_000
+const ADAPTIVE_RSS_CRITICAL_BYTES = 3_500_000_000
 
 export interface LoopOptions {
   signal?: AbortSignal
@@ -25,6 +29,7 @@ export interface LoopOptions {
   contextBudgetRatio?: number
   onActivity?: (activity: string) => void
   compactionModel?: Model<any>  // Separate (cheaper) model for compaction summarization
+  onAdaptiveContext?: (info: { mode: 'normal' | 'soft' | 'high' | 'critical'; effectiveRatio: number; rssBytes: number }) => void
 }
 
 export interface CompactionState {
@@ -48,6 +53,7 @@ export async function runAgentTurn(
   while (rounds < maxRounds) {
     if (options?.signal?.aborted) return
 
+    enforceContextMessageCap(context)
     await compactContext(summaryModel, context, compaction, options)
 
     options?.onActivity?.('Waiting for LLM response...')
@@ -171,6 +177,14 @@ function truncateForLog(text: string, max: number): string {
   return `${text.slice(0, max)}\n\n... (truncated for log storage)`
 }
 
+function enforceContextMessageCap(context: Context): void {
+  // Keep the initial mission message at index 0 and trim oldest middle messages first.
+  while (context.messages.length > MAX_CONTEXT_MESSAGES) {
+    if (context.messages.length <= 2) break
+    context.messages.splice(1, 1)
+  }
+}
+
 function summarizeContextForLog(messages: Message[]): Array<Record<string, unknown>> {
   const recent = messages.slice(-MAX_LLM_LOG_MESSAGES)
   return recent.map(msg => {
@@ -291,7 +305,10 @@ async function compactContext(
     }
   }
 
-  const ratio = options?.contextBudgetRatio ?? CONTEXT_BUDGET_RATIO
+  const baseRatio = options?.contextBudgetRatio ?? CONTEXT_BUDGET_RATIO
+  const adaptive = getAdaptiveContextBudget(baseRatio)
+  options?.onAdaptiveContext?.({ mode: adaptive.mode, effectiveRatio: adaptive.ratio, rssBytes: adaptive.rssBytes })
+  const ratio = adaptive.ratio
   const budget = Math.floor(model.contextWindow * ratio)
   const currentTokens = totalMessageTokens(context.messages)
 
@@ -334,6 +351,17 @@ async function compactContext(
   }
 
   context.messages = [context.messages[0], summaryMessage, ...recentMessages]
+}
+
+function getAdaptiveContextBudget(baseRatio: number): { ratio: number; mode: 'normal' | 'soft' | 'high' | 'critical'; rssBytes: number } {
+  const clampedBase = Math.max(0.1, Math.min(baseRatio, 0.9))
+  const rss = process.memoryUsage().rss
+
+  // Keep default behavior under normal memory use, compress earlier under pressure.
+  if (rss >= ADAPTIVE_RSS_CRITICAL_BYTES) return { ratio: Math.min(clampedBase, 0.20), mode: 'critical', rssBytes: rss }
+  if (rss >= ADAPTIVE_RSS_HIGH_BYTES) return { ratio: Math.min(clampedBase, 0.30), mode: 'high', rssBytes: rss }
+  if (rss >= ADAPTIVE_RSS_SOFT_BYTES) return { ratio: Math.min(clampedBase, 0.40), mode: 'soft', rssBytes: rss }
+  return { ratio: clampedBase, mode: 'normal', rssBytes: rss }
 }
 
 async function summarizeViaLLM(

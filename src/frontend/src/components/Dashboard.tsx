@@ -16,6 +16,20 @@ interface Props {
   onShowProviders: () => void
 }
 
+type RuntimeStatus = {
+  connected: boolean
+  running: boolean
+  adaptive_mode?: 'normal' | 'soft' | 'high' | 'critical'
+  effective_context_budget_ratio?: number | null
+}
+
+const MODE_RANK: Record<'normal' | 'soft' | 'high' | 'critical', number> = {
+  normal: 0,
+  soft: 1,
+  high: 2,
+  critical: 3,
+}
+
 export function Dashboard({ profiles: initialProfiles, providers, registrationCode, gameserverUrl, onRefresh, onShowProviders }: Props) {
   const [profiles, setProfiles] = useState(initialProfiles)
   const [searchParams, setSearchParams] = useSearchParams()
@@ -26,7 +40,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
     setSearchParams(params)
   }
   const [autoEditName, setAutoEditName] = useState(false)
-  const [statuses, setStatuses] = useState<Record<string, { connected: boolean; running: boolean }>>({})
+  const [statuses, setStatuses] = useState<Record<string, RuntimeStatus>>({})
   const [playerDataMap, setPlayerDataMap] = useState<Record<string, Record<string, unknown>>>({})
   const [showWizard, setShowWizard] = useState(false)
   const [showTour, setShowTour] = useState(false)
@@ -35,6 +49,17 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
   })
 
   const activeProfile = profiles.find(p => p.id === activeId)
+  const runningProfiles = profiles.filter(p => statuses[p.id]?.running).length
+  const connectedProfiles = profiles.filter(p => statuses[p.id]?.connected).length
+  const globalMode = profiles.reduce<'normal' | 'soft' | 'high' | 'critical'>((worst, p) => {
+    const m = statuses[p.id]?.adaptive_mode || 'normal'
+    return MODE_RANK[m] > MODE_RANK[worst] ? m : worst
+  }, 'normal')
+  const modeClass =
+    globalMode === 'critical' ? 'text-[hsl(var(--smui-red))]' :
+    globalMode === 'high' ? 'text-[hsl(var(--smui-orange))]' :
+    globalMode === 'soft' ? 'text-[hsl(var(--smui-yellow))]' :
+    'text-[hsl(var(--smui-green))]'
 
   // Auto-show tour for new users who haven't seen it
   useEffect(() => {
@@ -52,13 +77,23 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
       try {
         const resp = await fetch('/api/profiles')
         const data: Array<Record<string, unknown>> = await resp.json()
-        const newStatuses: Record<string, { connected: boolean; running: boolean }> = {}
+        const newStatuses: Record<string, RuntimeStatus> = {}
+        const newPlayerData: Record<string, Record<string, unknown>> = {}
         for (const p of data) {
           const id = p.id as string
-          newStatuses[id] = { connected: !!p.connected, running: !!p.running }
+          newStatuses[id] = {
+            connected: !!p.connected,
+            running: !!p.running,
+            adaptive_mode: (p.adaptive_mode as RuntimeStatus['adaptive_mode']) || 'normal',
+            effective_context_budget_ratio: typeof p.effective_context_budget_ratio === 'number' ? p.effective_context_budget_ratio : null,
+          }
+          if (p.gameState && typeof p.gameState === 'object') {
+            newPlayerData[id] = p.gameState as Record<string, unknown>
+          }
         }
         setProfiles(data as unknown as Profile[])
         setStatuses(newStatuses)
+        setPlayerDataMap(prev => ({ ...prev, ...newPlayerData }))
       } catch { /* ignore */ }
     }
     poll()
@@ -125,6 +160,9 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
             ADMIRAL
           </h1>
           <span className="text-[11px] text-muted-foreground tracking-[1.5px] uppercase">SpaceMolt Agent Manager</span>
+          <span className={`text-[10px] tracking-[1.2px] uppercase ${modeClass}`}>
+            Global Mem: {globalMode} | {runningProfiles}/{connectedProfiles} running
+          </span>
         </div>
         <div className="flex items-center gap-3">
           <a
@@ -179,7 +217,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
             <ProfileView
               profile={activeProfile}
               providers={providers}
-              status={statuses[activeProfile.id] || { connected: false, running: false }}
+              status={statuses[activeProfile.id] || { connected: false, running: false, adaptive_mode: 'normal', effective_context_budget_ratio: null }}
               registrationCode={registrationCode}
               playerData={playerDataMap[activeProfile.id] || null}
               onPlayerData={(data) => setPlayerDataMap(prev => ({ ...prev, [activeProfile.id]: data }))}

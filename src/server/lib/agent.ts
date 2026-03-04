@@ -19,6 +19,8 @@ import path from 'path'
 const TURN_INTERVAL = 2000
 const PROMPT_PATH = path.join(process.cwd(), 'prompt.md')
 const MEMORY_DIR = path.join(process.cwd(), 'data', 'memory')
+const AGENTS_DIR = path.join(process.cwd(), 'data', 'agents')
+const CONTINUE_NUDGE_INTERVAL = 6
 
 let _promptMd: string | null = null
 function getPromptMd(): string {
@@ -42,6 +44,8 @@ export class Agent {
   private _activity: string = 'idle'
   private _gameState: Record<string, unknown> | null = null
   private _sessionExpired = false
+  private _adaptiveMode: 'normal' | 'soft' | 'high' | 'critical' = 'normal'
+  private _effectiveContextBudgetRatio: number | null = null
   private memorySummary: string = ''
   private lastSavedMemory: string = ''
   constructor(profileId: string) {
@@ -66,6 +70,14 @@ export class Agent {
 
   get sessionExpired(): boolean {
     return this._sessionExpired
+  }
+
+  get adaptiveMode(): 'normal' | 'soft' | 'high' | 'critical' {
+    return this._adaptiveMode
+  }
+
+  get effectiveContextBudgetRatio(): number | null {
+    return this._effectiveContextBudgetRatio
   }
 
   private setActivity(activity: string) {
@@ -164,6 +176,7 @@ export class Agent {
     }
 
     // Build initial context
+    ensureProfileAgentsFromDirective(profile)
     const systemPrompt = buildSystemPrompt(profile, commandList)
     const context: Context = {
       systemPrompt,
@@ -188,6 +201,7 @@ export class Agent {
 
     const compaction: CompactionState = { summary: this.memorySummary }
     const todo = { value: profile.todo || '' }
+    let idleLoopCount = 0
 
     while (this.running) {
       // Reset abort controller if it was used (e.g. by a nudge wakeup)
@@ -229,6 +243,10 @@ export class Agent {
             signal: this.abortController.signal, apiKey, maxToolRounds, llmTimeoutMs,
             contextBudgetRatio,
             onActivity: (a) => this.setActivity(a),
+            onAdaptiveContext: (info) => {
+              this._adaptiveMode = info.mode
+              this._effectiveContextBudgetRatio = info.effectiveRatio
+            },
           },
           compaction,
         )
@@ -280,14 +298,25 @@ export class Agent {
           this.log('system', `Nudge delivered: ${n.slice(0, 100)}`)
         }
       }
-
-      nudgeParts.push('Continue your mission.')
-
-      context.messages.push({
-        role: 'user' as const,
-        content: nudgeParts.join('\n'),
-        timestamp: Date.now(),
-      })
+      if (nudgeParts.length > 0) {
+        idleLoopCount = 0
+        nudgeParts.push('Continue your mission.')
+        context.messages.push({
+          role: 'user' as const,
+          content: nudgeParts.join('\n'),
+          timestamp: Date.now(),
+        })
+      } else {
+        idleLoopCount++
+        if (idleLoopCount >= CONTINUE_NUDGE_INTERVAL) {
+          idleLoopCount = 0
+          context.messages.push({
+            role: 'user' as const,
+            content: 'Continue your mission.',
+            timestamp: Date.now(),
+          })
+        }
+      }
 
       // Refresh system prompt with latest credentials
       const freshProfile = getProfile(this.profileId)
@@ -383,6 +412,50 @@ function profileMemoryPath(profileId: string): string {
   return path.join(MEMORY_DIR, `${safeId}.md`)
 }
 
+function profileAgentsPath(profileId: string): string {
+  const safeId = profileId.replace(/[^a-zA-Z0-9_-]/g, '_')
+  return path.join(AGENTS_DIR, safeId, 'AGENTS.md')
+}
+
+function readProfileAgents(profileId: string): string {
+  const file = profileAgentsPath(profileId)
+  try {
+    return fs.readFileSync(file, 'utf-8').trim()
+  } catch {
+    return ''
+  }
+}
+
+function writeProfileAgents(profileId: string, profileName: string, content: string): void {
+  const file = profileAgentsPath(profileId)
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  const ts = new Date().toISOString()
+  const body = [
+    `# AGENTS.md for ${profileName}`,
+    '',
+    `<!-- profile-id: ${profileId} -->`,
+    `<!-- updated-at: ${ts} -->`,
+    '',
+    content.trim(),
+    '',
+  ].join('\n')
+  fs.writeFileSync(file, body, 'utf-8')
+}
+
+function ensureProfileAgentsFromDirective(profile: Profile): void {
+  const existing = readProfileAgents(profile.id)
+  if (existing) return
+  const directive = (profile.directive || '').trim()
+  if (!directive) return
+  writeProfileAgents(profile.id, profile.name, directive)
+}
+
+function resolveMissionDirective(profile: Profile): string {
+  const fromAgents = readProfileAgents(profile.id)
+  if (fromAgents) return fromAgents
+  return profile.directive || 'Play the game. Mine ore, sell it, and grow stronger.'
+}
+
 function loadProfileMemory(profileId: string): string {
   const file = profileMemoryPath(profileId)
   try {
@@ -463,7 +536,7 @@ function createConnection(profile: Profile): GameConnection {
 
 function buildSystemPrompt(profile: Profile, commandList: string): string {
   const promptMd = getPromptMd()
-  const directive = profile.directive || 'Play the game. Mine ore, sell it, and grow stronger.'
+  const directive = resolveMissionDirective(profile)
 
   let credentials: string
   if (profile.username && profile.password) {

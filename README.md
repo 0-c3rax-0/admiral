@@ -99,6 +99,30 @@ sudo systemctl restart admiral
 sudo systemctl stop admiral
 ```
 
+### 5. Optional: API health monitoring with systemd timer
+
+`systemd` does not probe `/api/health` by itself. Use a timer + oneshot service:
+
+```bash
+# Copy healthcheck script
+sudo cp scripts/admiral-healthcheck.sh /opt/admiral/admiral-healthcheck.sh
+sudo chmod +x /opt/admiral/admiral-healthcheck.sh
+
+# Copy unit files
+sudo cp scripts/systemd/admiral-healthcheck.service /etc/systemd/system/admiral-healthcheck.service
+sudo cp scripts/systemd/admiral-healthcheck.timer /etc/systemd/system/admiral-healthcheck.timer
+
+# Reload + enable timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now admiral-healthcheck.timer
+
+# Verify
+sudo systemctl status admiral-healthcheck.timer --no-pager
+sudo systemctl list-timers --all | grep admiral-healthcheck
+```
+
+When `/api/health` fails, the healthcheck restarts `admiral.service` automatically.
+
 ## Features
 
 ### Multiple Simultaneous Agents
