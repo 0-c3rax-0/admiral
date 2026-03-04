@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react'
-import { Settings, Sun, Moon, Github, AlertTriangle, CircleHelp } from 'lucide-react'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { Settings, Sun, Moon, Github, AlertTriangle, CircleHelp, BarChart3, X } from 'lucide-react'
 import { useSearchParams } from 'react-router'
 import type { Profile, Provider } from '@/types'
 import { ProfileList } from './ProfileList'
@@ -44,6 +44,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
   const [playerDataMap, setPlayerDataMap] = useState<Record<string, Record<string, unknown>>>({})
   const [showWizard, setShowWizard] = useState(false)
   const [showTour, setShowTour] = useState(false)
+  const [showStats, setShowStats] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     try { return localStorage.getItem('admiral-sidebar-open') !== 'false' } catch { return true }
   })
@@ -60,6 +61,16 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
     globalMode === 'high' ? 'text-[hsl(var(--smui-orange))]' :
     globalMode === 'soft' ? 'text-[hsl(var(--smui-yellow))]' :
     'text-[hsl(var(--smui-green))]'
+  const gameTotals = profiles.reduce((acc, p) => {
+    const pd = playerDataMap[p.id]
+    const player = pd?.player as Record<string, unknown> | undefined
+    const stats = (player?.stats as Record<string, unknown> | undefined) || {}
+    acc.credits += Number(player?.credits || 0)
+    acc.oreMined += Number(stats.ore_mined || 0)
+    acc.trades += Number(stats.trades_completed || 0)
+    acc.systemsExplored += Number(stats.systems_explored || 0)
+    return acc
+  }, { credits: 0, oreMined: 0, trades: 0, systemsExplored: 0 })
 
   // Auto-show tour for new users who haven't seen it
   useEffect(() => {
@@ -186,6 +197,14 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
             <CircleHelp size={13} />
           </button>
           <button
+            onClick={() => setShowStats(true)}
+            className="flex items-center gap-1.5 text-xs text-muted-foreground uppercase tracking-wider px-2.5 py-1.5 hover:text-foreground transition-colors"
+            title="Runtime stats"
+          >
+            <BarChart3 size={13} />
+            Stats
+          </button>
+          <button
             onClick={onShowProviders}
             className="flex items-center gap-1.5 text-xs text-muted-foreground uppercase tracking-wider px-2.5 py-1.5 hover:text-foreground transition-colors"
           >
@@ -295,6 +314,56 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
             onShowProviders()
           }}
         />
+      )}
+
+      {showStats && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowStats(false)}>
+          <div className="w-full max-w-md border border-border bg-card shadow-lg" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
+              <span className="font-jetbrains text-xs font-semibold tracking-[1.5px] text-primary uppercase">Runtime Stats</span>
+              <button onClick={() => setShowStats(false)} className="text-muted-foreground hover:text-foreground transition-colors">
+                <X size={14} />
+              </button>
+            </div>
+            <div className="px-4 py-3 space-y-2 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Profiles</span>
+                <span className="text-foreground">{profiles.length}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Connected</span>
+                <span className="text-foreground">{connectedProfiles}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Running</span>
+                <span className="text-foreground">{runningProfiles}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Global Mem Mode</span>
+                <span className={`uppercase ${modeClass}`}>{globalMode}</span>
+              </div>
+              <div className="mt-2 border-t border-border/60 pt-2">
+                <div className="text-[10px] text-muted-foreground uppercase tracking-[1.2px] mb-1.5">Game Totals</div>
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Credits</span>
+                  <span className="text-foreground">{gameTotals.credits.toLocaleString()}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Ore Mined</span>
+                  <span className="text-foreground">{gameTotals.oreMined.toLocaleString()}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Trades</span>
+                  <span className="text-foreground">{gameTotals.trades.toLocaleString()}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Systems Explored</span>
+                  <span className="text-foreground">{gameTotals.systemsExplored.toLocaleString()}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Tour */}
