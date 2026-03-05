@@ -87,7 +87,11 @@ profiles.post('/:id/connect', async (c) => {
     }
     return c.json(agentManager.getStatus(id))
   } catch (err) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
+    const msg = err instanceof Error ? err.message : String(err)
+    if (msg.startsWith('CONNECT_THROTTLED:')) {
+      return c.json({ error: msg.replace('CONNECT_THROTTLED:', '').trim() }, 429)
+    }
+    return c.json({ error: msg }, 500)
   }
 })
 

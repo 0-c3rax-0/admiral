@@ -51,22 +51,55 @@ class AgentManager {
   private agents = new Map<string, Agent>()
   private stopRequested = new Set<string>()
   private backoff = new Map<string, { attempts: number; timer: ReturnType<typeof setTimeout> | null }>()
+  private connecting = new Map<string, Promise<Agent>>()
+  private lastConnectAtByProfile = new Map<string, number>()
+  private lastConnectAtGlobal = 0
+
+  private static readonly PROFILE_CONNECT_COOLDOWN_MS = 10_000
+  private static readonly GLOBAL_CONNECT_COOLDOWN_MS = 2_000
 
   getAgent(profileId: string): Agent | undefined {
     return this.agents.get(profileId)
   }
 
   async connect(profileId: string): Promise<Agent> {
+    const now = Date.now()
+    const lastProfile = this.lastConnectAtByProfile.get(profileId) || 0
+    if (now - lastProfile < AgentManager.PROFILE_CONNECT_COOLDOWN_MS) {
+      const waitMs = AgentManager.PROFILE_CONNECT_COOLDOWN_MS - (now - lastProfile)
+      throw new Error(`CONNECT_THROTTLED: Profile connect cooldown active (${Math.ceil(waitMs / 1000)}s)`)
+    }
+    if (now - this.lastConnectAtGlobal < AgentManager.GLOBAL_CONNECT_COOLDOWN_MS) {
+      const waitMs = AgentManager.GLOBAL_CONNECT_COOLDOWN_MS - (now - this.lastConnectAtGlobal)
+      throw new Error(`CONNECT_THROTTLED: Global connect cooldown active (${Math.ceil(waitMs / 1000)}s)`)
+    }
+
     // If already connected, return existing
     let agent = this.agents.get(profileId)
     if (agent?.isConnected) return agent
+    const inFlight = this.connecting.get(profileId)
+    if (inFlight) return inFlight
 
-    // Create new agent
-    agent = new Agent(profileId)
-    this.agents.set(profileId, agent)
+    // Create new agent and dedupe concurrent connect attempts
+    const connectPromise = (async () => {
+      this.lastConnectAtByProfile.set(profileId, Date.now())
+      this.lastConnectAtGlobal = Date.now()
 
-    await agent.connect()
-    return agent
+      agent = this.agents.get(profileId)
+      if (!agent) {
+        agent = new Agent(profileId)
+        this.agents.set(profileId, agent)
+      }
+      await agent.connect()
+      return agent
+    })()
+
+    this.connecting.set(profileId, connectPromise)
+    try {
+      return await connectPromise
+    } finally {
+      this.connecting.delete(profileId)
+    }
   }
 
   async startLLM(profileId: string): Promise<void> {

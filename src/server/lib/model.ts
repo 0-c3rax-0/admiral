@@ -36,8 +36,10 @@ export function resolveModel(modelStr: string): { model: Model<any>; apiKey?: st
   const { provider, modelId: rawModelId } = parseModelString(modelStr)
 
   let modelId = rawModelId
-  // Normalize accidental double-prefixes like "nvidia/nvidia/model-id".
-  if (modelId.startsWith(`${provider}/`)) {
+  // Normalize only true double-prefixes like "nvidia/nvidia/model-id".
+  // Keep single provider prefixes (for providers that require them, e.g. NVIDIA).
+  const doublePrefix = `${provider}/${provider}/`
+  if (modelId.startsWith(doublePrefix)) {
     modelId = modelId.slice(provider.length + 1)
   }
   // OpenRouter expects provider-prefixed model ids.
