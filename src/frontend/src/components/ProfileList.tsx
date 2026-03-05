@@ -13,6 +13,7 @@ interface Props {
 const MODE_LABELS: Record<string, string> = {
   http: 'HTTP',
   websocket: 'WS',
+  websocket_v2: 'WS2',
   mcp: 'MCP',
 }
 

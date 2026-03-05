@@ -47,11 +47,19 @@ export class HttpV2Connection implements GameConnection {
   }
 
   private async fetchToolMapping(): Promise<void> {
+    this.commandRouteMap.clear()
     const spec = await fetchOpenApiSpec(`${this.baseUrl}/openapi.json`, this.specLog)
     if (!spec) return
 
     const allPaths = Object.keys(spec.paths || {})
     const toolPrefixes = new Set<string>()
+    const routeCandidates: Map<string, string[]> = new Map()
+
+    const addCandidate = (key: string, route: string) => {
+      const list = routeCandidates.get(key) || []
+      if (!list.includes(route)) list.push(route)
+      routeCandidates.set(key, list)
+    }
 
     for (const p of allPaths) {
       const seg = p.replace('/api/v2/', '')
@@ -64,18 +72,16 @@ export class HttpV2Connection implements GameConnection {
         toolPrefixes.add(tool)
         const route = `${tool}/${action}`
         // v1-style short name (action) -> route
-        if (!this.commandRouteMap.has(action)) {
-          this.commandRouteMap.set(action, route)
-        }
+        addCandidate(action, route)
         // v2 operationId -> route
         if (operationId) {
-          this.commandRouteMap.set(operationId, route)
+          addCandidate(operationId, route)
         }
       } else if (parts.length === 1 && seg !== 'session' && seg !== 'notifications') {
         // 1-part path: tool IS the command (e.g. spacemolt_catalog)
-        this.commandRouteMap.set(seg, seg)
+        addCandidate(seg, seg)
         if (operationId && operationId !== seg) {
-          this.commandRouteMap.set(operationId, seg)
+          addCandidate(operationId, seg)
         }
       }
     }
@@ -89,13 +95,31 @@ export class HttpV2Connection implements GameConnection {
       for (const prefix of sortedPrefixes) {
         if (seg.startsWith(prefix + '_') && seg.length > prefix.length + 1) {
           const shortName = seg.slice(prefix.length + 1)
-          if (!this.commandRouteMap.has(shortName)) {
-            this.commandRouteMap.set(shortName, seg)
-          }
+          addCandidate(shortName, seg)
           break
         }
       }
     }
+
+    for (const [key, routes] of routeCandidates.entries()) {
+      this.commandRouteMap.set(key, this.pickPreferredRoute(key, routes))
+    }
+  }
+
+  private pickPreferredRoute(command: string, routes: string[]): string {
+    if (routes.length <= 1) return routes[0]
+
+    const factionPreferred = command.startsWith('faction_')
+    const preferredTool = factionPreferred ? 'spacemolt_faction' : 'spacemolt'
+    const byPreferredTool = routes.find(r => r === preferredTool || r.startsWith(`${preferredTool}/`))
+    if (byPreferredTool) return byPreferredTool
+
+    const nonFaction = routes.filter(r => !r.startsWith('spacemolt_faction/'))
+    const pool = factionPreferred
+      ? routes.filter(r => r.startsWith('spacemolt_faction/'))
+      : (nonFaction.length > 0 ? nonFaction : routes)
+
+    return [...pool].sort((a, b) => a.localeCompare(b))[0]
   }
 
   async login(username: string, password: string): Promise<LoginResult> {

@@ -26,7 +26,7 @@ export interface CommandResult {
 export type NotificationHandler = (notification: unknown) => void
 
 export interface GameConnection {
-  readonly mode: 'http' | 'http_v2' | 'websocket' | 'mcp' | 'mcp_v2'
+  readonly mode: 'http' | 'http_v2' | 'websocket' | 'websocket_v2' | 'mcp' | 'mcp_v2'
 
   connect(): Promise<void>
   login(username: string, password: string): Promise<LoginResult>
