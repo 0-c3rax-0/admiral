@@ -3,6 +3,7 @@ import type { Model, Context, AssistantMessage, ToolCall, Message } from '@mario
 import type { GameConnection } from './connections/interface'
 import type { LogFn } from './tools'
 import { executeTool } from './tools'
+import { getLlmRateWindowStats, getPreference } from './db'
 
 const DEFAULT_MAX_TOOL_ROUNDS = 30
 const MAX_RETRIES = 3
@@ -62,7 +63,7 @@ export async function runAgentTurn(
     options?.onActivity?.('Waiting for LLM response...')
     let response: AssistantMessage
     try {
-      response = await completeWithRetry(model, context, log, options)
+      response = await completeWithRetry(model, context, profileId, log, options)
     } catch (err) {
       log('error', `LLM call failed: ${err instanceof Error ? err.message : String(err)}`, JSON.stringify({
         model: { name: (model as any).name || 'unknown', contextWindow: model.contextWindow },
@@ -408,6 +409,7 @@ async function summarizeViaLLM(
 async function completeWithRetry(
   model: Model<any>,
   context: Context,
+  profileId: string,
   log: LogFn,
   options?: LoopOptions,
 ): Promise<AssistantMessage> {
@@ -418,6 +420,27 @@ async function completeWithRetry(
   let useFailover = !primaryKey && !!failoverKey
 
   const timeoutMs = options?.llmTimeoutMs || DEFAULT_LLM_TIMEOUT_MS
+  if (is429PredictionEnabled()) {
+    const risk = predict429Risk(profileId)
+    if (risk.level !== 'LOW') {
+      log(
+        'system',
+        `429 risk ${risk.level}: ${risk.reason}`,
+        JSON.stringify(
+          {
+            profileId,
+            callsLast60s: risk.callsLast60s,
+            errors429Last60s: risk.errors429Last60s,
+            errors429Last300s: risk.errors429Last300s,
+            failoverActivationsLast300s: risk.failoverActivationsLast300s,
+            recommendation: risk.recommendation,
+          },
+          null,
+          2,
+        ),
+      )
+    }
+  }
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
@@ -484,6 +507,53 @@ async function completeWithRetry(
   }
 
   throw lastError || new Error('LLM call failed after retries')
+}
+
+type RateRiskLevel = 'LOW' | 'MEDIUM' | 'HIGH'
+
+interface RateRiskAssessment {
+  level: RateRiskLevel
+  reason: string
+  recommendation: string
+  callsLast60s: number
+  errors429Last60s: number
+  errors429Last300s: number
+  failoverActivationsLast300s: number
+}
+
+function predict429Risk(profileId: string): RateRiskAssessment {
+  const s = getLlmRateWindowStats(profileId)
+
+  if (s.errors429Last60s >= 1 || s.callsLast60s >= 8) {
+    return {
+      level: 'HIGH',
+      reason: `recent 429=${s.errors429Last60s} in 60s or call rate=${s.callsLast60s}/min`,
+      recommendation: 'Throttle this profile for 15-30s before next LLM call.',
+      ...s,
+    }
+  }
+
+  if (s.errors429Last300s >= 2 || s.failoverActivationsLast300s >= 1 || s.callsLast60s >= 5) {
+    return {
+      level: 'MEDIUM',
+      reason: `elevated pressure (calls=${s.callsLast60s}/min, 429/5m=${s.errors429Last300s}, failovers/5m=${s.failoverActivationsLast300s})`,
+      recommendation: 'Reduce call frequency and prefer shorter turns for 1-2 minutes.',
+      ...s,
+    }
+  }
+
+  return {
+    level: 'LOW',
+    reason: 'stable call rate and no recent 429 signals',
+    recommendation: 'No throttling needed.',
+    ...s,
+  }
+}
+
+function is429PredictionEnabled(): boolean {
+  const pref = getPreference('predict_429_enabled')
+  if (pref == null || pref === '') return true
+  return pref === 'true'
 }
 
 function sleep(ms: number): Promise<void> {

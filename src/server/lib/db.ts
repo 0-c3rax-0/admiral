@@ -278,6 +278,55 @@ export function clearLogs(profileId: string): void {
   getDb().query('DELETE FROM log_entries WHERE profile_id = ?').run(profileId)
 }
 
+export interface LlmRateWindowStats {
+  callsLast60s: number
+  errors429Last60s: number
+  errors429Last300s: number
+  failoverActivationsLast300s: number
+}
+
+export function getLlmRateWindowStats(profileId: string): LlmRateWindowStats {
+  const row = getDb().query(
+    `SELECT
+      SUM(CASE
+        WHEN type = 'llm_call' AND timestamp >= datetime('now', '-60 seconds')
+        THEN 1 ELSE 0
+      END) AS calls_last_60s,
+      SUM(CASE
+        WHEN type = 'error'
+          AND (summary LIKE '%429%' OR detail LIKE '%429%')
+          AND timestamp >= datetime('now', '-60 seconds')
+        THEN 1 ELSE 0
+      END) AS errors_429_last_60s,
+      SUM(CASE
+        WHEN type = 'error'
+          AND (summary LIKE '%429%' OR detail LIKE '%429%')
+          AND timestamp >= datetime('now', '-300 seconds')
+        THEN 1 ELSE 0
+      END) AS errors_429_last_300s,
+      SUM(CASE
+        WHEN type = 'system'
+          AND summary LIKE 'Switching to failover API key%'
+          AND timestamp >= datetime('now', '-300 seconds')
+        THEN 1 ELSE 0
+      END) AS failover_activations_last_300s
+    FROM log_entries
+    WHERE profile_id = ?`
+  ).get(profileId) as {
+    calls_last_60s: number | null
+    errors_429_last_60s: number | null
+    errors_429_last_300s: number | null
+    failover_activations_last_300s: number | null
+  } | undefined
+
+  return {
+    callsLast60s: Number(row?.calls_last_60s ?? 0),
+    errors429Last60s: Number(row?.errors_429_last_60s ?? 0),
+    errors429Last300s: Number(row?.errors_429_last_300s ?? 0),
+    failoverActivationsLast300s: Number(row?.failover_activations_last_300s ?? 0),
+  }
+}
+
 // --- Stats CRUD ---
 
 export interface StatsSnapshotInput {

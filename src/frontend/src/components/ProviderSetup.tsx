@@ -42,6 +42,8 @@ interface Props {
   onStartupAutoconnectMinDelaySecChange: (seconds: number) => void
   startupAutoconnectMaxDelaySec: number
   onStartupAutoconnectMaxDelaySecChange: (seconds: number) => void
+  predict429Enabled: boolean
+  onPredict429EnabledChange: (enabled: boolean) => void
   onClose: () => void
 }
 
@@ -61,6 +63,8 @@ export function ProviderSetup({
   onStartupAutoconnectMinDelaySecChange,
   startupAutoconnectMaxDelaySec,
   onStartupAutoconnectMaxDelaySecChange,
+  predict429Enabled,
+  onPredict429EnabledChange,
   onClose,
 }: Props) {
   const [providers, setProviders] = useState(initialProviders)
@@ -313,6 +317,17 @@ export function ProviderSetup({
                   className="w-20 h-7 text-xs"
                 />
                 <span className="text-[11px] text-muted-foreground">seconds between accounts</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground w-28 shrink-0">429 prediction</span>
+                <label className="inline-flex items-center gap-2 text-xs text-foreground cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={predict429Enabled}
+                    onChange={e => onPredict429EnabledChange(e.target.checked)}
+                  />
+                  Enable risk hints in logs
+                </label>
               </div>
             </div>
           </div>
