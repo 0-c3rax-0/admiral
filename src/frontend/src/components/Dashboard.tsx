@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Settings, Sun, Moon, Github, AlertTriangle, CircleHelp, BarChart3, X } from 'lucide-react'
+import { Settings, Sun, Moon, Github, AlertTriangle, CircleHelp, BarChart3, MessageSquare, X } from 'lucide-react'
 import { useSearchParams } from 'react-router'
 import type { Profile, Provider } from '@/types'
 import { ProfileList } from './ProfileList'
@@ -21,6 +21,19 @@ type RuntimeStatus = {
   running: boolean
   adaptive_mode?: 'normal' | 'soft' | 'high' | 'critical'
   effective_context_budget_ratio?: number | null
+}
+
+type StatsSnapshot = {
+  ts: string
+  credits: number | null
+  ore_mined: number | null
+  trades_completed: number | null
+  systems_explored: number | null
+}
+
+type StatsEvent = {
+  ts: string
+  type: string
 }
 
 const MODE_RANK: Record<'normal' | 'soft' | 'high' | 'critical', number> = {
@@ -45,6 +58,17 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
   const [showWizard, setShowWizard] = useState(false)
   const [showTour, setShowTour] = useState(false)
   const [showStats, setShowStats] = useState(false)
+  const [connectingAll, setConnectingAll] = useState(false)
+  const [nudgingAll, setNudgingAll] = useState(false)
+  const [statsLoading, setStatsLoading] = useState(false)
+  const [statsDbSummary, setStatsDbSummary] = useState<{
+    snapshotCount: number
+    profilesWithData: number
+    lastSnapshotTs: string | null
+    creditsDelta1h: number
+    oreDelta1h: number
+    events24h: number
+  } | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     try { return localStorage.getItem('admiral-sidebar-open') !== 'false' } catch { return true }
   })
@@ -160,6 +184,118 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
     }
   }
 
+  async function handleConnectAll() {
+    const targets = profiles.filter(p => !statuses[p.id]?.connected)
+    if (targets.length === 0) return
+    setConnectingAll(true)
+    try {
+      await Promise.allSettled(
+        targets.map(async (p) => {
+          const isManual = !p.provider || p.provider === 'manual'
+          const action = isManual ? 'connect' : 'connect_llm'
+          await fetch(`/api/profiles/${p.id}/connect`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action }),
+          })
+        })
+      )
+      await refreshProfiles()
+      onRefresh()
+    } finally {
+      setConnectingAll(false)
+    }
+  }
+
+  async function handleNudgeAll() {
+    const runningTargets = profiles.filter(p => statuses[p.id]?.running)
+    if (runningTargets.length === 0) return
+
+    const message = window.prompt('Nudge message for all running agents:')
+    if (!message?.trim()) return
+
+    setNudgingAll(true)
+    try {
+      await Promise.allSettled(
+        runningTargets.map(async (p) => {
+          await fetch(`/api/profiles/${p.id}/nudge`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: message.trim() }),
+          })
+        })
+      )
+    } finally {
+      setNudgingAll(false)
+    }
+  }
+
+  async function handleOpenStats() {
+    setShowStats(true)
+    setStatsLoading(true)
+    try {
+      const now = Date.now()
+      const oneHourAgo = now - (60 * 60 * 1000)
+      const dayAgo = now - (24 * 60 * 60 * 1000)
+
+      const byProfile = await Promise.allSettled(
+        profiles.map(async (p) => {
+          const [snapResp, eventResp] = await Promise.all([
+            fetch(`/api/stats/${p.id}/snapshots?limit=240`),
+            fetch(`/api/stats/${p.id}/events?limit=200`),
+          ])
+          const snapJson = await snapResp.json().catch(() => ({ snapshots: [] as StatsSnapshot[] }))
+          const eventJson = await eventResp.json().catch(() => ({ events: [] as StatsEvent[] }))
+          return {
+            snapshots: (snapJson.snapshots || []) as StatsSnapshot[],
+            events: (eventJson.events || []) as StatsEvent[],
+          }
+        })
+      )
+
+      let snapshotCount = 0
+      let profilesWithData = 0
+      let lastSnapshotTs: string | null = null
+      let creditsDelta1h = 0
+      let oreDelta1h = 0
+      let events24h = 0
+
+      const num = (v: number | null | undefined): number => typeof v === 'number' && Number.isFinite(v) ? v : 0
+
+      for (const item of byProfile) {
+        if (item.status !== 'fulfilled') continue
+        const snapshots = item.value.snapshots
+        const events = item.value.events
+        snapshotCount += snapshots.length
+        if (snapshots.length > 0) profilesWithData++
+
+        const newest = snapshots[0]
+        if (newest?.ts && (!lastSnapshotTs || new Date(newest.ts).getTime() > new Date(lastSnapshotTs).getTime())) {
+          lastSnapshotTs = newest.ts
+        }
+
+        if (snapshots.length > 0) {
+          const anchor = snapshots.find(s => new Date(s.ts).getTime() <= oneHourAgo) || snapshots[snapshots.length - 1]
+          creditsDelta1h += num(newest?.credits) - num(anchor?.credits)
+          oreDelta1h += num(newest?.ore_mined) - num(anchor?.ore_mined)
+        }
+
+        events24h += events.filter(e => new Date(e.ts).getTime() >= dayAgo).length
+      }
+
+      setStatsDbSummary({
+        snapshotCount,
+        profilesWithData,
+        lastSnapshotTs,
+        creditsDelta1h,
+        oreDelta1h,
+        events24h,
+      })
+    } finally {
+      setStatsLoading(false)
+    }
+  }
+
   const hasValidProvider = providers.some(p => p.status === 'valid' || p.api_key)
 
   return (
@@ -197,12 +333,29 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
             <CircleHelp size={13} />
           </button>
           <button
-            onClick={() => setShowStats(true)}
+            onClick={handleOpenStats}
             className="flex items-center gap-1.5 text-xs text-muted-foreground uppercase tracking-wider px-2.5 py-1.5 hover:text-foreground transition-colors"
             title="Runtime stats"
           >
             <BarChart3 size={13} />
             Stats
+          </button>
+          <button
+            onClick={handleConnectAll}
+            disabled={connectingAll || profiles.length === 0 || connectedProfiles >= profiles.length}
+            className="flex items-center gap-1.5 text-xs text-muted-foreground uppercase tracking-wider px-2.5 py-1.5 hover:text-foreground transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            title="Connect all disconnected profiles"
+          >
+            {connectingAll ? 'Connecting...' : 'Connect All'}
+          </button>
+          <button
+            onClick={handleNudgeAll}
+            disabled={nudgingAll || runningProfiles === 0}
+            className="flex items-center gap-1.5 text-xs text-muted-foreground uppercase tracking-wider px-2.5 py-1.5 hover:text-foreground transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            title="Send a nudge to all running agents"
+          >
+            <MessageSquare size={13} />
+            {nudgingAll ? 'Nudging...' : 'Nudge All'}
           </button>
           <button
             onClick={onShowProviders}
@@ -360,6 +513,46 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
                   <span className="text-muted-foreground">Systems Explored</span>
                   <span className="text-foreground">{gameTotals.systemsExplored.toLocaleString()}</span>
                 </div>
+              </div>
+              <div className="mt-2 border-t border-border/60 pt-2">
+                <div className="text-[10px] text-muted-foreground uppercase tracking-[1.2px] mb-1.5">DB Telemetry</div>
+                {statsLoading && (
+                  <div className="text-[11px] text-muted-foreground">Loading snapshot metrics...</div>
+                )}
+                {!statsLoading && statsDbSummary && (
+                  <>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Snapshots</span>
+                      <span className="text-foreground">{statsDbSummary.snapshotCount.toLocaleString()}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Profiles With Data</span>
+                      <span className="text-foreground">{statsDbSummary.profilesWithData}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Credits (1h)</span>
+                      <span className={statsDbSummary.creditsDelta1h >= 0 ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-red))]'}>
+                        {statsDbSummary.creditsDelta1h >= 0 ? '+' : ''}{Math.round(statsDbSummary.creditsDelta1h).toLocaleString()}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Ore Mined (1h)</span>
+                      <span className={statsDbSummary.oreDelta1h >= 0 ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-red))]'}>
+                        {statsDbSummary.oreDelta1h >= 0 ? '+' : ''}{Math.round(statsDbSummary.oreDelta1h).toLocaleString()}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Events (24h)</span>
+                      <span className="text-foreground">{statsDbSummary.events24h.toLocaleString()}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Last Snapshot</span>
+                      <span className="text-foreground">
+                        {statsDbSummary.lastSnapshotTs ? new Date(statsDbSummary.lastSnapshotTs).toLocaleString() : 'n/a'}
+                      </span>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
           </div>

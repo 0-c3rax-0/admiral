@@ -183,6 +183,34 @@ class AgentManager {
     }
   }
 
+  async sampleProfileStats(profileId: string): Promise<{
+    connected: boolean
+    running: boolean
+    adaptive_mode: 'normal' | 'soft' | 'high' | 'critical'
+    effective_context_budget_ratio: number | null
+    credits: number | null
+    ore_mined: number | null
+    trades_completed: number | null
+    systems_explored: number | null
+  }> {
+    const status = this.getStatus(profileId)
+    const agent = this.agents.get(profileId)
+    const game = status.connected && agent
+      ? await agent.sampleGameStatus()
+      : null
+
+    return {
+      connected: status.connected,
+      running: status.running,
+      adaptive_mode: status.adaptive_mode,
+      effective_context_budget_ratio: status.effective_context_budget_ratio,
+      credits: game?.credits ?? null,
+      ore_mined: game?.ore_mined ?? null,
+      trades_completed: game?.trades_completed ?? null,
+      systems_explored: game?.systems_explored ?? null,
+    }
+  }
+
   listActive(): string[] {
     return Array.from(this.agents.entries())
       .filter(([, agent]) => agent.isConnected)
