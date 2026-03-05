@@ -27,7 +27,7 @@ export async function detectLocalProviders(customUrls?: Record<string, string>):
     if (resp.ok) {
       const existing = getProvider('ollama')
       const baseUrl = `${ollamaUrl}/v1`
-      upsertProvider('ollama', existing?.api_key || '', baseUrl, 'valid')
+      upsertProvider('ollama', existing?.api_key || '', existing?.failover_api_key || '', baseUrl, 'valid')
       results.push({ id: 'ollama', status: 'valid', baseUrl })
     } else {
       results.push({ id: 'ollama', status: 'unreachable', baseUrl: `${ollamaUrl}/v1` })
@@ -43,7 +43,7 @@ export async function detectLocalProviders(customUrls?: Record<string, string>):
     if (resp.ok) {
       const existing = getProvider('lmstudio')
       const baseUrl = `${lmStudioUrl}/v1`
-      upsertProvider('lmstudio', existing?.api_key || '', baseUrl, 'valid')
+      upsertProvider('lmstudio', existing?.api_key || '', existing?.failover_api_key || '', baseUrl, 'valid')
       results.push({ id: 'lmstudio', status: 'valid', baseUrl })
     } else {
       results.push({ id: 'lmstudio', status: 'unreachable', baseUrl: `${lmStudioUrl}/v1` })

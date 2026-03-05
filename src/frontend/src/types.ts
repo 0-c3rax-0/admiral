@@ -1,6 +1,7 @@
 export interface Provider {
   id: string
   api_key: string
+  failover_api_key: string
   base_url: string
   status: 'valid' | 'invalid' | 'unknown' | 'unreachable'
 }
@@ -14,6 +15,8 @@ export interface Profile {
   player_id: string | null
   provider: string | null
   model: string | null
+  failover_provider: string | null
+  failover_model: string | null
   directive: string
   todo: string
   context_budget: number | null
