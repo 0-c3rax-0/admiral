@@ -5,6 +5,7 @@ import type { Profile } from '../../shared/types'
 import { HttpConnection } from './connections/http'
 import { HttpV2Connection } from './connections/http_v2'
 import { WebSocketConnection } from './connections/websocket'
+import { WebSocketV2Connection } from './connections/websocket_v2'
 import { McpConnection } from './connections/mcp'
 import { McpV2Connection } from './connections/mcp_v2'
 import { resolveModel } from './model'
@@ -522,6 +523,8 @@ function createConnection(profile: Profile): GameConnection {
   switch (profile.connection_mode) {
     case 'websocket':
       return new WebSocketConnection(profile.server_url)
+    case 'websocket_v2':
+      return new WebSocketV2Connection(profile.server_url)
     case 'mcp':
       return new McpConnection(profile.server_url)
     case 'mcp_v2':
@@ -567,6 +570,8 @@ ${credentials}
 
 ## Available Game Commands
 Use the "game" tool with a command name and args. Example: game(command="mine", args={})
+Treat the command list below as authoritative. It is generated from a locally cached OpenAPI spec (https://www.spacemolt.com/api/openapi.json) and may be refreshed from server.
+Before calling "game", verify the command name exists in this list. Do not invent aliases or typos (for example, never use "get_receipe").
 ${commandList}
 
 ## Local Tools (call directly by name -- NOT through "game")
@@ -586,6 +591,7 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - Action commands cost 1 tick (10 seconds).
 - Always check fuel before traveling and cargo space before mining.
 - Be social -- chat with players you meet.
+- Prioritize faction coordination: use faction chat frequently to share status, plans, threats, trade needs, and requests for support.
 - When starting fresh: undock -> travel to asteroid belt -> mine -> travel back -> dock -> sell -> refuel -> repeat.
 `
 }

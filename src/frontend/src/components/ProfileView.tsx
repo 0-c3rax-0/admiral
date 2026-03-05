@@ -71,6 +71,7 @@ const CONNECTION_MODE_LABELS: Record<string, string> = {
   http: 'HTTP v1',
   http_v2: 'HTTP v2',
   websocket: 'WS',
+  websocket_v2: 'WS v2',
   mcp: 'MCP v1',
   mcp_v2: 'MCP v2',
 }
@@ -79,6 +80,7 @@ const CONNECTION_MODES: { value: string; label: string }[] = [
   { value: 'http', label: 'HTTP API v1' },
   { value: 'http_v2', label: 'HTTP API v2' },
   { value: 'websocket', label: 'WebSocket' },
+  { value: 'websocket_v2', label: 'WebSocket v2' },
   { value: 'mcp', label: 'MCP v1' },
   { value: 'mcp_v2', label: 'MCP v2' },
 ]

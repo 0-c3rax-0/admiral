@@ -20,8 +20,8 @@ export class McpV2Connection implements GameConnection {
   private notificationHandlers: NotificationHandler[] = []
   private connected = false
   private jsonRpcId = 0
-  /** Map from action name to v2 tool name */
-  private actionToTool: Map<string, string> = new Map()
+  /** Map from action name to one or more candidate v2 tools */
+  private actionToTools: Map<string, string[]> = new Map()
   /** Discovered v2 tool definitions */
   private v2Tools: V2ToolDef[] = []
 
@@ -55,6 +55,9 @@ export class McpV2Connection implements GameConnection {
     const result = resp.result as { tools?: unknown[] }
     if (!Array.isArray(result.tools)) return
 
+    this.v2Tools = []
+    this.actionToTools.clear()
+
     for (const tool of result.tools) {
       const t = tool as Record<string, unknown>
       const name = t.name as string
@@ -73,18 +76,18 @@ export class McpV2Connection implements GameConnection {
 
       // Build reverse map: action name -> tool name
       for (const action of actions) {
-        this.actionToTool.set(action, name)
+        this.addActionTool(action, name)
       }
 
       // For tools without action param (like catalog), map tool name itself
       if (!hasActionParam) {
-        this.actionToTool.set(name, name)
+        this.addActionTool(name, name)
       }
     }
   }
 
   async login(username: string, password: string): Promise<LoginResult> {
-    const toolName = this.actionToTool.get('login') || 'spacemolt_auth'
+    const toolName = this.resolveToolForAction('login') || 'spacemolt_auth'
     const resp = await this.callTool(toolName, { action: 'login', username, password })
     if (resp.error) {
       return { success: false, error: resp.error.message }
@@ -97,7 +100,7 @@ export class McpV2Connection implements GameConnection {
   }
 
   async register(username: string, empire: string, code?: string): Promise<RegisterResult> {
-    const toolName = this.actionToTool.get('register') || 'spacemolt_auth'
+    const toolName = this.resolveToolForAction('register') || 'spacemolt_auth'
     const args: Record<string, unknown> = { action: 'register', username, empire }
     if (code) args.registration_code = code
     const resp = await this.callTool(toolName, args)
@@ -115,7 +118,7 @@ export class McpV2Connection implements GameConnection {
   }
 
   async execute(command: string, args?: Record<string, unknown>): Promise<CommandResult> {
-    let toolName = this.actionToTool.get(command)
+    let toolName = this.resolveToolForAction(command)
     let toolArgs: Record<string, unknown>
 
     if (toolName) {
@@ -132,7 +135,7 @@ export class McpV2Connection implements GameConnection {
       // Unknown command -- pass through to the main tool and let the server
       // handle it, matching how other protocols (HTTP, WS, MCP v1) behave.
       // The server will return a proper error with suggestions if invalid.
-      toolName = this.actionToTool.get('get_state') ? (this.actionToTool.get('get_state')!) : 'spacemolt'
+      toolName = this.resolveToolForAction('get_state') || 'spacemolt'
       toolArgs = { action: command, ...(args || {}) }
     }
 
@@ -154,7 +157,7 @@ export class McpV2Connection implements GameConnection {
     }
 
     // Poll notifications
-    const notifTool = this.actionToTool.get('get_notifications')
+    const notifTool = this.resolveToolForAction('get_notifications')
     if (notifTool) {
       try {
         const notifResp = await this.callTool(notifTool, { action: 'get_notifications' })
@@ -202,7 +205,30 @@ export class McpV2Connection implements GameConnection {
 
   /** Number of discovered tools */
   get toolCount(): number {
-    return this.actionToTool.size
+    return this.actionToTools.size
+  }
+
+  private addActionTool(action: string, tool: string): void {
+    const list = this.actionToTools.get(action) || []
+    if (!list.includes(tool)) list.push(tool)
+    this.actionToTools.set(action, list)
+  }
+
+  private resolveToolForAction(action: string): string | undefined {
+    const tools = this.actionToTools.get(action)
+    if (!tools || tools.length === 0) return undefined
+    if (tools.length === 1) return tools[0]
+
+    const factionPreferred = action.startsWith('faction_')
+    const preferred = factionPreferred ? 'spacemolt_faction' : 'spacemolt'
+    if (tools.includes(preferred)) return preferred
+
+    const pool = factionPreferred
+      ? tools.filter(t => t.includes('faction'))
+      : tools.filter(t => !t.includes('faction'))
+    if (pool.length > 0) return [...pool].sort((a, b) => a.localeCompare(b))[0]
+
+    return [...tools].sort((a, b) => a.localeCompare(b))[0]
   }
 
   onNotification(handler: NotificationHandler): void {

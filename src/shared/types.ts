@@ -17,7 +17,7 @@ export interface Profile {
   directive: string
   todo: string
   context_budget: number | null
-  connection_mode: 'http' | 'http_v2' | 'websocket' | 'mcp' | 'mcp_v2'
+  connection_mode: 'http' | 'http_v2' | 'websocket' | 'websocket_v2' | 'mcp' | 'mcp_v2'
   server_url: string
   autoconnect: boolean
   enabled: boolean
