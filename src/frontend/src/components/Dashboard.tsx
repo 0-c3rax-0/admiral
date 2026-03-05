@@ -190,17 +190,19 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
     if (targets.length === 0) return
     setConnectingAll(true)
     try {
-      await Promise.allSettled(
-        targets.map(async (p) => {
-          const isManual = !p.provider || p.provider === 'manual'
-          const action = isManual ? 'connect' : 'connect_llm'
-          await fetch(`/api/profiles/${p.id}/connect`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action }),
-          })
+      for (let i = 0; i < targets.length; i++) {
+        const p = targets[i]
+        const isManual = !p.provider || p.provider === 'manual'
+        const action = isManual ? 'connect' : 'connect_llm'
+        await fetch(`/api/profiles/${p.id}/connect`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action }),
         })
-      )
+        if (i < targets.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 2200))
+        }
+      }
       await refreshProfiles()
       onRefresh()
     } finally {

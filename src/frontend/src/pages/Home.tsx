@@ -15,6 +15,7 @@ export function Home() {
   const [startupAutoconnectEnabled, setStartupAutoconnectEnabled] = useState(true)
   const [startupAutoconnectMinDelaySec, setStartupAutoconnectMinDelaySec] = useState(60)
   const [startupAutoconnectMaxDelaySec, setStartupAutoconnectMaxDelaySec] = useState(120)
+  const [predict429Enabled, setPredict429Enabled] = useState(true)
 
   useEffect(() => {
     loadData()
@@ -56,6 +57,9 @@ export function Home() {
       if (prefs.startup_autoconnect_max_delay_sec) {
         const v = parseInt(prefs.startup_autoconnect_max_delay_sec, 10)
         if (!isNaN(v) && v > 0) setStartupAutoconnectMaxDelaySec(v)
+      }
+      if (prefs.predict_429_enabled) {
+        setPredict429Enabled(prefs.predict_429_enabled === 'true')
       }
 
       // Show settings if no profiles and no configured providers
@@ -160,6 +164,19 @@ export function Home() {
     }
   }, [])
 
+  const handleSetPredict429Enabled = useCallback(async (enabled: boolean) => {
+    setPredict429Enabled(enabled)
+    try {
+      await fetch('/api/preferences', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: 'predict_429_enabled', value: String(enabled) }),
+      })
+    } catch {
+      // ignore
+    }
+  }, [])
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-screen">
@@ -195,6 +212,8 @@ export function Home() {
           onStartupAutoconnectMinDelaySecChange={handleSetStartupAutoconnectMinDelaySec}
           startupAutoconnectMaxDelaySec={startupAutoconnectMaxDelaySec}
           onStartupAutoconnectMaxDelaySecChange={handleSetStartupAutoconnectMaxDelaySec}
+          predict429Enabled={predict429Enabled}
+          onPredict429EnabledChange={handleSetPredict429Enabled}
           onClose={() => {
             setShowSettings(false)
             loadData()
