@@ -1,7 +1,8 @@
 import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
-import { updateProfile } from './db'
+import { getProfile, updateProfile } from './db'
+import { fetchGameCommands } from './schema'
 
 // --- Tool Definitions ---
 
@@ -52,6 +53,8 @@ const LOCAL_TOOLS = new Set(['save_credentials', 'update_todo', 'read_todo', 'st
 
 const MAX_RESULT_CHARS = 4000
 const MAX_TOOL_RESULT_LOG_DETAIL_CHARS = 8000
+const COMMAND_SUGGEST_CACHE_TTL_MS = 5 * 60 * 1000
+const commandSuggestCache = new Map<string, { expiresAt: number; names: string[] }>()
 
 export type LogFn = (type: string, summary: string, detail?: string) => void
 
@@ -91,7 +94,13 @@ export async function executeTool(
     const resp = await ctx.connection.execute(command, commandArgs && Object.keys(commandArgs).length > 0 ? commandArgs : undefined)
 
     if (resp.error) {
-      const errMsg = `Error: [${resp.error.code}] ${resp.error.message}`
+      let errMsg = `Error: [${resp.error.code}] ${resp.error.message}`
+      if (resp.error.code === 'unknown_command' || resp.error.code === 'invalid_command') {
+        const suggestions = await suggestCommands(ctx.profileId, command, ctx.connection)
+        if (suggestions.length > 0) {
+          errMsg += `\nDid you mean: ${suggestions.join(', ')}`
+        }
+      }
       ctx.log('tool_result', errMsg)
       return errMsg
     }
@@ -105,6 +114,74 @@ export async function executeTool(
     ctx.log('error', errMsg)
     return errMsg
   }
+}
+
+async function suggestCommands(profileId: string, attempted: string, connection: GameConnection): Promise<string[]> {
+  const profile = getProfile(profileId)
+  if (!profile) return []
+
+  const serverUrl = profile.server_url.replace(/\/$/, '')
+  const apiVersion = connection.mode === 'http_v2' || connection.mode === 'mcp_v2' ? 'v2' : 'v1'
+  const cacheKey = `${serverUrl}|${apiVersion}`
+  let names: string[] = []
+
+  const cached = commandSuggestCache.get(cacheKey)
+  if (cached && cached.expiresAt > Date.now()) {
+    names = cached.names
+  } else {
+    const commands = await fetchGameCommands(`${serverUrl}/api/${apiVersion}`)
+    names = commands.map(c => c.name)
+    commandSuggestCache.set(cacheKey, {
+      expiresAt: Date.now() + COMMAND_SUGGEST_CACHE_TTL_MS,
+      names,
+    })
+  }
+
+  if (names.length === 0) return []
+  return rankCommandSuggestions(attempted, names).slice(0, 5)
+}
+
+function rankCommandSuggestions(inputRaw: string, candidates: string[]): string[] {
+  const input = normalizeCommand(inputRaw)
+  const scored = candidates
+    .map((name) => {
+      const n = normalizeCommand(name)
+      let score = levenshtein(input, n)
+      if (n.startsWith(input)) score -= 2
+      if (input.startsWith(n)) score -= 1
+      if (n.includes(input)) score -= 1
+      if (n.replace('recipe', 'receipe') === input || n.replace('receipe', 'recipe') === input) score -= 3
+      return { name, score }
+    })
+    .sort((a, b) => a.score - b.score || a.name.length - b.name.length || a.name.localeCompare(b.name))
+
+  return scored.map(s => s.name)
+}
+
+function normalizeCommand(value: string): string {
+  return value.trim().toLowerCase().replace(/[\s-]+/g, '_')
+}
+
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0
+  if (a.length === 0) return b.length
+  if (b.length === 0) return a.length
+  const prev = new Array(b.length + 1)
+  const curr = new Array(b.length + 1)
+  for (let j = 0; j <= b.length; j++) prev[j] = j
+  for (let i = 1; i <= a.length; i++) {
+    curr[0] = i
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1
+      curr[j] = Math.min(
+        prev[j] + 1,
+        curr[j - 1] + 1,
+        prev[j - 1] + cost,
+      )
+    }
+    for (let j = 0; j <= b.length; j++) prev[j] = curr[j]
+  }
+  return prev[b.length]
 }
 
 function executeLocalTool(name: string, args: Record<string, unknown>, ctx: ToolContext): string {

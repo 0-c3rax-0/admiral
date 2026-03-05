@@ -9,7 +9,8 @@ import providers from './routes/providers'
 import models from './routes/models'
 import commands from './routes/commands'
 import preferences from './routes/preferences'
-import { getPreference, listProfiles } from './lib/db'
+import stats from './routes/stats'
+import { addStatsEvent, addStatsSnapshot, getPreference, listProfiles } from './lib/db'
 import { agentManager } from './lib/agent-manager'
 
 const app = new Hono()
@@ -25,6 +26,7 @@ app.route('/api/providers', providers)
 app.route('/api/models', models)
 app.route('/api/commands', commands)
 app.route('/api/preferences', preferences)
+app.route('/api/stats', stats)
 
 // Health check
 app.get('/api/health', (c) => c.json({ ok: true }))
@@ -110,6 +112,59 @@ function scheduleAutoConnectOnStartup(): void {
 }
 
 scheduleAutoConnectOnStartup()
+
+type RuntimeSnapshot = { connected: boolean; running: boolean }
+const lastRuntimeState = new Map<string, RuntimeSnapshot>()
+
+function scheduleStatsSnapshots(): void {
+  const intervalSec = parsePositiveInt(getPreference('stats_snapshot_interval_sec'), 60)
+  const intervalMs = Math.max(10, intervalSec) * 1000
+  let inFlight = false
+
+  const collect = async () => {
+    if (inFlight) return
+    inFlight = true
+    try {
+      const profiles = listProfiles().filter(p => p.enabled)
+      for (const profile of profiles) {
+        try {
+          const sample = await agentManager.sampleProfileStats(profile.id)
+          addStatsSnapshot({
+            profile_id: profile.id,
+            connected: sample.connected,
+            running: sample.running,
+            adaptive_mode: sample.adaptive_mode,
+            effective_context_budget_ratio: sample.effective_context_budget_ratio,
+            credits: sample.credits,
+            ore_mined: sample.ore_mined,
+            trades_completed: sample.trades_completed,
+            systems_explored: sample.systems_explored,
+            source: 'poll',
+          })
+
+          const prev = lastRuntimeState.get(profile.id)
+          if (prev && prev.connected !== sample.connected) {
+            addStatsEvent(profile.id, sample.connected ? 'connected' : 'disconnected')
+          }
+          if (prev && prev.running !== sample.running) {
+            addStatsEvent(profile.id, sample.running ? 'llm_started' : 'llm_stopped')
+          }
+          lastRuntimeState.set(profile.id, { connected: sample.connected, running: sample.running })
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          addStatsEvent(profile.id, 'snapshot_error', msg.slice(0, 500))
+        }
+      }
+    } finally {
+      inFlight = false
+    }
+  }
+
+  setTimeout(() => { collect().catch(() => {}) }, 5_000)
+  setInterval(() => { collect().catch(() => {}) }, intervalMs)
+}
+
+scheduleStatsSnapshots()
 
 export default {
   port,

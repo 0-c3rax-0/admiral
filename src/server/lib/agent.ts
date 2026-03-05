@@ -356,6 +356,40 @@ export class Agent {
     return result
   }
 
+  /**
+   * Lightweight stats poll that avoids writing tool_call/tool_result logs.
+   */
+  async sampleGameStatus(): Promise<{
+    credits: number | null
+    ore_mined: number | null
+    trades_completed: number | null
+    systems_explored: number | null
+  } | null> {
+    if (!this.connection) return null
+    const result = await this.connection.execute('get_status', {})
+    if (result.error) return null
+
+    const data = (result.structuredContent ?? result.result) as Record<string, unknown> | undefined
+    if (!data || typeof data !== 'object') return null
+    const player = data.player as Record<string, unknown> | undefined
+    const stats = (player?.stats as Record<string, unknown> | undefined) || {}
+    const toNum = (v: unknown): number | null => {
+      if (typeof v === 'number' && Number.isFinite(v)) return v
+      if (typeof v === 'string' && v.trim() !== '') {
+        const n = Number(v)
+        return Number.isFinite(n) ? n : null
+      }
+      return null
+    }
+
+    return {
+      credits: toNum(player?.credits),
+      ore_mined: toNum(stats.ore_mined),
+      trades_completed: toNum(stats.trades_completed),
+      systems_explored: toNum(stats.systems_explored),
+    }
+  }
+
   /** Abort current turn and restart the loop with the updated directive. */
   restartTurn(): void {
     if (!this.running) return

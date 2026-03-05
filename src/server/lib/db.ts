@@ -7,6 +7,8 @@ const DB_DIR = path.join(process.cwd(), 'data')
 const DB_PATH = path.join(DB_DIR, 'admiral.db')
 const MAX_LOG_ROWS_PER_PROFILE = 5000
 const LOG_PRUNE_EVERY_N_INSERTS = 100
+const MAX_STATS_ROWS_PER_PROFILE = 20_000
+const STATS_PRUNE_EVERY_N_INSERTS = 100
 
 let db: Database | null = null
 
@@ -75,6 +77,35 @@ function migrate(db: Database): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_log_profile ON log_entries(profile_id, id);
+
+    CREATE TABLE IF NOT EXISTS stats_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      profile_id TEXT NOT NULL,
+      ts TEXT DEFAULT (datetime('now')),
+      connected INTEGER NOT NULL DEFAULT 0,
+      running INTEGER NOT NULL DEFAULT 0,
+      adaptive_mode TEXT DEFAULT 'normal',
+      effective_context_budget_ratio REAL,
+      credits REAL,
+      ore_mined REAL,
+      trades_completed REAL,
+      systems_explored REAL,
+      source TEXT DEFAULT 'poll',
+      FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_stats_profile_ts ON stats_snapshots(profile_id, ts DESC);
+
+    CREATE TABLE IF NOT EXISTS stats_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      profile_id TEXT NOT NULL,
+      ts TEXT DEFAULT (datetime('now')),
+      type TEXT NOT NULL,
+      value TEXT,
+      FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_stats_events_profile_ts ON stats_events(profile_id, ts DESC);
   `)
 
   // Migrations: add columns that may be missing from older databases
@@ -229,6 +260,105 @@ export function getLogEntries(profileId: string, afterId?: number, limit: number
 
 export function clearLogs(profileId: string): void {
   getDb().query('DELETE FROM log_entries WHERE profile_id = ?').run(profileId)
+}
+
+// --- Stats CRUD ---
+
+export interface StatsSnapshotInput {
+  profile_id: string
+  connected: boolean
+  running: boolean
+  adaptive_mode?: 'normal' | 'soft' | 'high' | 'critical'
+  effective_context_budget_ratio?: number | null
+  credits?: number | null
+  ore_mined?: number | null
+  trades_completed?: number | null
+  systems_explored?: number | null
+  source?: string
+}
+
+export interface StatsSnapshotRow {
+  id: number
+  profile_id: string
+  ts: string
+  connected: number
+  running: number
+  adaptive_mode: string
+  effective_context_budget_ratio: number | null
+  credits: number | null
+  ore_mined: number | null
+  trades_completed: number | null
+  systems_explored: number | null
+  source: string | null
+}
+
+export interface StatsEventRow {
+  id: number
+  profile_id: string
+  ts: string
+  type: string
+  value: string | null
+}
+
+export function addStatsSnapshot(snapshot: StatsSnapshotInput): number {
+  const result = getDb().query(
+    `INSERT INTO stats_snapshots (
+      profile_id, connected, running, adaptive_mode, effective_context_budget_ratio,
+      credits, ore_mined, trades_completed, systems_explored, source
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    snapshot.profile_id,
+    snapshot.connected ? 1 : 0,
+    snapshot.running ? 1 : 0,
+    snapshot.adaptive_mode ?? 'normal',
+    snapshot.effective_context_budget_ratio ?? null,
+    snapshot.credits ?? null,
+    snapshot.ore_mined ?? null,
+    snapshot.trades_completed ?? null,
+    snapshot.systems_explored ?? null,
+    snapshot.source ?? 'poll',
+  )
+  const rowId = Number(result.lastInsertRowid)
+
+  if (rowId % STATS_PRUNE_EVERY_N_INSERTS === 0) {
+    getDb().query(
+      `DELETE FROM stats_snapshots
+       WHERE profile_id = ?
+         AND id NOT IN (
+           SELECT id FROM stats_snapshots
+           WHERE profile_id = ?
+           ORDER BY id DESC
+           LIMIT ?
+         )`
+    ).run(snapshot.profile_id, snapshot.profile_id, MAX_STATS_ROWS_PER_PROFILE)
+  }
+
+  return rowId
+}
+
+export function getLatestStatsSnapshot(profileId: string): StatsSnapshotRow | undefined {
+  return getDb().query(
+    'SELECT * FROM stats_snapshots WHERE profile_id = ? ORDER BY id DESC LIMIT 1'
+  ).get(profileId) as StatsSnapshotRow | undefined
+}
+
+export function listStatsSnapshots(profileId: string, limit: number = 120): StatsSnapshotRow[] {
+  return getDb().query(
+    'SELECT * FROM stats_snapshots WHERE profile_id = ? ORDER BY id DESC LIMIT ?'
+  ).all(profileId, limit) as StatsSnapshotRow[]
+}
+
+export function addStatsEvent(profileId: string, type: string, value?: string): number {
+  const result = getDb().query(
+    'INSERT INTO stats_events (profile_id, type, value) VALUES (?, ?, ?)'
+  ).run(profileId, type, value ?? null)
+  return Number(result.lastInsertRowid)
+}
+
+export function listStatsEvents(profileId: string, limit: number = 100): StatsEventRow[] {
+  return getDb().query(
+    'SELECT * FROM stats_events WHERE profile_id = ? ORDER BY id DESC LIMIT ?'
+  ).all(profileId, limit) as StatsEventRow[]
 }
 
 // --- Preferences CRUD ---
