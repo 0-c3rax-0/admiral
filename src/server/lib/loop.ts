@@ -495,6 +495,11 @@ function shouldFailover(err: Error): boolean {
   if (msg.includes('429')) return true
   if (msg.includes('rate limit')) return true
   if (msg.includes('too many requests')) return true
+  if (msg.includes('402')) return true
+  if (msg.includes('payment required')) return true
+  if (msg.includes('spend limit exceeded')) return true
+  if (msg.includes('usd spend limit exceeded')) return true
+  if (msg.includes('insufficient credits')) return true
 
   // Treat transport/connectivity failures as "provider unreachable"
   if (msg.includes('fetch failed')) return true

@@ -137,8 +137,26 @@ async function suggestCommands(profileId: string, attempted: string, connection:
     })
   }
 
-  if (names.length === 0) return []
-  return rankCommandSuggestions(attempted, names).slice(0, 5)
+  const semantic = semanticCommandHints(attempted)
+  if (names.length === 0) return semantic
+  const ranked = rankCommandSuggestions(attempted, names).slice(0, 5)
+  return [...semantic, ...ranked].slice(0, 6)
+}
+
+function semanticCommandHints(inputRaw: string): string[] {
+  const input = normalizeCommand(inputRaw)
+  const hints: string[] = []
+
+  if (input === 'get_recipes' || input === 'get_recipe' || input === 'get_receipe' || input === 'get_receipes') {
+    hints.push('catalog(args={ type: "recipes" })')
+    hints.push('craft(args={ recipe_id: "..." })')
+  }
+
+  if (input === 'recipe' || input === 'recipes') {
+    hints.push('catalog(args={ type: "recipes" })')
+  }
+
+  return hints
 }
 
 function rankCommandSuggestions(inputRaw: string, candidates: string[]): string[] {

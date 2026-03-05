@@ -44,6 +44,11 @@ export class WebSocketConnection implements GameConnection {
     return new Promise((resolve, reject) => {
       try {
         this.ws = new WebSocket(this.wsUrl, { headers: { 'User-Agent': USER_AGENT } })
+        this.ws.on('unexpected-response', (_req, res) => {
+          if (!this.connected) {
+            reject(new Error(`WebSocket handshake failed: HTTP ${res.statusCode}`))
+          }
+        })
 
         this.ws.onopen = () => {
           this.connected = true
