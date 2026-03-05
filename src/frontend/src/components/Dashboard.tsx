@@ -60,6 +60,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
   const [showStats, setShowStats] = useState(false)
   const [connectingAll, setConnectingAll] = useState(false)
   const [nudgingAll, setNudgingAll] = useState(false)
+  const [statusAllLoading, setStatusAllLoading] = useState(false)
   const [statsLoading, setStatsLoading] = useState(false)
   const [statsDbSummary, setStatsDbSummary] = useState<{
     snapshotCount: number
@@ -230,6 +231,20 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
     }
   }
 
+  async function handleGetStatusAll() {
+    if (profiles.length === 0) return
+    setStatusAllLoading(true)
+    try {
+      await Promise.allSettled(
+        profiles.map(async (p) => {
+          await fetchPlayerData(p.id)
+        })
+      )
+    } finally {
+      setStatusAllLoading(false)
+    }
+  }
+
   async function handleOpenStats() {
     setShowStats(true)
     setStatsLoading(true)
@@ -356,6 +371,14 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
           >
             <MessageSquare size={13} />
             {nudgingAll ? 'Nudging...' : 'Nudge All'}
+          </button>
+          <button
+            onClick={handleGetStatusAll}
+            disabled={statusAllLoading || profiles.length === 0}
+            className="flex items-center gap-1.5 text-xs text-muted-foreground uppercase tracking-wider px-2.5 py-1.5 hover:text-foreground transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            title="Run get_status for all accounts"
+          >
+            {statusAllLoading ? 'Loading...' : 'Get Status All'}
           </button>
           <button
             onClick={onShowProviders}

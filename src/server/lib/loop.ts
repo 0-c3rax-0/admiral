@@ -24,6 +24,11 @@ const ADAPTIVE_RSS_CRITICAL_BYTES = 3_500_000_000
 export interface LoopOptions {
   signal?: AbortSignal
   apiKey?: string
+  failoverApiKey?: string
+  failoverModel?: Model<any>
+  failoverActive?: boolean
+  onFailoverActivated?: () => void
+  onPrimaryRecovered?: () => void
   maxToolRounds?: number
   llmTimeoutMs?: number
   contextBudgetRatio?: number
@@ -396,7 +401,7 @@ async function summarizeViaLLM(
   try {
     const resp = await complete(model, summaryCtx, {
       signal,
-      apiKey: options?.apiKey,
+      apiKey: options?.apiKey || (!options?.apiKey ? options?.failoverApiKey : undefined),
       maxTokens: SUMMARY_MAX_TOKENS,
     })
     clearTimeout(timeout)
@@ -424,6 +429,10 @@ async function completeWithRetry(
   compaction?: CompactionState,
 ): Promise<AssistantMessage> {
   let lastError: Error | null = null
+  const primaryKey = options?.apiKey
+  const failoverKey = options?.failoverApiKey
+  // Always try primary first when available; failover is activated on demand.
+  let useFailover = !primaryKey && !!failoverKey
 
   const timeoutMs = options?.llmTimeoutMs || DEFAULT_LLM_TIMEOUT_MS
 
@@ -437,9 +446,14 @@ async function completeWithRetry(
         : timeoutController.signal
 
       try {
-        const result = await complete(model, context, {
+        const apiKeyForAttempt = useFailover ? failoverKey : primaryKey
+        if (attempt > 0 && useFailover && failoverKey) {
+          log('system', `Using failover API key (attempt ${attempt + 1}/${MAX_RETRIES})`)
+        }
+        const modelForAttempt = useFailover && options?.failoverModel ? options.failoverModel : model
+        const result = await complete(modelForAttempt, context, {
           signal,
-          apiKey: options?.apiKey,
+          apiKey: apiKeyForAttempt,
           maxTokens: 4096,
         })
         clearTimeout(timeout)
@@ -449,6 +463,10 @@ async function completeWithRetry(
         }
         if (result.content.length === 0) {
           throw new Error('LLM returned empty response')
+        }
+
+        if (options?.failoverActive && !useFailover) {
+          options.onPrimaryRecovered?.()
         }
 
         return result
@@ -472,6 +490,12 @@ async function completeWithRetry(
         const compactModel = options?.compactionModel || model
         await emergencyCompact(compactModel, context, compaction, options)
         log('system', `Emergency compaction complete: ${context.messages.length} messages, ~${totalMessageTokens(context.messages)} tokens`)
+      }
+
+      if (!useFailover && primaryKey && failoverKey && shouldFailover(lastError)) {
+        useFailover = true
+        log('system', 'Switching to failover API key due to rate limit or provider reachability issue')
+        options?.onFailoverActivated?.()
       }
 
       const delay = RETRY_BASE_DELAY * Math.pow(2, attempt)
@@ -545,6 +569,27 @@ async function emergencyCompact(
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function shouldFailover(err: Error): boolean {
+  const msg = (err.message || '').toLowerCase()
+  if (msg.includes('429')) return true
+  if (msg.includes('rate limit')) return true
+  if (msg.includes('too many requests')) return true
+
+  // Treat transport/connectivity failures as "provider unreachable"
+  if (msg.includes('fetch failed')) return true
+  if (msg.includes('network error')) return true
+  if (msg.includes('network request failed')) return true
+  if (msg.includes('timeout')) return true
+  if (msg.includes('timed out')) return true
+  if (msg.includes('econnrefused')) return true
+  if (msg.includes('enotfound')) return true
+  if (msg.includes('eai_again')) return true
+  if (msg.includes('socket hang up')) return true
+  if (msg.includes('connection reset')) return true
+
+  return false
 }
 
 function combineAbortSignals(...signals: AbortSignal[]): AbortSignal {

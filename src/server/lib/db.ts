@@ -44,6 +44,7 @@ function migrate(db: Database): void {
     CREATE TABLE IF NOT EXISTS providers (
       id TEXT PRIMARY KEY,
       api_key TEXT DEFAULT '',
+      failover_api_key TEXT DEFAULT '',
       base_url TEXT DEFAULT '',
       status TEXT DEFAULT 'unknown'
     );
@@ -57,6 +58,8 @@ function migrate(db: Database): void {
       player_id TEXT,
       provider TEXT,
       model TEXT,
+      failover_provider TEXT,
+      failover_model TEXT,
       directive TEXT DEFAULT '',
       connection_mode TEXT DEFAULT 'http',
       server_url TEXT DEFAULT 'https://game.spacemolt.com',
@@ -116,6 +119,17 @@ function migrate(db: Database): void {
   if (!profileCols.some(c => c.name === 'context_budget')) {
     db.exec('ALTER TABLE profiles ADD COLUMN context_budget REAL DEFAULT NULL')
   }
+  if (!profileCols.some(c => c.name === 'failover_provider')) {
+    db.exec('ALTER TABLE profiles ADD COLUMN failover_provider TEXT')
+  }
+  if (!profileCols.some(c => c.name === 'failover_model')) {
+    db.exec('ALTER TABLE profiles ADD COLUMN failover_model TEXT')
+  }
+
+  const providerCols = db.query("PRAGMA table_info(providers)").all() as Array<{ name: string }>
+  if (!providerCols.some(c => c.name === 'failover_api_key')) {
+    db.exec("ALTER TABLE providers ADD COLUMN failover_api_key TEXT DEFAULT ''")
+  }
 
   // Preferences table
   db.exec(`
@@ -151,12 +165,12 @@ export function getProvider(id: string): Provider | undefined {
   return getDb().query('SELECT * FROM providers WHERE id = ?').get(id) as Provider | undefined
 }
 
-export function upsertProvider(id: string, apiKey: string, baseUrl: string, status: string): void {
+export function upsertProvider(id: string, apiKey: string, failoverApiKey: string, baseUrl: string, status: string): void {
   getDb().query(
-    `INSERT INTO providers (id, api_key, base_url, status)
-     VALUES (?, ?, ?, ?)
-     ON CONFLICT(id) DO UPDATE SET api_key = ?, base_url = ?, status = ?`
-  ).run(id, apiKey, baseUrl, status, apiKey, baseUrl, status)
+    `INSERT INTO providers (id, api_key, failover_api_key, base_url, status)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET api_key = ?, failover_api_key = ?, base_url = ?, status = ?`
+  ).run(id, apiKey, failoverApiKey, baseUrl, status, apiKey, failoverApiKey, baseUrl, status)
 }
 
 // --- Profile CRUD ---
@@ -181,11 +195,12 @@ export function getProfile(id: string): Profile | undefined {
 
 export function createProfile(profile: Omit<Profile, 'created_at' | 'updated_at'>): Profile {
   getDb().query(
-    `INSERT INTO profiles (id, name, username, password, empire, player_id, provider, model, directive, todo, connection_mode, server_url, autoconnect, enabled, context_budget)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO profiles (id, name, username, password, empire, player_id, provider, model, failover_provider, failover_model, directive, todo, connection_mode, server_url, autoconnect, enabled, context_budget)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     profile.id, profile.name, profile.username, profile.password,
     profile.empire, profile.player_id, profile.provider, profile.model,
+    profile.failover_provider ?? null, profile.failover_model ?? null,
     profile.directive, profile.todo || '', profile.connection_mode, profile.server_url,
     profile.autoconnect ? 1 : 0, profile.enabled ? 1 : 0, profile.context_budget ?? null,
   )
@@ -195,7 +210,8 @@ export function createProfile(profile: Omit<Profile, 'created_at' | 'updated_at'
 export function updateProfile(id: string, updates: Partial<Profile>): Profile | undefined {
   const allowed = [
     'name', 'username', 'password', 'empire', 'player_id',
-    'provider', 'model', 'directive', 'connection_mode', 'server_url',
+    'provider', 'model', 'failover_provider', 'failover_model',
+    'directive', 'connection_mode', 'server_url',
     'autoconnect', 'enabled', 'todo', 'context_budget',
   ]
   const sets: string[] = []

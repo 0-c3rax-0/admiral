@@ -25,6 +25,8 @@ profiles.post('/', async (c) => {
       player_id: null,
       provider: provider || null,
       model: model || null,
+      failover_provider: null,
+      failover_model: null,
       directive: directive || '',
       todo: '',
       context_budget: context_budget ?? null,

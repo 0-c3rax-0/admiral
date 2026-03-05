@@ -69,6 +69,11 @@ export function ProviderSetup({
     for (const p of initialProviders) m[p.id] = p.api_key || ''
     return m
   })
+  const [failoverKeys, setFailoverKeys] = useState<Record<string, string>>(() => {
+    const m: Record<string, string> = {}
+    for (const p of initialProviders) m[p.id] = p.failover_api_key || ''
+    return m
+  })
   const [urls, setUrls] = useState<Record<string, string>>(() => {
     const m: Record<string, string> = {}
     for (const p of initialProviders) {
@@ -103,10 +108,15 @@ export function ProviderSetup({
       const resp = await fetch('/api/providers', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, api_key: keys[id] || '' }),
+        body: JSON.stringify({ id, api_key: keys[id] || '', failover_api_key: failoverKeys[id] || '' }),
       })
       const result = await resp.json()
-      setProviders(prev => prev.map(p => p.id === id ? { ...p, status: result.status, api_key: keys[id] || '' } : p))
+      setProviders(prev => prev.map(p => p.id === id ? {
+        ...p,
+        status: result.status,
+        api_key: keys[id] || '',
+        failover_api_key: failoverKeys[id] || '',
+      } : p))
     } finally {
       setSaving(s => ({ ...s, [id]: false }))
     }
@@ -136,10 +146,21 @@ export function ProviderSetup({
       const resp = await fetch('/api/providers', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: 'custom', api_key: keys['custom'] || '', base_url: baseUrl }),
+        body: JSON.stringify({
+          id: 'custom',
+          api_key: keys['custom'] || '',
+          failover_api_key: failoverKeys['custom'] || '',
+          base_url: baseUrl,
+        }),
       })
       const result = await resp.json()
-      setProviders(prev => prev.map(p => p.id === 'custom' ? { ...p, status: result.status, api_key: keys['custom'] || '', base_url: baseUrl } : p))
+      setProviders(prev => prev.map(p => p.id === 'custom' ? {
+        ...p,
+        status: result.status,
+        api_key: keys['custom'] || '',
+        failover_api_key: failoverKeys['custom'] || '',
+        base_url: baseUrl,
+      } : p))
     } finally {
       setSaving(s => ({ ...s, custom: false }))
     }
@@ -344,7 +365,17 @@ export function ProviderSetup({
                             type="password"
                             value={keys['custom'] || ''}
                             onChange={e => setKeys(k => ({ ...k, custom: e.target.value }))}
-                            placeholder="API key (optional)"
+                            placeholder="Primary API key (optional)"
+                            className="flex-1 h-6 text-[11px]"
+                          />
+                        </div>
+                        <div className="flex items-center gap-2 mt-1.5 ml-4">
+                          <KeyRound size={10} className="text-muted-foreground shrink-0" />
+                          <Input
+                            type="password"
+                            value={failoverKeys['custom'] || ''}
+                            onChange={e => setFailoverKeys(k => ({ ...k, custom: e.target.value }))}
+                            placeholder="Fallback API key (optional)"
                             className="flex-1 h-6 text-[11px]"
                           />
                           <Button
@@ -368,25 +399,37 @@ export function ProviderSetup({
                         </div>
                       </>
                     ) : !info.isLocal ? (
-                      <div className="flex items-center gap-2 mt-2 ml-4">
-                        <KeyRound size={10} className="text-muted-foreground shrink-0" />
-                        <Input
-                          type="password"
-                          value={keys[p.id] || ''}
-                          onChange={e => setKeys(k => ({ ...k, [p.id]: e.target.value }))}
-                          placeholder={info.keyPlaceholder || 'API key'}
-                          className="flex-1 h-6 text-[11px]"
-                        />
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => saveKey(p.id)}
-                          disabled={saving[p.id]}
-                          className="h-6 text-[10px] hover:text-primary hover:border-primary/40"
-                        >
-                          {saving[p.id] ? '...' : 'Save'}
-                        </Button>
-                      </div>
+                      <>
+                        <div className="flex items-center gap-2 mt-2 ml-4">
+                          <KeyRound size={10} className="text-muted-foreground shrink-0" />
+                          <Input
+                            type="password"
+                            value={keys[p.id] || ''}
+                            onChange={e => setKeys(k => ({ ...k, [p.id]: e.target.value }))}
+                            placeholder={info.keyPlaceholder || 'Primary API key'}
+                            className="flex-1 h-6 text-[11px]"
+                          />
+                        </div>
+                        <div className="flex items-center gap-2 mt-1.5 ml-4">
+                          <KeyRound size={10} className="text-muted-foreground shrink-0" />
+                          <Input
+                            type="password"
+                            value={failoverKeys[p.id] || ''}
+                            onChange={e => setFailoverKeys(k => ({ ...k, [p.id]: e.target.value }))}
+                            placeholder="Fallback API key (optional)"
+                            className="flex-1 h-6 text-[11px]"
+                          />
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => saveKey(p.id)}
+                            disabled={saving[p.id]}
+                            className="h-6 text-[10px] hover:text-primary hover:border-primary/40"
+                          >
+                            {saving[p.id] ? '...' : 'Save'}
+                          </Button>
+                        </div>
+                      </>
                     ) : (
                       <>
                         <div className="flex items-center gap-2 mt-2 ml-4">

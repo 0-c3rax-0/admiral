@@ -1,4 +1,4 @@
-import type { Context, Message } from '@mariozechner/pi-ai'
+import type { Context, Message, Model } from '@mariozechner/pi-ai'
 import type { GameConnection, CommandResult } from './connections/interface'
 import type { LogFn } from './tools'
 import type { Profile } from '../../shared/types'
@@ -47,6 +47,7 @@ export class Agent {
   private _sessionExpired = false
   private _adaptiveMode: 'normal' | 'soft' | 'high' | 'critical' = 'normal'
   private _effectiveContextBudgetRatio: number | null = null
+  private llmFailoverActive = false
   private memorySummary: string = ''
   private lastSavedMemory: string = ''
   constructor(profileId: string) {
@@ -158,7 +159,18 @@ export class Agent {
 
     this.log('system', `Starting LLM loop with ${profile.provider}/${profile.model}`)
 
-    const { model, apiKey } = resolveModel(`${profile.provider}/${profile.model}`)
+    const { model, apiKey, failoverApiKey } = resolveModel(`${profile.provider}/${profile.model}`)
+    let failoverModel: Model<any> | undefined
+    let failoverModelApiKey: string | undefined = failoverApiKey
+    if (profile.failover_provider && profile.failover_model) {
+      try {
+        const resolved = resolveModel(`${profile.failover_provider}/${profile.failover_model}`)
+        failoverModel = resolved.model
+        failoverModelApiKey = resolved.apiKey || resolved.failoverApiKey || failoverModelApiKey
+      } catch (err) {
+        this.log('error', `Failover model invalid: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
 
     // Fetch game commands - MCP v2 uses tool discovery, others use OpenAPI
     const specLog = (type: 'info' | 'warn' | 'error', msg: string) => {
@@ -241,7 +253,25 @@ export class Agent {
           model, context, this.connection, this.profileId,
           this.log, todo,
           {
-            signal: this.abortController.signal, apiKey, maxToolRounds, llmTimeoutMs,
+            signal: this.abortController.signal,
+            apiKey,
+            failoverApiKey: failoverModelApiKey,
+            failoverModel,
+            failoverActive: this.llmFailoverActive,
+            onFailoverActivated: () => {
+              if (!this.llmFailoverActive) {
+                this.llmFailoverActive = true
+                this.log('system', 'LLM failover activated')
+              }
+            },
+            onPrimaryRecovered: () => {
+              if (this.llmFailoverActive) {
+                this.llmFailoverActive = false
+                this.log('system', 'Primary LLM provider recovered; failover disabled')
+              }
+            },
+            maxToolRounds,
+            llmTimeoutMs,
             contextBudgetRatio,
             onActivity: (a) => this.setActivity(a),
             onAdaptiveContext: (info) => {
@@ -432,6 +462,7 @@ export class Agent {
 
   async stop(): Promise<void> {
     this.running = false
+    this.llmFailoverActive = false
     this.abortController?.abort()
     if (this.connection) {
       this.log('connection', 'Disconnecting...')
@@ -626,6 +657,7 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - Always check fuel before traveling and cargo space before mining.
 - Be social -- chat with players you meet.
 - Prioritize faction coordination: use faction chat frequently to share status, plans, threats, trade needs, and requests for support.
+- Interact in faction chat: react to incoming messages, answer teammates, ask follow-up questions, and agree on concrete coordinated actions.
 - When starting fresh: undock -> travel to asteroid belt -> mine -> travel back -> dock -> sell -> refuel -> repeat.
 `
 }

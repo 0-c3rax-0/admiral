@@ -130,6 +130,8 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
   const [editName, setEditName] = useState('')
   const [editProvider, setEditProvider] = useState('')
   const [editModel, setEditModel] = useState('')
+  const [editFailoverProvider, setEditFailoverProvider] = useState('')
+  const [editFailoverModel, setEditFailoverModel] = useState('')
   const [editContextBudget, setEditContextBudget] = useState<number | null>(null)
   const [editUsername, setEditUsername] = useState('')
   const [editPassword, setEditPassword] = useState('')
@@ -359,9 +361,21 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
   async function handleSaveProvider() {
     const newProvider = editProvider || null
     const newModel = editProvider === 'manual' ? null : (editModel || null)
-    const providerChanged = newProvider !== (profile.provider || null) || newModel !== (profile.model || null)
+    const newFailoverProvider = editFailoverProvider && editFailoverProvider !== 'manual' ? editFailoverProvider : null
+    const newFailoverModel = newFailoverProvider ? (editFailoverModel || null) : null
+    const providerChanged =
+      newProvider !== (profile.provider || null) ||
+      newModel !== (profile.model || null) ||
+      newFailoverProvider !== (profile.failover_provider || null) ||
+      newFailoverModel !== (profile.failover_model || null)
     setEditing(null)
-    await saveProfileField({ provider: newProvider, model: newModel, context_budget: editContextBudget }, providerChanged)
+    await saveProfileField({
+      provider: newProvider,
+      model: newModel,
+      failover_provider: newFailoverProvider,
+      failover_model: newFailoverModel,
+      context_budget: editContextBudget,
+    }, providerChanged)
   }
 
   async function handleSaveCredentials() {
@@ -705,9 +719,21 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
           <div className="relative" data-tour="provider-model">
             <span
               className="text-[10px] text-[hsl(var(--smui-purple))] cursor-pointer hover:text-foreground transition-colors"
-              onClick={() => { setEditing('provider'); setEditProvider(profile.provider || ''); setEditModel(profile.model || ''); setEditContextBudget(profile.context_budget ?? null) }}
+              onClick={() => {
+                setEditing('provider')
+                setEditProvider(profile.provider || '')
+                setEditModel(profile.model || '')
+                setEditFailoverProvider(profile.failover_provider || '')
+                setEditFailoverModel(profile.failover_model || '')
+                setEditContextBudget(profile.context_budget ?? null)
+              }}
             >
               {profile.provider}/{profile.model}
+              {profile.failover_provider && profile.failover_model && (
+                <span className="text-muted-foreground/60 ml-1.5">
+                  failover:{profile.failover_provider}/{profile.failover_model}
+                </span>
+              )}
               <span className="text-muted-foreground/60 ml-1.5">
                 budget:{profile.context_budget != null && !isNaN(profile.context_budget) ? `${Math.round(profile.context_budget * 100)}%` : '55%'}
               </span>
@@ -726,6 +752,25 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
                     <div>
                       <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Model</span>
                       <ModelPicker provider={editProvider} value={editModel} onChange={setEditModel} />
+                    </div>
+                  )}
+                  {editProvider && editProvider !== 'manual' && (
+                    <div>
+                      <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Failover Provider</span>
+                      <Select
+                        value={editFailoverProvider}
+                        onChange={e => { setEditFailoverProvider(e.target.value); setEditFailoverModel('') }}
+                        className="h-7 text-xs"
+                      >
+                        <option value="">None</option>
+                        {availableProviders.filter(p => p !== 'manual').map(p => <option key={p} value={p}>{p}</option>)}
+                      </Select>
+                    </div>
+                  )}
+                  {editFailoverProvider && (
+                    <div>
+                      <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Failover Model</span>
+                      <ModelPicker provider={editFailoverProvider} value={editFailoverModel} onChange={setEditFailoverModel} />
                     </div>
                   )}
                   {editProvider && editProvider !== 'manual' && (
@@ -773,7 +818,14 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
           <div className="relative" data-tour="provider-model">
             <span
               className="text-[10px] text-muted-foreground/50 italic cursor-pointer hover:text-foreground transition-colors"
-              onClick={() => { setEditing('provider'); setEditProvider(profile.provider || ''); setEditModel(profile.model || ''); setEditContextBudget(profile.context_budget ?? null) }}
+              onClick={() => {
+                setEditing('provider')
+                setEditProvider(profile.provider || '')
+                setEditModel(profile.model || '')
+                setEditFailoverProvider(profile.failover_provider || '')
+                setEditFailoverModel(profile.failover_model || '')
+                setEditContextBudget(profile.context_budget ?? null)
+              }}
             >
               {isManual && profile.provider ? 'manual' : 'no provider'}
             </span>
@@ -791,6 +843,25 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
                     <div>
                       <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Model</span>
                       <ModelPicker provider={editProvider} value={editModel} onChange={setEditModel} />
+                    </div>
+                  )}
+                  {editProvider && editProvider !== 'manual' && (
+                    <div>
+                      <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Failover Provider</span>
+                      <Select
+                        value={editFailoverProvider}
+                        onChange={e => { setEditFailoverProvider(e.target.value); setEditFailoverModel('') }}
+                        className="h-7 text-xs"
+                      >
+                        <option value="">None</option>
+                        {availableProviders.filter(p => p !== 'manual').map(p => <option key={p} value={p}>{p}</option>)}
+                      </Select>
+                    </div>
+                  )}
+                  {editFailoverProvider && (
+                    <div>
+                      <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Failover Model</span>
+                      <ModelPicker provider={editFailoverProvider} value={editFailoverModel} onChange={setEditFailoverModel} />
                     </div>
                   )}
                   {editProvider && editProvider !== 'manual' && (

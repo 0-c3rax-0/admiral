@@ -32,21 +32,27 @@ const CUSTOM_BASE_URLS: Record<string, string> = {
  * Resolve a model string like "anthropic/claude-sonnet-4-20250514" to a pi-ai Model.
  * Reads API keys from the providers DB table instead of environment variables.
  */
-export function resolveModel(modelStr: string): { model: Model<any>; apiKey?: string } {
+export function resolveModel(modelStr: string): { model: Model<any>; apiKey?: string; failoverApiKey?: string } {
   const { provider, modelId: rawModelId } = parseModelString(modelStr)
 
-  const modelId = provider === 'openrouter' && !rawModelId.includes('/')
-    ? `openrouter/${rawModelId}`
-    : rawModelId
+  let modelId = rawModelId
+  // Normalize accidental double-prefixes like "nvidia/nvidia/model-id".
+  if (modelId.startsWith(`${provider}/`)) {
+    modelId = modelId.slice(provider.length + 1)
+  }
+  // OpenRouter expects provider-prefixed model ids.
+  if (provider === 'openrouter' && !modelId.includes('/')) {
+    modelId = `openrouter/${modelId}`
+  }
 
   // Try built-in registry first
   const knownProviders = getProviders()
   if (knownProviders.includes(provider as KnownProvider)) {
-    const apiKey = getApiKeyFromDb(provider)
+    const keys = getApiKeysFromDb(provider)
 
     try {
       const model = getModel(provider as KnownProvider, modelId as never)
-      if (model) return { model, apiKey }
+      if (model) return { model, apiKey: keys.apiKey, failoverApiKey: keys.failoverApiKey }
     } catch {
       // Fall through
     }
@@ -55,7 +61,7 @@ export function resolveModel(modelStr: string): { model: Model<any>; apiKey?: st
     if (providerModels.length > 0) {
       const base = providerModels[0]
       const model: Model<any> = { ...base, id: modelId, name: modelId }
-      return { model, apiKey }
+      return { model, apiKey: keys.apiKey, failoverApiKey: keys.failoverApiKey }
     }
   }
 
@@ -96,10 +102,14 @@ export function resolveModel(modelStr: string): { model: Model<any>; apiKey?: st
     maxTokens: 16_384,
   }
 
-  return { model, apiKey }
+  const keys = getApiKeysFromDb(provider)
+  return { model, apiKey: keys.apiKey || apiKey, failoverApiKey: keys.failoverApiKey }
 }
 
-function getApiKeyFromDb(provider: string): string | undefined {
+function getApiKeysFromDb(provider: string): { apiKey?: string; failoverApiKey?: string } {
   const dbProvider = getProvider(provider)
-  return dbProvider?.api_key || undefined
+  return {
+    apiKey: dbProvider?.api_key || undefined,
+    failoverApiKey: dbProvider?.failover_api_key || undefined,
+  }
 }
