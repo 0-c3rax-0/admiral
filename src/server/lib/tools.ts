@@ -316,7 +316,7 @@ function jsonToYaml(value: unknown, indent: number = 0): string {
       value.startsWith("'") || value.startsWith('"') ||
       value.startsWith('#') || /^[\d.e+-]+$/i.test(value)
     ) {
-      return `${pad}"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')}"`
+      return `${pad}"${escapeYamlDoubleQuotedString(value)}"`
     }
     return `${pad}${value}`
   }
@@ -325,7 +325,7 @@ function jsonToYaml(value: unknown, indent: number = 0): string {
     if (value.length === 0) return `${pad}[]`
     if (value.every(v => v === null || typeof v !== 'object')) {
       const items = value.map(v => {
-        if (typeof v === 'string') return `"${v.replace(/"/g, '\\"')}"`
+        if (typeof v === 'string') return `"${escapeYamlDoubleQuotedString(v)}"`
         return String(v ?? '~')
       })
       const oneLine = `${pad}[${items.join(', ')}]`
@@ -358,4 +358,11 @@ function jsonToYaml(value: unknown, indent: number = 0): string {
   }
 
   return `${pad}${String(value)}`
+}
+
+function escapeYamlDoubleQuotedString(value: string): string {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
 }
