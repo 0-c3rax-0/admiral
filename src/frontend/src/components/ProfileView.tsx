@@ -737,6 +737,11 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
               <span className="text-muted-foreground/60 ml-1.5">
                 budget:{profile.context_budget != null && !isNaN(profile.context_budget) ? `${Math.round(profile.context_budget * 100)}%` : '55%'}
               </span>
+              {status.running && (
+                <span className="text-muted-foreground/60 ml-1.5">
+                  mem:{adaptiveMode}{effectiveBudget ? `:${effectiveBudget}` : ''}
+                </span>
+              )}
             </span>
             {editing === 'provider' && (
               <div ref={popoverRef} className="absolute z-50 top-full left-0 mt-1.5 bg-card border border-border shadow-lg p-2.5 min-w-[300px]">
@@ -902,12 +907,6 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
               </div>
             )}
           </div>
-        )}
-
-        {status.running && (
-          <span className="text-[10px] text-muted-foreground/60" title="Adaptive memory mode and effective context budget">
-            mem:{adaptiveMode}{effectiveBudget ? ` ${effectiveBudget}` : ''}
-          </span>
         )}
 
         <div className="flex-1" />

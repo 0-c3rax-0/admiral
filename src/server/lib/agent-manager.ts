@@ -22,10 +22,16 @@ type SlimGameState = {
 
 function slimGameState(raw: Record<string, unknown> | null): SlimGameState {
   if (!raw) return null
-  const gs = raw as Record<string, Record<string, unknown> & { cargo?: unknown[]; current_ammo?: unknown; magazine_size?: unknown }>
+  const gs = raw as Record<string, unknown>
   const player = gs.player as Record<string, unknown> | undefined
   const ship = gs.ship as Record<string, unknown> & { cargo?: unknown[] } | undefined
   const modules = gs.modules as Array<Record<string, unknown>> | undefined
+  const cargoItems = ship && Array.isArray(ship.cargo)
+    ? ship.cargo.map((c) => {
+      const item = c as Record<string, unknown>
+      return `${item.item_id} x${item.quantity}`
+    })
+    : undefined
   return {
     credits: player?.credits,
     system: player?.current_system,
@@ -36,8 +42,7 @@ function slimGameState(raw: Record<string, unknown> | null): SlimGameState {
       shield: `${ship.shield ?? 0}/${ship.max_shield ?? 0}`,
       fuel: `${ship.fuel ?? 0}/${ship.max_fuel ?? 0}`,
       cargo: `${ship.cargo_used ?? 0}/${ship.cargo_capacity ?? 0}`,
-      cargoItems: (ship.cargo as Array<Record<string, unknown>> | undefined)
-        ?.map(c => `${c.item_id} x${c.quantity}`),
+      cargoItems,
     } : undefined,
     modules: modules?.map(m => ({
       name: m.name,

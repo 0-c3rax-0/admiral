@@ -6,6 +6,7 @@ import { ProfileList } from './ProfileList'
 import { ProfileView } from './ProfileView'
 import { NewProfileWizard } from './NewProfileWizard'
 import { AdmiralTour } from './AdmiralTour'
+import { GalaxyMapModal } from './GalaxyMapModal'
 
 interface Props {
   profiles: Profile[]
@@ -58,6 +59,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
   const [showWizard, setShowWizard] = useState(false)
   const [showTour, setShowTour] = useState(false)
   const [showStats, setShowStats] = useState(false)
+  const [showMap, setShowMap] = useState(false)
   const [connectingAll, setConnectingAll] = useState(false)
   const [nudgingAll, setNudgingAll] = useState(false)
   const [statusAllLoading, setStatusAllLoading] = useState(false)
@@ -408,6 +410,13 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
             Stats
           </button>
           <button
+            onClick={() => setShowMap(true)}
+            className="flex items-center gap-1.5 text-xs text-muted-foreground uppercase tracking-wider px-2.5 py-1.5 hover:text-foreground transition-colors"
+            title="Galaxy map"
+          >
+            Map
+          </button>
+          <button
             onClick={handleConnectAll}
             disabled={connectingAll || profiles.length === 0 || connectedProfiles >= profiles.length}
             className="flex items-center gap-1.5 text-xs text-muted-foreground uppercase tracking-wider px-2.5 py-1.5 hover:text-foreground transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
@@ -633,6 +642,14 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
           </div>
         </div>
       )}
+
+      <GalaxyMapModal
+        open={showMap}
+        onClose={() => setShowMap(false)}
+        gameserverUrl={gameserverUrl}
+        profiles={profiles}
+        playerDataMap={playerDataMap}
+      />
 
       {/* Tour */}
       {showTour && activeProfile && (

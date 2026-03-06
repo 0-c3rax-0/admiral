@@ -11,6 +11,24 @@ interface ApiSession {
   expiresAt: string
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' ? value as Record<string, unknown> : null
+}
+
+function toApiSession(value: unknown): ApiSession | null {
+  const rec = asRecord(value)
+  if (!rec) return null
+  if (typeof rec.id !== 'string' || typeof rec.createdAt !== 'string' || typeof rec.expiresAt !== 'string') {
+    return null
+  }
+  return {
+    id: rec.id,
+    playerId: typeof rec.playerId === 'string' ? rec.playerId : undefined,
+    createdAt: rec.createdAt,
+    expiresAt: rec.expiresAt,
+  }
+}
+
 export class HttpConnection implements GameConnection {
   readonly mode = 'http' as const
   private baseUrl: string
@@ -149,9 +167,10 @@ export class HttpConnection implements GameConnection {
         })
         if (!resp.ok) throw new Error(`Failed to create session: ${resp.status}`)
 
-        const data = await resp.json()
-        if (data.session) {
-          this.session = data.session
+        const data = asRecord(await resp.json())
+        const session = toApiSession(data?.session)
+        if (session) {
+          this.session = session
         } else {
           throw new Error('No session in response')
         }
@@ -194,9 +213,10 @@ export class HttpConnection implements GameConnection {
     }
 
     try {
-      const data = await resp.json()
-      if (data.session) this.session = data.session
-      return data as CommandResult
+      const data = asRecord(await resp.json())
+      const session = toApiSession(data?.session)
+      if (session) this.session = session
+      return (data ?? {}) as CommandResult
     } catch {
       return { error: { code: 'http_error', message: `HTTP ${resp.status}` } }
     }
