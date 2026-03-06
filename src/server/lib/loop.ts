@@ -71,6 +71,7 @@ export async function runAgentTurn(
   const maxRounds = options?.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS
   const summaryModel = options?.compactionModel || model
   const advisorAfterRounds = Math.max(1, options?.advisorAfterRounds ?? 3)
+  let advisorUnavailable = false
   let switchedToAdvisorModel = false
   let activeModel = model
   let activeApiKey = options?.apiKey
@@ -80,6 +81,7 @@ export async function runAgentTurn(
     if (options?.signal?.aborted) return
 
     if (
+      !advisorUnavailable &&
       !switchedToAdvisorModel &&
       options?.advisorEnabled &&
       options?.advisorModel &&
@@ -109,6 +111,18 @@ export async function runAgentTurn(
         compaction,
       )
     } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err))
+      if (switchedToAdvisorModel && shouldFallbackFromAlternativeModel(error)) {
+        advisorUnavailable = true
+        switchedToAdvisorModel = false
+        activeModel = model
+        activeApiKey = options?.apiKey
+        log(
+          'system',
+          `Alternative solver unavailable; reverting to primary model: ${error.message}`,
+        )
+        continue
+      }
       log('error', `LLM call failed: ${err instanceof Error ? err.message : String(err)}`, JSON.stringify({
         model: { name: (activeModel as any).name || 'unknown', contextWindow: activeModel.contextWindow },
         messageCount: context.messages.length,
@@ -813,6 +827,10 @@ function shouldFailover(err: Error): boolean {
   if (/\b5\d\d\b/.test(msg)) return true
 
   return false
+}
+
+function shouldFallbackFromAlternativeModel(err: Error): boolean {
+  return shouldFailover(err)
 }
 
 function isModerationBlock(err: Error): boolean {
