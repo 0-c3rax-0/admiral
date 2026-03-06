@@ -20,6 +20,10 @@ const LOCAL_DEFAULTS: Record<string, string> = {
 
 const models = new Hono()
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' ? value as Record<string, unknown> : null
+}
+
 models.get('/', async (c) => {
   const providerId = c.req.query('provider')
   if (!providerId) return c.json({ error: 'Missing provider parameter' }, 400)
@@ -90,8 +94,8 @@ async function fetchOllamaModels(baseUrl?: string): Promise<string[]> {
   try {
     const resp = await fetch(`${base}/api/tags`, { signal: AbortSignal.timeout(5000) })
     if (!resp.ok) return []
-    const data = await resp.json()
-    const modelList = data.models as { name: string }[] | undefined
+    const data = asRecord(await resp.json())
+    const modelList = (Array.isArray(data?.models) ? data.models : undefined) as { name: string }[] | undefined
     return (modelList || []).map(m => m.name).sort()
   } catch {
     return []
@@ -105,8 +109,8 @@ async function fetchOpenAICompatModels(apiUrl: string, apiKey?: string): Promise
 
     const resp = await fetch(apiUrl, { headers, signal: AbortSignal.timeout(10000) })
     if (!resp.ok) return []
-    const data = await resp.json()
-    const modelList = data.data as { id: string }[] | undefined
+    const data = asRecord(await resp.json())
+    const modelList = (Array.isArray(data?.data) ? data.data : undefined) as { id: string }[] | undefined
     return (modelList || []).map(m => m.id).sort()
   } catch {
     return []

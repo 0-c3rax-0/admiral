@@ -1,6 +1,13 @@
 import type { GameConnection, LoginResult, RegisterResult, CommandResult, NotificationHandler } from './interface'
 import { USER_AGENT } from './interface'
 
+function asRpcResponse(value: unknown): { result?: unknown; error?: { code?: number; message: string } } {
+  if (value && typeof value === 'object') {
+    return value as { result?: unknown; error?: { code?: number; message: string } }
+  }
+  return { error: { message: 'Invalid JSON-RPC response payload' } }
+}
+
 export class McpConnection implements GameConnection {
   readonly mode = 'mcp' as const
   private baseUrl: string
@@ -142,7 +149,7 @@ export class McpConnection implements GameConnection {
         if (line.startsWith('data: ')) {
           try {
             const data = JSON.parse(line.slice(6))
-            if (data.id === id) return data
+            if ((data as { id?: number }).id === id) return asRpcResponse(data)
           } catch {
             // continue parsing
           }
@@ -151,7 +158,7 @@ export class McpConnection implements GameConnection {
       return { error: { message: 'No matching response in SSE stream' } }
     }
 
-    return await resp.json()
+    return asRpcResponse(await resp.json())
   }
 
   private async sendNotification(method: string, params: unknown): Promise<void> {

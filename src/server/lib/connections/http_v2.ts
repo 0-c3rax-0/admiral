@@ -12,6 +12,24 @@ interface ApiSession {
   expiresAt: string
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' ? value as Record<string, unknown> : null
+}
+
+function toApiSession(value: unknown): ApiSession | null {
+  const rec = asRecord(value)
+  if (!rec) return null
+  if (typeof rec.id !== 'string' || typeof rec.createdAt !== 'string' || typeof rec.expiresAt !== 'string') {
+    return null
+  }
+  return {
+    id: rec.id,
+    playerId: typeof rec.playerId === 'string' ? rec.playerId : undefined,
+    createdAt: rec.createdAt,
+    expiresAt: rec.expiresAt,
+  }
+}
+
 /**
  * HTTP API v2 connection. Uses consolidated REST endpoints at /api/v2/{tool}/{action}.
  * Same session management as v1 but with grouped command structure.
@@ -250,9 +268,10 @@ export class HttpV2Connection implements GameConnection {
         })
         if (!resp.ok) throw new Error(`Failed to create session: ${resp.status}`)
 
-        const data = await resp.json()
-        if (data.session) {
-          this.session = data.session
+        const data = asRecord(await resp.json())
+        const session = toApiSession(data?.session)
+        if (session) {
+          this.session = session
         } else {
           throw new Error('No session in response')
         }
@@ -304,8 +323,10 @@ export class HttpV2Connection implements GameConnection {
     }
 
     try {
-      const data = await resp.json()
-      if (data.session) this.session = data.session
+      const data = asRecord(await resp.json())
+      if (!data) return { error: { code: 'http_error', message: `HTTP ${resp.status}` } }
+      const session = toApiSession(data.session)
+      if (session) this.session = session
       // v2 returns { result: <text>, structuredContent: <JSON> }
       // Normalize: prefer structuredContent as `result` for programmatic consumers
       if (data.structuredContent !== undefined && data.structuredContent !== null) {

@@ -109,6 +109,29 @@ function migrate(db: Database): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_stats_events_profile_ts ON stats_events(profile_id, ts DESC);
+
+    CREATE TABLE IF NOT EXISTS llm_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      profile_id TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      model_name TEXT,
+      provider_name TEXT,
+      system_prompt TEXT,
+      messages_json TEXT,
+      message_count INTEGER,
+      estimated_tokens INTEGER,
+      last_error TEXT,
+      response_model TEXT,
+      response_stop_reason TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      completed_at TEXT,
+      FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_llm_requests_profile_status ON llm_requests(profile_id, status, id DESC);
   `)
 
   // Migrations: add columns that may be missing from older databases
@@ -129,6 +152,16 @@ function migrate(db: Database): void {
   const providerCols = db.query("PRAGMA table_info(providers)").all() as Array<{ name: string }>
   if (!providerCols.some(c => c.name === 'failover_api_key')) {
     db.exec("ALTER TABLE providers ADD COLUMN failover_api_key TEXT DEFAULT ''")
+  }
+
+  const llmRequestCols = db.query("PRAGMA table_info(llm_requests)").all() as Array<{ name: string }>
+  if (llmRequestCols.length > 0) {
+    if (!llmRequestCols.some(c => c.name === 'system_prompt')) {
+      db.exec("ALTER TABLE llm_requests ADD COLUMN system_prompt TEXT")
+    }
+    if (!llmRequestCols.some(c => c.name === 'messages_json')) {
+      db.exec("ALTER TABLE llm_requests ADD COLUMN messages_json TEXT")
+    }
   }
 
   // Preferences table
@@ -153,6 +186,15 @@ function migrate(db: Database): void {
   for (const p of defaultProviders) {
     upsert.run(p)
   }
+
+  // Recover requests that were in-flight when process exited.
+  db.exec(`
+    UPDATE llm_requests
+    SET status = 'pending',
+        updated_at = datetime('now'),
+        last_error = COALESCE(last_error || '; ', '') || 'Recovered after restart while request was in-flight'
+    WHERE status = 'processing'
+  `)
 }
 
 // --- Provider CRUD ---
@@ -283,6 +325,96 @@ export interface LlmRateWindowStats {
   errors429Last60s: number
   errors429Last300s: number
   failoverActivationsLast300s: number
+}
+
+export interface EnqueuedLlmRequest {
+  id: number
+  idempotencyKey: string
+}
+
+export interface LlmPendingSnapshot {
+  id: number
+  idempotency_key: string
+  attempt_count: number
+  system_prompt: string | null
+  messages_json: string | null
+}
+
+export function enqueueLlmRequest(input: {
+  profileId: string
+  idempotencyKey: string
+  modelName?: string
+  providerName?: string
+  systemPrompt?: string
+  messagesJson?: string
+  messageCount: number
+  estimatedTokens: number
+}): EnqueuedLlmRequest {
+  const result = getDb().query(
+    `INSERT INTO llm_requests (
+      profile_id, idempotency_key, status, model_name, provider_name, system_prompt, messages_json, message_count, estimated_tokens
+    ) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?)`
+  ).run(
+    input.profileId,
+    input.idempotencyKey,
+    input.modelName ?? null,
+    input.providerName ?? null,
+    input.systemPrompt ?? null,
+    input.messagesJson ?? null,
+    input.messageCount,
+    input.estimatedTokens,
+  )
+
+  return { id: Number(result.lastInsertRowid), idempotencyKey: input.idempotencyKey }
+}
+
+export function markLlmRequestProcessing(id: number, nextAttemptCount: number): void {
+  getDb().query(
+    `UPDATE llm_requests
+     SET status = 'processing', attempt_count = ?, updated_at = datetime('now')
+     WHERE id = ?`
+  ).run(nextAttemptCount, id)
+}
+
+export function markLlmRequestRetryableError(id: number, error: string): void {
+  getDb().query(
+    `UPDATE llm_requests
+     SET status = 'pending', last_error = ?, updated_at = datetime('now')
+     WHERE id = ?`
+  ).run(error, id)
+}
+
+export function markLlmRequestSucceeded(id: number, responseModel?: string, responseStopReason?: string): void {
+  getDb().query(
+    `UPDATE llm_requests
+     SET status = 'succeeded',
+         response_model = ?,
+         response_stop_reason = ?,
+         completed_at = datetime('now'),
+         updated_at = datetime('now')
+     WHERE id = ?`
+  ).run(responseModel ?? null, responseStopReason ?? null, id)
+}
+
+export function markLlmRequestFailed(id: number, error: string): void {
+  getDb().query(
+    `UPDATE llm_requests
+     SET status = 'failed',
+         last_error = ?,
+         completed_at = datetime('now'),
+         updated_at = datetime('now')
+     WHERE id = ?`
+  ).run(error, id)
+}
+
+export function getLatestPendingLlmRequest(profileId: string): LlmPendingSnapshot | undefined {
+  return getDb().query(
+    `SELECT id, idempotency_key, attempt_count, system_prompt, messages_json
+     FROM llm_requests
+     WHERE profile_id = ? AND status = 'pending'
+     ORDER BY id DESC
+     LIMIT 1`
+  ).get(profileId) as LlmPendingSnapshot | undefined
 }
 
 export function getLlmRateWindowStats(profileId: string): LlmRateWindowStats {

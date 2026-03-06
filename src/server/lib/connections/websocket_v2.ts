@@ -39,6 +39,9 @@ export class WebSocketV2Connection implements GameConnection {
   private shouldReconnect = true
   private reauthInFlight: Promise<boolean> | null = null
   private lastPongAt = 0
+  private onPong = () => {
+    this.lastPongAt = Date.now()
+  }
 
   private pendingQueue: PendingCommand[] = []
 
@@ -81,9 +84,7 @@ export class WebSocketV2Connection implements GameConnection {
           }
         }
 
-        this.ws.onpong = () => {
-          this.lastPongAt = Date.now()
-        }
+        this.ws.on('pong', this.onPong)
 
         this.ws.onclose = (event) => {
           this.connected = false
@@ -169,7 +170,7 @@ export class WebSocketV2Connection implements GameConnection {
       this.ws.onmessage = null
       this.ws.onclose = null
       this.ws.onerror = null
-      this.ws.onpong = null
+      this.ws.off('pong', this.onPong)
       this.ws.close()
       this.ws = null
     }

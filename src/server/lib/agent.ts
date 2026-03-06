@@ -12,7 +12,7 @@ import { resolveModel } from './model'
 import { fetchGameCommands, formatCommandList } from './schema'
 import { allTools } from './tools'
 import { runAgentTurn, type CompactionState } from './loop'
-import { addLogEntry, getProfile, updateProfile, getPreference } from './db'
+import { addLogEntry, getLatestPendingLlmRequest, getProfile, updateProfile, getPreference } from './db'
 import { EventEmitter } from 'events'
 import fs from 'fs'
 import path from 'path'
@@ -195,6 +195,26 @@ export class Agent {
       }],
       tools: allTools,
     }
+    let resumeRequest: { id: number; idempotencyKey: string; attemptCount?: number } | undefined
+
+    const pending = getLatestPendingLlmRequest(this.profileId)
+    if (pending?.messages_json) {
+      try {
+        const restored = JSON.parse(pending.messages_json)
+        if (Array.isArray(restored) && restored.length > 0) {
+          context.messages = restored as Message[]
+          context.systemPrompt = pending.system_prompt || context.systemPrompt
+          resumeRequest = {
+            id: pending.id,
+            idempotencyKey: pending.idempotency_key,
+            attemptCount: pending.attempt_count || 0,
+          }
+          this.log('system', `Recovered pending LLM request ${pending.id} for replay`)
+        }
+      } catch (err) {
+        this.log('error', `Failed to parse pending LLM request snapshot: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
 
     this.memorySummary = loadProfileMemory(this.profileId)
     this.lastSavedMemory = this.memorySummary
@@ -267,6 +287,7 @@ export class Agent {
             },
             maxToolRounds,
             llmTimeoutMs,
+            resumeRequest,
             contextBudgetRatio,
             onActivity: (a) => this.setActivity(a),
             onAdaptiveContext: (info) => {
@@ -276,6 +297,7 @@ export class Agent {
           },
           compaction,
         )
+        resumeRequest = undefined
 
         if (compaction.summary && compaction.summary !== this.lastSavedMemory) {
           saveProfileMemory(this.profileId, compaction.summary)

@@ -3,7 +3,15 @@ import type { Model, Context, AssistantMessage, ToolCall, Message } from '@mario
 import type { GameConnection } from './connections/interface'
 import type { LogFn } from './tools'
 import { executeTool } from './tools'
-import { getLlmRateWindowStats, getPreference } from './db'
+import {
+  enqueueLlmRequest,
+  getLlmRateWindowStats,
+  getPreference,
+  markLlmRequestFailed,
+  markLlmRequestProcessing,
+  markLlmRequestRetryableError,
+  markLlmRequestSucceeded,
+} from './db'
 
 const DEFAULT_MAX_TOOL_ROUNDS = 30
 const MAX_RETRIES = 3
@@ -33,6 +41,7 @@ export interface LoopOptions {
   onPrimaryRecovered?: () => void
   maxToolRounds?: number
   llmTimeoutMs?: number
+  resumeRequest?: { id: number; idempotencyKey: string; attemptCount?: number }
   contextBudgetRatio?: number
   onActivity?: (activity: string) => void
   onAdaptiveContext?: (info: { mode: 'normal' | 'soft' | 'high' | 'critical'; effectiveRatio: number; rssBytes: number }) => void
@@ -422,6 +431,25 @@ async function completeWithRetry(
   let moderationRemediations = 0
 
   const timeoutMs = options?.llmTimeoutMs || DEFAULT_LLM_TIMEOUT_MS
+  const messageCount = context.messages.length
+  const estimatedTokens = totalMessageTokens(context.messages)
+  const modelName = ((model as any).name as string | undefined) || 'unknown'
+  const providerName = modelName.includes('/') ? modelName.split('/')[0] : undefined
+  const existing = options?.resumeRequest
+  const request = existing
+    ? { id: existing.id, idempotencyKey: existing.idempotencyKey }
+    : enqueueLlmRequest({
+      profileId,
+      idempotencyKey: `admiral-${profileId}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      modelName,
+      providerName,
+      systemPrompt: context.systemPrompt || '',
+      messagesJson: JSON.stringify(context.messages),
+      messageCount,
+      estimatedTokens,
+    })
+  const idempotencyKey = request.idempotencyKey
+
   if (is429PredictionEnabled()) {
     const risk = predict429Risk(profileId)
     if (risk.level !== 'LOW') {
@@ -446,6 +474,7 @@ async function completeWithRetry(
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
+      markLlmRequestProcessing(request.id, (existing?.attemptCount || 0) + attempt + 1)
       const timeoutController = new AbortController()
       const timeout = setTimeout(() => timeoutController.abort(), timeoutMs)
 
@@ -463,6 +492,7 @@ async function completeWithRetry(
           signal,
           apiKey: apiKeyForAttempt,
           maxTokens: 4096,
+          idempotencyKey,
         })
         clearTimeout(timeout)
 
@@ -477,6 +507,7 @@ async function completeWithRetry(
           options.onPrimaryRecovered?.()
         }
 
+        markLlmRequestSucceeded(request.id, result.model, result.stopReason)
         return result
       } catch (err) {
         clearTimeout(timeout)
@@ -514,7 +545,12 @@ async function completeWithRetry(
       }
 
       const delay = RETRY_BASE_DELAY * Math.pow(2, attempt)
+      if (attempt < MAX_RETRIES - 1) {
+        markLlmRequestRetryableError(request.id, lastError.message)
+      }
       log('error', `LLM error (attempt ${attempt + 1}/${MAX_RETRIES}): ${lastError.message}`, JSON.stringify({
+        requestId: request.id,
+        idempotencyKey,
         model: { name: (model as any).name || 'unknown', contextWindow: model.contextWindow },
         messageCount: context.messages.length,
         estimatedTokens: totalMessageTokens(context.messages),
@@ -526,6 +562,7 @@ async function completeWithRetry(
     }
   }
 
+  markLlmRequestFailed(request.id, lastError?.message || 'LLM call failed after retries')
   throw lastError || new Error('LLM call failed after retries')
 }
 

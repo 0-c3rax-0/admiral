@@ -19,6 +19,10 @@ const SPEC_CACHE_TTL_MS = 60 * 60 * 1000
 
 export type SpecLogFn = (type: 'info' | 'warn' | 'error', message: string) => void
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' ? value as Record<string, unknown> : null
+}
+
 /**
  * Fetch an OpenAPI spec by URL, with local SQLite caching and error surfacing.
  * Returns the parsed spec or null if both fetch and cache miss.
@@ -42,7 +46,8 @@ export async function fetchOpenApiSpec(
       }
       throw new Error(`HTTP ${resp.status}`)
     }
-    const spec = await resp.json()
+    const spec = asRecord(await resp.json())
+    if (!spec) throw new Error('Invalid OpenAPI spec payload')
     // Cache on success
     try {
       setPreference(cacheKey, JSON.stringify(spec))
@@ -68,7 +73,7 @@ export async function fetchOpenApiSpec(
       } else {
         log?.('warn', `Using stale cached OpenAPI spec for ${specUrl} (${ageMin}m old, fetch failed)`)
       }
-      return JSON.parse(cached)
+      return asRecord(JSON.parse(cached))
     }
   } catch {
     // Cache parse failed

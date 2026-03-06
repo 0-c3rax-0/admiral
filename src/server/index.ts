@@ -10,6 +10,7 @@ import models from './routes/models'
 import commands from './routes/commands'
 import preferences from './routes/preferences'
 import stats from './routes/stats'
+import map from './routes/map'
 import { addStatsEvent, addStatsSnapshot, getPreference, listProfiles } from './lib/db'
 import { agentManager } from './lib/agent-manager'
 
@@ -27,6 +28,10 @@ app.route('/api/models', models)
 app.route('/api/commands', commands)
 app.route('/api/preferences', preferences)
 app.route('/api/stats', stats)
+app.route('/api/map', map)
+
+// Ensure API callers always get JSON (never HTML fallback) for unknown API paths.
+app.all('/api/*', (c) => c.json({ error: 'API route not found' }, 404))
 
 // Health check
 app.get('/api/health', (c) => c.json({ ok: true }))
