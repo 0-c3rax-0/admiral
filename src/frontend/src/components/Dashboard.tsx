@@ -129,7 +129,18 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
         }
         setProfiles(data as unknown as Profile[])
         setStatuses(newStatuses)
-        setPlayerDataMap(prev => ({ ...prev, ...newPlayerData }))
+        setPlayerDataMap(prev => {
+          const next = { ...prev }
+          for (const [id, incoming] of Object.entries(newPlayerData)) {
+            const existing = next[id]
+            const existingHasFullStatus = !!(existing && typeof existing === 'object' && 'player' in existing)
+            const incomingHasFullStatus = !!(incoming && typeof incoming === 'object' && 'player' in incoming)
+            // Keep richer get_status payloads instead of replacing them with slim snapshots.
+            if (existingHasFullStatus && !incomingHasFullStatus) continue
+            next[id] = incoming
+          }
+          return next
+        })
       } catch { /* ignore */ }
     }
     poll()
@@ -159,13 +170,33 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
     try {
       const resp = await fetch('/api/profiles')
       const data: Array<Record<string, unknown>> = await resp.json()
-      const newStatuses: Record<string, { connected: boolean; running: boolean }> = {}
+      const newStatuses: Record<string, RuntimeStatus> = {}
+      const newPlayerData: Record<string, Record<string, unknown>> = {}
       for (const p of data) {
         const id = p.id as string
-        newStatuses[id] = { connected: !!p.connected, running: !!p.running }
+        newStatuses[id] = {
+          connected: !!p.connected,
+          running: !!p.running,
+          adaptive_mode: (p.adaptive_mode as RuntimeStatus['adaptive_mode']) || 'normal',
+          effective_context_budget_ratio: typeof p.effective_context_budget_ratio === 'number' ? p.effective_context_budget_ratio : null,
+        }
+        if (p.gameState && typeof p.gameState === 'object') {
+          newPlayerData[id] = p.gameState as Record<string, unknown>
+        }
       }
       setProfiles(data as unknown as Profile[])
       setStatuses(newStatuses)
+      setPlayerDataMap(prev => {
+        const next = { ...prev }
+        for (const [id, incoming] of Object.entries(newPlayerData)) {
+          const existing = next[id]
+          const existingHasFullStatus = !!(existing && typeof existing === 'object' && 'player' in existing)
+          const incomingHasFullStatus = !!(incoming && typeof incoming === 'object' && 'player' in incoming)
+          if (existingHasFullStatus && !incomingHasFullStatus) continue
+          next[id] = incoming
+        }
+        return next
+      })
     } catch {
       // ignore
     }
