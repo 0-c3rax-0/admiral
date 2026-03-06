@@ -81,7 +81,13 @@ export async function executeTool(
   if (name === 'game') {
     command = String(args.command || '')
     commandArgs = args.args as Record<string, unknown> | undefined
+    command = sanitizeCommandName(command)
     if (!command) return 'Error: missing \'command\' argument'
+    const resolved = await resolveCommandName(ctx.profileId, command, ctx.connection)
+    if (resolved !== command) {
+      ctx.log('system', `Adjusted command: ${command} -> ${resolved}`)
+      command = resolved
+    }
   } else {
     command = name
     commandArgs = Object.keys(args).length > 0 ? args : undefined
@@ -117,30 +123,54 @@ export async function executeTool(
 }
 
 async function suggestCommands(profileId: string, attempted: string, connection: GameConnection): Promise<string[]> {
+  const names = await getAvailableCommandNames(profileId, connection)
+  const semantic = semanticCommandHints(attempted)
+  if (names.length === 0) return semantic
+  const ranked = rankCommandSuggestions(attempted, names).slice(0, 5)
+  return [...semantic, ...ranked].slice(0, 6)
+}
+
+async function resolveCommandName(profileId: string, attempted: string, connection: GameConnection): Promise<string> {
+  const names = await getAvailableCommandNames(profileId, connection)
+  if (names.length === 0) return attempted
+  if (names.includes(attempted)) return attempted
+
+  const attemptedNorm = normalizeCommand(attempted)
+  const normalizedMatches = names.filter(name => normalizeCommand(name) === attemptedNorm)
+  if (normalizedMatches.length === 1) return normalizedMatches[0]
+
+  const ranked = rankCommandSuggestions(attempted, names)
+  if (ranked.length === 0) return attempted
+
+  const best = ranked[0]
+  const bestNorm = normalizeCommand(best)
+  const distance = levenshtein(attemptedNorm, bestNorm)
+  const confidentByEditDistance = distance <= 1
+  const confidentByPrefix = bestNorm.startsWith(attemptedNorm) && attemptedNorm.length >= 6
+
+  return (confidentByEditDistance || confidentByPrefix) ? best : attempted
+}
+
+async function getAvailableCommandNames(profileId: string, connection: GameConnection): Promise<string[]> {
   const profile = getProfile(profileId)
   if (!profile) return []
 
   const serverUrl = profile.server_url.replace(/\/$/, '')
   const apiVersion = connection.mode === 'http_v2' || connection.mode === 'mcp_v2' ? 'v2' : 'v1'
   const cacheKey = `${serverUrl}|${apiVersion}`
-  let names: string[] = []
 
   const cached = commandSuggestCache.get(cacheKey)
   if (cached && cached.expiresAt > Date.now()) {
-    names = cached.names
-  } else {
-    const commands = await fetchGameCommands(`${serverUrl}/api/${apiVersion}`)
-    names = commands.map(c => c.name)
-    commandSuggestCache.set(cacheKey, {
-      expiresAt: Date.now() + COMMAND_SUGGEST_CACHE_TTL_MS,
-      names,
-    })
+    return cached.names
   }
 
-  const semantic = semanticCommandHints(attempted)
-  if (names.length === 0) return semantic
-  const ranked = rankCommandSuggestions(attempted, names).slice(0, 5)
-  return [...semantic, ...ranked].slice(0, 6)
+  const commands = await fetchGameCommands(`${serverUrl}/api/${apiVersion}`)
+  const names = commands.map(c => c.name)
+  commandSuggestCache.set(cacheKey, {
+    expiresAt: Date.now() + COMMAND_SUGGEST_CACHE_TTL_MS,
+    names,
+  })
+  return names
 }
 
 function semanticCommandHints(inputRaw: string): string[] {
@@ -178,6 +208,13 @@ function rankCommandSuggestions(inputRaw: string, candidates: string[]): string[
 
 function normalizeCommand(value: string): string {
   return value.trim().toLowerCase().replace(/[\s-]+/g, '_')
+}
+
+function sanitizeCommandName(value: string): string {
+  return value
+    .trim()
+    .replace(/^["'`]+|["'`]+$/g, '')
+    .replace(/[>.,;:!?]+$/g, '')
 }
 
 function levenshtein(a: string, b: string): number {

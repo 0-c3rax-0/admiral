@@ -16,6 +16,9 @@ export function Home() {
   const [startupAutoconnectMinDelaySec, setStartupAutoconnectMinDelaySec] = useState(60)
   const [startupAutoconnectMaxDelaySec, setStartupAutoconnectMaxDelaySec] = useState(120)
   const [predict429Enabled, setPredict429Enabled] = useState(true)
+  const [compactInputEnabled, setCompactInputEnabled] = useState(false)
+  const [compactInputProvider, setCompactInputProvider] = useState('openai')
+  const [compactInputModel, setCompactInputModel] = useState('')
 
   useEffect(() => {
     loadData()
@@ -60,6 +63,15 @@ export function Home() {
       }
       if (prefs.predict_429_enabled) {
         setPredict429Enabled(prefs.predict_429_enabled === 'true')
+      }
+      if (prefs.compact_input_enabled) {
+        setCompactInputEnabled(prefs.compact_input_enabled === 'true')
+      }
+      if (prefs.compact_input_provider) {
+        setCompactInputProvider(prefs.compact_input_provider)
+      }
+      if (prefs.compact_input_model) {
+        setCompactInputModel(prefs.compact_input_model)
       }
 
       // Show settings if no profiles and no configured providers
@@ -177,6 +189,45 @@ export function Home() {
     }
   }, [])
 
+  const handleSetCompactInputEnabled = useCallback(async (enabled: boolean) => {
+    setCompactInputEnabled(enabled)
+    try {
+      await fetch('/api/preferences', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: 'compact_input_enabled', value: String(enabled) }),
+      })
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  const handleSetCompactInputProvider = useCallback(async (provider: string) => {
+    setCompactInputProvider(provider)
+    try {
+      await fetch('/api/preferences', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: 'compact_input_provider', value: provider }),
+      })
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  const handleSetCompactInputModel = useCallback(async (model: string) => {
+    setCompactInputModel(model)
+    try {
+      await fetch('/api/preferences', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: 'compact_input_model', value: model }),
+      })
+    } catch {
+      // ignore
+    }
+  }, [])
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-screen">
@@ -214,6 +265,12 @@ export function Home() {
           onStartupAutoconnectMaxDelaySecChange={handleSetStartupAutoconnectMaxDelaySec}
           predict429Enabled={predict429Enabled}
           onPredict429EnabledChange={handleSetPredict429Enabled}
+          compactInputEnabled={compactInputEnabled}
+          onCompactInputEnabledChange={handleSetCompactInputEnabled}
+          compactInputProvider={compactInputProvider}
+          onCompactInputProviderChange={handleSetCompactInputProvider}
+          compactInputModel={compactInputModel}
+          onCompactInputModelChange={handleSetCompactInputModel}
           onClose={() => {
             setShowSettings(false)
             loadData()

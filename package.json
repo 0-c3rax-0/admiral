@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "concurrently -n server,vite -c blue,magenta \"bun run src/server/index.ts\" \"cd src/frontend && bunx vite dev --port 3030\"",
-    "build": "bun run scripts/build.ts",
+    "build": "bun run typecheck && bun run scripts/build.ts",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p src/frontend/tsconfig.json",
     "start": "./admiral"
   },
   "dependencies": {
