@@ -30,9 +30,6 @@ app.route('/api/preferences', preferences)
 app.route('/api/stats', stats)
 app.route('/api/map', map)
 
-// Ensure API callers always get JSON (never HTML fallback) for unknown API paths.
-app.all('/api/*', (c) => c.json({ error: 'API route not found' }, 404))
-
 // Health check
 app.get('/api/health', (c) => c.json({ ok: true }))
 
@@ -170,6 +167,14 @@ function scheduleStatsSnapshots(): void {
 }
 
 scheduleStatsSnapshots()
+
+// Ensure API callers always get JSON (never HTML fallback) for unknown API paths.
+app.notFound((c) => {
+  if (c.req.path.startsWith('/api/')) {
+    return c.json({ error: 'API route not found' }, 404)
+  }
+  return c.text('Not found', 404)
+})
 
 export default {
   port,

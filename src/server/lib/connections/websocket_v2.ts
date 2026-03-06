@@ -7,6 +7,7 @@ const RECONNECT_MAX_DELAY = 30_000
 const COMMAND_TIMEOUT = 30_000
 const HEARTBEAT_INTERVAL = 20_000
 const HEARTBEAT_TIMEOUT = 45_000
+const HEARTBEAT_MISSES_BEFORE_TERMINATE = 2
 
 const RESPONSE_TYPES = new Set([
   'ok',
@@ -39,8 +40,10 @@ export class WebSocketV2Connection implements GameConnection {
   private shouldReconnect = true
   private reauthInFlight: Promise<boolean> | null = null
   private lastPongAt = 0
+  private heartbeatMisses = 0
   private onPong = () => {
     this.lastPongAt = Date.now()
+    this.heartbeatMisses = 0
   }
 
   private pendingQueue: PendingCommand[] = []
@@ -66,6 +69,7 @@ export class WebSocketV2Connection implements GameConnection {
           this.connected = true
           this.reconnectAttempt = 0
           this.lastPongAt = Date.now()
+          this.heartbeatMisses = 0
           this.startHeartbeat()
           settled = true
           resolve()
@@ -265,12 +269,17 @@ export class WebSocketV2Connection implements GameConnection {
   }
 
   private scheduleReconnect(): void {
+    if (this.reconnectTimer) {
+      return
+    }
+
     const baseDelay = Math.min(RECONNECT_BASE_DELAY * Math.pow(2, this.reconnectAttempt), RECONNECT_MAX_DELAY)
     const jitter = Math.floor(Math.random() * 500)
     const delay = baseDelay + jitter
     this.reconnectAttempt++
 
     this.reconnectTimer = setTimeout(async () => {
+      this.reconnectTimer = null
       try {
         await this.connect()
         if (this.credentials) {
@@ -290,9 +299,13 @@ export class WebSocketV2Connection implements GameConnection {
     this.heartbeatTimer = setInterval(() => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
       if (Date.now() - this.lastPongAt > HEARTBEAT_TIMEOUT) {
-        this.ws.terminate()
+        this.heartbeatMisses++
+        if (this.heartbeatMisses >= HEARTBEAT_MISSES_BEFORE_TERMINATE) {
+          this.ws.terminate()
+        }
         return
       }
+      this.heartbeatMisses = 0
       try {
         this.ws.ping()
       } catch {
