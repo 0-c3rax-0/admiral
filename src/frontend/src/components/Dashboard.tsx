@@ -137,6 +137,24 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
     return () => clearInterval(interval)
   }, [])
 
+  const fetchPlayerData = useCallback(async (profileId: string) => {
+    try {
+      const resp = await fetch(`/api/profiles/${profileId}/command`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: 'get_status' }),
+      })
+      if (!resp.ok) return
+      const result = await resp.json()
+      const data = result.structuredContent ?? result.result
+      if (data && typeof data === 'object' && ('player' in data || 'ship' in data || 'location' in data)) {
+        setPlayerDataMap(prev => ({ ...prev, [profileId]: data as Record<string, unknown> }))
+      }
+    } catch {
+      // ignore
+    }
+  }, [])
+
   const refreshProfiles = useCallback(async () => {
     try {
       const resp = await fetch('/api/profiles')
@@ -239,6 +257,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
     try {
       await Promise.allSettled(
         profiles.map(async (p) => {
+          if (!statuses[p.id]?.connected) return
           await fetchPlayerData(p.id)
         })
       )

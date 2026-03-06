@@ -43,8 +43,7 @@ export class WebSocketV2Connection implements GameConnection {
   private pendingQueue: PendingCommand[] = []
 
   constructor(serverUrl: string) {
-    const base = serverUrl.replace(/\/$/, '')
-    this.wsUrl = base.replace(/^http/, 'ws') + '/ws'
+    this.wsUrl = toWebSocketUrl(serverUrl)
   }
 
   async connect(): Promise<void> {
@@ -86,13 +85,14 @@ export class WebSocketV2Connection implements GameConnection {
           this.lastPongAt = Date.now()
         }
 
-        this.ws.onclose = () => {
+        this.ws.onclose = (event) => {
           this.connected = false
           this.stopHeartbeat()
-          this.rejectAllPending('Connection closed')
+          const reason = event.reason ? `: ${event.reason}` : ''
+          this.rejectAllPending(`Connection closed (code ${event.code}${reason})`)
           if (!settled) {
             settled = true
-            reject(new Error('WebSocket connection closed before open'))
+            reject(new Error(`WebSocket connection closed before open (code ${event.code}${reason})`))
           }
           if (this.shouldReconnect) {
             this.scheduleReconnect()
@@ -195,7 +195,19 @@ export class WebSocketV2Connection implements GameConnection {
       }, COMMAND_TIMEOUT)
 
       this.pendingQueue.push({ resolve, timer, command, args, canRetryAuth })
-      this.ws!.send(JSON.stringify(msg))
+      try {
+        this.ws!.send(JSON.stringify(msg))
+      } catch (err) {
+        clearTimeout(timer)
+        const idx = this.pendingQueue.findIndex(p => p.timer === timer)
+        if (idx !== -1) this.pendingQueue.splice(idx, 1)
+        resolve({
+          error: {
+            code: 'send_failed',
+            message: `WebSocket send failed: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        })
+      }
     })
 
     if (!response.error || !canRetryAuth) return response
@@ -312,5 +324,20 @@ export class WebSocketV2Connection implements GameConnection {
     } finally {
       this.reauthInFlight = null
     }
+  }
+}
+
+function toWebSocketUrl(serverUrl: string): string {
+  const raw = serverUrl.trim()
+  try {
+    const u = new URL(raw)
+    if (u.protocol === 'http:') u.protocol = 'ws:'
+    else if (u.protocol === 'https:') u.protocol = 'wss:'
+    const path = u.pathname.replace(/\/+$/, '')
+    u.pathname = path.endsWith('/ws') ? path : `${path}/ws`
+    return u.toString()
+  } catch {
+    const base = raw.replace(/\/$/, '')
+    return base.replace(/^http/, 'ws') + '/ws'
   }
 }
