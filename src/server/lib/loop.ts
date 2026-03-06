@@ -46,6 +46,10 @@ export interface LoopOptions {
   compactInputEnabled?: boolean
   compactionModel?: Model<any>  // Separate (cheaper) model for compaction summarization
   compactionApiKey?: string
+  advisorEnabled?: boolean
+  advisorAfterRounds?: number
+  advisorModel?: Model<any>
+  advisorApiKey?: string
   onActivity?: (activity: string) => void
   onAdaptiveContext?: (info: { mode: 'normal' | 'soft' | 'high' | 'critical'; effectiveRatio: number; rssBytes: number }) => void
 }
@@ -66,6 +70,8 @@ export async function runAgentTurn(
 ): Promise<void> {
   const maxRounds = options?.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS
   const summaryModel = options?.compactionModel || model
+  const advisorAfterRounds = Math.max(1, options?.advisorAfterRounds ?? 3)
+  let advisorInjected = false
   let rounds = 0
 
   while (rounds < maxRounds) {
@@ -187,9 +193,60 @@ export async function runAgentTurn(
     }
 
     rounds++
+
+    if (
+      !advisorInjected &&
+      options?.advisorEnabled &&
+      options?.advisorModel &&
+      rounds >= advisorAfterRounds
+    ) {
+      const suggestion = await askAdvisorForAlternative(context, options, model)
+      if (suggestion) {
+        context.messages.push({
+          role: 'user',
+          content: `## Alternative Plan Suggestion\n${suggestion}\n\nUse this only if it improves the current strategy.`,
+          timestamp: Date.now(),
+        })
+        log('system', `Alternative solver suggestion injected after ${rounds} rounds`)
+      }
+      advisorInjected = true
+    }
   }
 
   log('system', `Reached max tool rounds (${maxRounds}), ending turn`)
+}
+
+async function askAdvisorForAlternative(
+  context: Context,
+  options: LoopOptions | undefined,
+  fallbackModel: Model<any>,
+): Promise<string | null> {
+  const advisorModel = options?.advisorModel || fallbackModel
+  const recent = context.messages.slice(-20)
+  const transcript = formatMessagesForSummary(recent).slice(0, 10_000)
+  const advisorCtx: Context = {
+    systemPrompt: 'You are a tactical planner. Return only 3 concise bullet points for an alternative strategy.',
+    messages: [{
+      role: 'user',
+      content: `Provide an alternative approach for the next few actions.\n\nRecent transcript:\n${transcript}`,
+      timestamp: Date.now(),
+    }],
+  }
+  try {
+    const resp = await complete(advisorModel, advisorCtx, {
+      apiKey: options?.advisorApiKey || options?.apiKey || options?.failoverApiKey,
+      maxTokens: 256,
+      signal: options?.signal,
+    })
+    const text = resp.content
+      .filter((b): b is { type: 'text'; text: string } => 'text' in b)
+      .map(b => b.text)
+      .join('')
+      .trim()
+    return text || null
+  } catch {
+    return null
+  }
 }
 
 function truncateForLog(text: string, max: number): string {
