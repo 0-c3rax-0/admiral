@@ -71,11 +71,26 @@ export async function runAgentTurn(
   const maxRounds = options?.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS
   const summaryModel = options?.compactionModel || model
   const advisorAfterRounds = Math.max(1, options?.advisorAfterRounds ?? 3)
-  let advisorInjected = false
+  let switchedToAdvisorModel = false
+  let activeModel = model
+  let activeApiKey = options?.apiKey
   let rounds = 0
 
   while (rounds < maxRounds) {
     if (options?.signal?.aborted) return
+
+    if (
+      !switchedToAdvisorModel &&
+      options?.advisorEnabled &&
+      options?.advisorModel &&
+      rounds >= advisorAfterRounds
+    ) {
+      activeModel = options.advisorModel
+      activeApiKey = options.advisorApiKey || options.apiKey || options.failoverApiKey
+      switchedToAdvisorModel = true
+      const modelName = ((activeModel as any).name as string | undefined) || ((activeModel as any).id as string | undefined) || 'unknown'
+      log('system', `Switching to alternative solver model after ${rounds} rounds: ${modelName}`)
+    }
 
     enforceContextMessageCap(context)
     if (options?.compactInputEnabled) {
@@ -85,10 +100,17 @@ export async function runAgentTurn(
     options?.onActivity?.('Waiting for LLM response...')
     let response: AssistantMessage
     try {
-      response = await completeWithRetry(model, context, profileId, log, options, compaction)
+      response = await completeWithRetry(
+        activeModel,
+        context,
+        profileId,
+        log,
+        { ...options, apiKey: activeApiKey },
+        compaction,
+      )
     } catch (err) {
       log('error', `LLM call failed: ${err instanceof Error ? err.message : String(err)}`, JSON.stringify({
-        model: { name: (model as any).name || 'unknown', contextWindow: model.contextWindow },
+        model: { name: (activeModel as any).name || 'unknown', contextWindow: activeModel.contextWindow },
         messageCount: context.messages.length,
         estimatedTokens: totalMessageTokens(context.messages),
         error: err instanceof Error ? err.message : String(err),
@@ -194,59 +216,9 @@ export async function runAgentTurn(
 
     rounds++
 
-    if (
-      !advisorInjected &&
-      options?.advisorEnabled &&
-      options?.advisorModel &&
-      rounds >= advisorAfterRounds
-    ) {
-      const suggestion = await askAdvisorForAlternative(context, options, model)
-      if (suggestion) {
-        context.messages.push({
-          role: 'user',
-          content: `## Alternative Plan Suggestion\n${suggestion}\n\nUse this only if it improves the current strategy.`,
-          timestamp: Date.now(),
-        })
-        log('system', `Alternative solver suggestion injected after ${rounds} rounds`)
-      }
-      advisorInjected = true
-    }
   }
 
   log('system', `Reached max tool rounds (${maxRounds}), ending turn`)
-}
-
-async function askAdvisorForAlternative(
-  context: Context,
-  options: LoopOptions | undefined,
-  fallbackModel: Model<any>,
-): Promise<string | null> {
-  const advisorModel = options?.advisorModel || fallbackModel
-  const recent = context.messages.slice(-20)
-  const transcript = formatMessagesForSummary(recent).slice(0, 10_000)
-  const advisorCtx: Context = {
-    systemPrompt: 'You are a tactical planner. Return only 3 concise bullet points for an alternative strategy.',
-    messages: [{
-      role: 'user',
-      content: `Provide an alternative approach for the next few actions.\n\nRecent transcript:\n${transcript}`,
-      timestamp: Date.now(),
-    }],
-  }
-  try {
-    const resp = await complete(advisorModel, advisorCtx, {
-      apiKey: options?.advisorApiKey || options?.apiKey || options?.failoverApiKey,
-      maxTokens: 256,
-      signal: options?.signal,
-    })
-    const text = resp.content
-      .filter((b): b is { type: 'text'; text: string } => 'text' in b)
-      .map(b => b.text)
-      .join('')
-      .trim()
-    return text || null
-  } catch {
-    return null
-  }
 }
 
 function truncateForLog(text: string, max: number): string {
