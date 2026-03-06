@@ -602,6 +602,12 @@ function shouldFailover(err: Error): boolean {
   if (msg.includes('eai_again')) return true
   if (msg.includes('socket hang up')) return true
   if (msg.includes('connection reset')) return true
+  if (msg.includes('no body')) return true
+  if (msg.includes('internal server error')) return true
+  if (msg.includes('bad gateway')) return true
+  if (msg.includes('service unavailable')) return true
+  if (msg.includes('gateway timeout')) return true
+  if (/\b5\d\d\b/.test(msg)) return true
 
   return false
 }
