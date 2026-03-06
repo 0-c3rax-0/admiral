@@ -48,6 +48,7 @@ export class Agent {
   private llmFailoverActive = false
   private memorySummary: string = ''
   private lastSavedMemory: string = ''
+  private _gameState: Record<string, unknown> | null = null
   constructor(profileId: string) {
     this.profileId = profileId
   }
@@ -72,9 +73,20 @@ export class Agent {
     return this._effectiveContextBudgetRatio
   }
 
+  get gameState(): Record<string, unknown> | null {
+    return this._gameState
+  }
+
   private setActivity(activity: string) {
     this._activity = activity
     this.events.emit('activity', activity)
+  }
+
+  private cacheGameState(result: CommandResult): void {
+    const data = result.structuredContent ?? result.result
+    if (data && typeof data === 'object' && ('player' in data || 'ship' in data || 'location' in data)) {
+      this._gameState = data as Record<string, unknown>
+    }
   }
 
   private log: LogFn = (type, summary, detail?) => {
@@ -123,6 +135,12 @@ export class Agent {
         this.log('error', `Login failed: ${result.error}`)
       }
     }
+
+    // Fetch initial game state (best-effort)
+    try {
+      const statusResp = await this.connection.execute('get_status')
+      this.cacheGameState(statusResp)
+    } catch { /* ignore */ }
   }
 
   async startLLMLoop(): Promise<void> {
@@ -282,6 +300,7 @@ export class Agent {
       let pendingEvents = ''
       try {
         const pollResp = await this.connection.execute('get_status')
+        this.cacheGameState(pollResp)
         if (pollResp.notifications && Array.isArray(pollResp.notifications) && pollResp.notifications.length > 0) {
           pendingEvents = pollResp.notifications
             .map(n => {
@@ -373,6 +392,8 @@ export class Agent {
 
     this.log('tool_call', `manual: ${command}(${args ? JSON.stringify(args) : ''})`)
     const result = await this.connection.execute(command, args)
+
+    if (command === 'get_status') this.cacheGameState(result)
 
     if (result.error) {
       this.log('tool_result', `Error: ${result.error.message}`, JSON.stringify(result, null, 2))

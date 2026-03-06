@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
-import { Settings, Sun, Moon, Github, AlertTriangle, CircleHelp, BarChart3, MessageSquare, X } from 'lucide-react'
+import { useState, useEffect, useCallback } from 'react'
+import { Settings, Sun, Moon, Github, AlertTriangle, CircleHelp } from 'lucide-react'
+import { BarChart3, MessageSquare, X } from 'lucide-react'
 import { useSearchParams } from 'react-router'
 import type { Profile, Provider } from '@/types'
 import { ProfileList } from './ProfileList'
@@ -107,58 +108,37 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
     }
   }, [profiles.length, !!activeProfile]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Fetch player data for a connected profile
-  const fetchPlayerData = useCallback(async (profileId: string) => {
-    try {
-      const resp = await fetch(`/api/profiles/${profileId}/command`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: 'get_status' }),
-      })
-      const result = await resp.json()
-      const data = result.structuredContent ?? result.result
-      if (data && typeof data === 'object') {
-        if ('player' in data || 'ship' in data || 'location' in data) {
-          setPlayerDataMap(prev => ({ ...prev, [profileId]: data }))
-        }
-      }
-    } catch { /* ignore */ }
-  }, [])
-
-  // Poll statuses + fetch player data for connected profiles on mount
-  const initialFetchDone = useRef(false)
+  // Poll statuses + game state for all profiles in one request
   useEffect(() => {
     async function poll() {
-      const connected: string[] = []
-      for (const p of profiles) {
-        try {
-          const resp = await fetch(`/api/profiles/${p.id}`)
-          const data = await resp.json()
-          const isConnected = !!data.connected
-          setStatuses(prev => ({
-            ...prev,
-            [p.id]: {
-              connected: isConnected,
-              running: !!data.running,
-              adaptive_mode: data.adaptive_mode || 'normal',
-              effective_context_budget_ratio: typeof data.effective_context_budget_ratio === 'number' ? data.effective_context_budget_ratio : null,
-            },
-          }))
-          if (isConnected) connected.push(p.id)
-        } catch {
-          // ignore
+      try {
+        const resp = await fetch('/api/profiles')
+        const data: Array<Record<string, unknown>> = await resp.json()
+        const newStatuses: Record<string, RuntimeStatus> = {}
+        const newGameStates: Record<string, Record<string, unknown>> = {}
+        for (const p of data) {
+          const id = p.id as string
+          newStatuses[id] = {
+            connected: !!p.connected,
+            running: !!p.running,
+            adaptive_mode: (p.adaptive_mode as RuntimeStatus['adaptive_mode']) || 'normal',
+            effective_context_budget_ratio: typeof p.effective_context_budget_ratio === 'number'
+              ? p.effective_context_budget_ratio
+              : null,
+          }
+          if (p.gameState && typeof p.gameState === 'object') {
+            newGameStates[id] = p.gameState as Record<string, unknown>
+          }
         }
-      }
-      // On first poll, fetch player data for all connected profiles
-      if (!initialFetchDone.current && connected.length > 0) {
-        initialFetchDone.current = true
-        for (const id of connected) fetchPlayerData(id)
-      }
+        setProfiles(data as unknown as Profile[])
+        setStatuses(newStatuses)
+        setPlayerDataMap(prev => ({ ...prev, ...newGameStates }))
+      } catch { /* ignore */ }
     }
     poll()
     const interval = setInterval(poll, 5000)
     return () => clearInterval(interval)
-  }, [profiles, fetchPlayerData])
+  }, [])
 
   const refreshProfiles = useCallback(async () => {
     try {

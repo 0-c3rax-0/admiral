@@ -1,5 +1,47 @@
 import { Agent, clearProfileMemory, readProfileMemory, writeProfileMemory } from './agent'
 
+type SlimGameState = {
+  credits?: unknown
+  system?: unknown
+  poi?: unknown
+  ship?: {
+    class?: unknown
+    hull: string
+    shield: string
+    fuel: string
+    cargo: string
+    cargoItems?: string[]
+  }
+  modules?: { name?: unknown; wear?: unknown; ammo?: string }[]
+} | null
+
+function slimGameState(raw: Record<string, unknown> | null): SlimGameState {
+  if (!raw) return null
+  const gs = raw as Record<string, Record<string, unknown> & { cargo?: unknown[]; current_ammo?: unknown; magazine_size?: unknown }>
+  const player = gs.player as Record<string, unknown> | undefined
+  const ship = gs.ship as Record<string, unknown> & { cargo?: unknown[] } | undefined
+  const modules = gs.modules as Array<Record<string, unknown>> | undefined
+  return {
+    credits: player?.credits,
+    system: player?.current_system,
+    poi: player?.current_poi,
+    ship: ship ? {
+      class: ship.class_id,
+      hull: `${ship.hull ?? 0}/${ship.max_hull ?? 0}`,
+      shield: `${ship.shield ?? 0}/${ship.max_shield ?? 0}`,
+      fuel: `${ship.fuel ?? 0}/${ship.max_fuel ?? 0}`,
+      cargo: `${ship.cargo_used ?? 0}/${ship.cargo_capacity ?? 0}`,
+      cargoItems: (ship.cargo as Array<Record<string, unknown>> | undefined)
+        ?.map(c => `${c.item_id} x${c.quantity}`),
+    } : undefined,
+    modules: modules?.map(m => ({
+      name: m.name,
+      wear: m.wear_status,
+      ammo: m.current_ammo !== undefined ? `${m.current_ammo}/${m.magazine_size}` : undefined,
+    })),
+  }
+}
+
 class AgentManager {
   private agents = new Map<string, Agent>()
   private connecting = new Map<string, Promise<Agent>>()
@@ -92,6 +134,7 @@ class AgentManager {
     activity: string
     adaptive_mode: 'normal' | 'soft' | 'high' | 'critical'
     effective_context_budget_ratio: number | null
+    gameState: SlimGameState
   } {
     const agent = this.agents.get(profileId)
     return {
@@ -100,6 +143,7 @@ class AgentManager {
       activity: agent?.activity ?? 'idle',
       adaptive_mode: agent?.adaptiveMode ?? 'normal',
       effective_context_budget_ratio: agent?.effectiveContextBudgetRatio ?? null,
+      gameState: slimGameState(agent?.gameState ?? null),
     }
   }
 

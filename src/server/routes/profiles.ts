@@ -5,7 +5,10 @@ import { agentManager } from '../lib/agent-manager'
 const profiles = new Hono()
 
 // GET /api/profiles
-profiles.get('/', (c) => c.json(listProfiles()))
+profiles.get('/', (c) => {
+  const all = listProfiles()
+  return c.json(all.map(p => ({ ...p, ...agentManager.getStatus(p.id) })))
+})
 
 // POST /api/profiles
 profiles.post('/', async (c) => {

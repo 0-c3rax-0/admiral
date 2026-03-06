@@ -53,4 +53,5 @@ export interface AgentStatus {
   connected: boolean
   mode: 'llm' | 'manual'
   playerData?: Record<string, unknown>
+  gameState?: Record<string, unknown> | null
 }
