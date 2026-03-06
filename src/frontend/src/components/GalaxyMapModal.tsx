@@ -298,7 +298,7 @@ async function fetchMapJson(apiPath: string, gameserverUrl: string): Promise<any
     const fallbackBase = (gameserverUrl || 'https://game.spacemolt.com').replace(/\/$/, '')
     if (!msg.includes('HTML instead of JSON')) throw err
 
-    const directPath = apiPath.replace(/^\/api\/map/, '/api/map')
+    const directPath = apiPath
     const fallbackResp = await fetch(`${fallbackBase}${directPath}`)
     const fallbackData = await parseJsonResponse(fallbackResp)
     if (!fallbackResp.ok) {
