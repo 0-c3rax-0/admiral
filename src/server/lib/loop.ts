@@ -521,7 +521,7 @@ async function completeWithRetry(
     ? { id: existing.id, idempotencyKey: existing.idempotencyKey }
     : enqueueLlmRequest({
       profileId,
-      idempotencyKey: `admiral-${profileId}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      idempotencyKey: `admiral-${profileId}-${Date.now()}-${crypto.randomUUID()}`,
       modelName,
       providerName,
       systemPrompt: context.systemPrompt || '',

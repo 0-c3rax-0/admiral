@@ -86,7 +86,7 @@ oauth.post('/google-gemini-cli/start', async (c) => {
       status: active.status,
     }, 409)
   }
-  const id = `oauth-${Math.random().toString(36).slice(2, 10)}-${Date.now()}`
+  const id = `oauth-${crypto.randomUUID()}`
   const session: OAuthSession = {
     id,
     provider: 'google-gemini-cli',
