@@ -14,7 +14,10 @@ providers.put('/', async (c) => {
   if (!id) return c.json({ error: 'Missing provider id' }, 400)
 
   let status = 'unknown'
-  if ((id === 'custom' || id === 'ollama' || id === 'lmstudio') && base_url) {
+  if (id === 'google-gemini-cli') {
+    // OAuth-backed provider: auth state is managed outside Admiral (local CLI session).
+    status = 'valid'
+  } else if ((id === 'custom' || id === 'ollama' || id === 'lmstudio') && base_url) {
     try {
       const modelsUrl = id === 'ollama'
         ? base_url.replace(/\/v1\/?$/, '') + '/api/tags'

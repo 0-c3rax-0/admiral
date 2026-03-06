@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Secret scanner for staged changes only.
+# Blocks commit when obvious credentials are detected.
+
+if ! command -v rg >/dev/null 2>&1; then
+  echo "pre-commit: ripgrep (rg) is required for secret scanning." >&2
+  exit 1
+fi
+
+staged_files="$(git diff --cached --name-only --diff-filter=ACMR)"
+if [ -z "${staged_files}" ]; then
+  exit 0
+fi
+
+# Ignore common generated/vendor paths.
+filtered_files="$(echo "${staged_files}" | rg -v '^(node_modules/|dist/|src/frontend/dist/|docs/plans/)' || true)"
+if [ -z "${filtered_files}" ]; then
+  exit 0
+fi
+
+tmp="$(mktemp)"
+trap 'rm -f "${tmp}"' EXIT
+
+# Build one file with staged content and markers so matches include file names.
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
+  # Skip deleted or submodule entries.
+  if ! git cat-file -e ":$f" 2>/dev/null; then
+    continue
+  fi
+  printf '\n### FILE: %s ###\n' "$f" >> "${tmp}"
+  git show ":$f" >> "${tmp}" || true
+done <<< "${filtered_files}"
+
+patterns='(BEGIN (RSA|EC|OPENSSH|DSA|PGP) PRIVATE KEY|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z\-_]{20,}|xox[baprs]-[0-9A-Za-z-]{10,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{12,}|sk-ant-[A-Za-z0-9_-]{10,}|sk-or-[A-Za-z0-9_-]{10,}|gsk_[A-Za-z0-9_-]{10,}|nvapi-[A-Za-z0-9_-]{10,}|(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization)\s*[:=]\s*["'"'"'][A-Za-z0-9_\-\.]{16,}["'"'"'])'
+
+# Allow obvious placeholders.
+if rg -n --pcre2 "${patterns}" "${tmp}" | rg -v '(sk-\.\.\.|sk-ant-\.\.\.|sk-or-\.\.\.|gsk_\.\.\.|xai-\.\.\.|AI\.\.\.|YOUR_|REPLACE_ME|example|placeholder)' > /tmp/precommit-secret-hits.$$; then
+  echo "Commit blocked: potential secrets detected in staged content." >&2
+  cat /tmp/precommit-secret-hits.$$ >&2
+  rm -f /tmp/precommit-secret-hits.$$
+  echo "If this is a false positive, replace with a placeholder before committing." >&2
+  exit 1
+fi
+rm -f /tmp/precommit-secret-hits.$$
+
+exit 0

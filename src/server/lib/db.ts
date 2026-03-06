@@ -177,7 +177,7 @@ function migrate(db: Database): void {
 
   // Seed default providers
   const defaultProviders = [
-    'anthropic', 'openai', 'groq', 'google', 'xai',
+    'anthropic', 'openai', 'groq', 'google', 'google-gemini-cli', 'xai',
     'mistral', 'minimax', 'nvidia', 'openrouter', 'ollama', 'lmstudio', 'custom',
   ]
   const upsert = db.query(

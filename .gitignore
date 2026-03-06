@@ -4,6 +4,12 @@ data/
 *.db-journal
 .env
 .env.local
+.env.*
+!.env.example
+auth.json
+oauth_auth.json
+*.pem
+*.key
 bun.lock
 bun.lockb
 package-lock.json

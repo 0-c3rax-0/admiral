@@ -585,6 +585,7 @@ async function completeWithRetry(
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err))
       if (options?.signal?.aborted) throw lastError
+      const errorType = classifyLlmError(lastError)
 
       if (options?.compactInputEnabled && isContextOverflowError(lastError) && contextOverflowRemediations < 2) {
         const beforeCount = context.messages.length
@@ -645,7 +646,10 @@ async function completeWithRetry(
       if (attempt < MAX_RETRIES - 1) {
         markLlmRequestRetryableError(request.id, lastError.message)
       }
-      log('error', `LLM error (attempt ${attempt + 1}/${MAX_RETRIES}): ${lastError.message}`, JSON.stringify({
+      const errorLabel = errorType === 'aborted' ? 'LLM aborted'
+        : errorType === 'timeout' ? 'LLM timeout'
+        : 'LLM error'
+      log('error', `${errorLabel} (attempt ${attempt + 1}/${MAX_RETRIES}): ${lastError.message}`, JSON.stringify({
         requestId: request.id,
         idempotencyKey,
         model: { name: (model as any).name || 'unknown', contextWindow: model.contextWindow },
@@ -653,6 +657,7 @@ async function completeWithRetry(
         estimatedTokens: totalMessageTokens(context.messages),
         attempt: attempt + 1,
         maxRetries: MAX_RETRIES,
+        errorType,
         error: lastError.message,
       }, null, 2))
       await sleep(delay)
@@ -915,4 +920,11 @@ function combineAbortSignals(...signals: AbortSignal[]): AbortSignal {
     signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true })
   }
   return controller.signal
+}
+
+function classifyLlmError(err: Error): 'aborted' | 'timeout' | 'provider_error' {
+  const msg = (err.message || '').toLowerCase()
+  if (msg.includes('timed out')) return 'timeout'
+  if (msg.includes('aborted') || msg.includes('aborterror')) return 'aborted'
+  return 'provider_error'
 }
