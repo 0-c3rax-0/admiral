@@ -75,6 +75,8 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     try { return localStorage.getItem('admiral-sidebar-open') !== 'false' } catch { return true }
   })
+  const pollSeqRef = useRef(0)
+  const appliedPollSeqRef = useRef(0)
 
   const activeProfile = profiles.find(p => p.id === activeId)
   const runningProfiles = profiles.filter(p => statuses[p.id]?.running).length
@@ -111,10 +113,25 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
 
   // Poll statuses + game state for all profiles in one request
   useEffect(() => {
+    let disposed = false
+    let inFlight: AbortController | null = null
+
     async function poll() {
+      if (disposed) return
+      const seq = ++pollSeqRef.current
+      if (inFlight) inFlight.abort()
+      const controller = new AbortController()
+      inFlight = controller
+
       try {
-        const resp = await fetch('/api/profiles')
+        const resp = await fetch('/api/profiles', { signal: controller.signal })
+        if (!resp.ok) return
         const data: Array<Record<string, unknown>> = await resp.json()
+        if (disposed) return
+        // Ignore out-of-order poll responses to prevent UI status flicker.
+        if (seq < appliedPollSeqRef.current) return
+        appliedPollSeqRef.current = seq
+
         const newStatuses: Record<string, RuntimeStatus> = {}
         const newPlayerData: Record<string, Record<string, unknown>> = {}
         for (const p of data) {
@@ -143,11 +160,20 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
           }
           return next
         })
-      } catch { /* ignore */ }
+      } catch (err) {
+        const isAbort = err instanceof DOMException && err.name === 'AbortError'
+        if (!isAbort) {
+          // ignore network/parse errors and keep previous status snapshot
+        }
+      }
     }
     poll()
     const interval = setInterval(poll, 5000)
-    return () => clearInterval(interval)
+    return () => {
+      disposed = true
+      if (inFlight) inFlight.abort()
+      clearInterval(interval)
+    }
   }, [])
 
   const fetchPlayerData = useCallback(async (profileId: string) => {
