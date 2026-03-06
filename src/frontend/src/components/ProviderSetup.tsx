@@ -17,6 +17,7 @@ const PROVIDER_INFO: Record<string, { label: string; description: string; isLoca
   openai: { label: 'OpenAI', description: 'GPT models', isLocal: false, keyPlaceholder: 'sk-...' },
   groq: { label: 'Groq', description: 'Fast inference', isLocal: false, keyPlaceholder: 'gsk_...' },
   google: { label: 'Google AI', description: 'Gemini models', isLocal: false, keyPlaceholder: 'AI...' },
+  'google-gemini-cli': { label: 'Google Gemini OAuth', description: 'Gemini via local OAuth session', isLocal: true, keyPlaceholder: '' },
   xai: { label: 'xAI', description: 'Grok models', isLocal: false, keyPlaceholder: 'xai-...' },
   mistral: { label: 'Mistral', description: 'Mistral models', isLocal: false, keyPlaceholder: '' },
   minimax: { label: 'MiniMax', description: 'MiniMax models', isLocal: false, keyPlaceholder: 'eyJ...' },
@@ -121,6 +122,14 @@ export function ProviderSetup({
   })
   const [saving, setSaving] = useState<Record<string, boolean>>({})
   const [detecting, setDetecting] = useState(false)
+  const [oauthSessionId, setOauthSessionId] = useState<string | null>(null)
+  const [oauthStatus, setOauthStatus] = useState<'idle' | 'starting' | 'awaiting_auth' | 'running' | 'completed' | 'error'>('idle')
+  const [oauthMessage, setOauthMessage] = useState('')
+  const [oauthManualRedirectUrl, setOauthManualRedirectUrl] = useState('')
+  const [oauthStartedAt, setOauthStartedAt] = useState<number | null>(null)
+  const [oauthCurrentProjectId, setOauthCurrentProjectId] = useState<string | null>(null)
+  const [oauthCurrentEmail, setOauthCurrentEmail] = useState<string | null>(null)
+  const [oauthProjectDetectSource, setOauthProjectDetectSource] = useState<string | null>(null)
 
   // Close on Escape
   useEffect(() => {
@@ -134,6 +143,73 @@ export function ProviderSetup({
       document.body.style.overflow = ''
     }
   }, [onClose])
+
+  useEffect(() => {
+    ;(async () => {
+      try {
+        const resp = await fetch('/api/oauth/google-gemini-cli/current')
+        if (!resp.ok) return
+        const data = await resp.json()
+        setOauthCurrentProjectId(data.projectId || null)
+        setOauthCurrentEmail(data.email || null)
+        setOauthProjectDetectSource(data.projectId ? 'oauth_auth_json' : null)
+      } catch {
+        // ignore
+      }
+    })()
+  }, [])
+
+  useEffect(() => {
+    if (!oauthSessionId) return
+    let cancelled = false
+    let openedAuthWindow = false
+    const timer = setInterval(async () => {
+      try {
+        const resp = await fetch(`/api/oauth/google-gemini-cli/status/${encodeURIComponent(oauthSessionId)}`)
+        if (!resp.ok) return
+        const data = await resp.json()
+        if (cancelled) return
+        setOauthStatus(data.status || 'running')
+        const latestMsg = (data.progress && data.progress.length > 0)
+          ? data.progress[data.progress.length - 1]
+          : (data.instructions || '')
+        setOauthMessage(data.error || latestMsg || '')
+        if (data.authUrl && !openedAuthWindow) {
+          openedAuthWindow = true
+          window.open(data.authUrl, '_blank', 'noopener,noreferrer')
+        }
+        if (data.status === 'completed' || data.status === 'error') {
+          clearInterval(timer)
+          setOauthSessionId(null)
+          setOauthStartedAt(null)
+          try {
+            const authResp = await fetch('/api/oauth/google-gemini-cli/current')
+            if (authResp.ok) {
+              const authData = await authResp.json()
+              if (!cancelled) {
+                setOauthCurrentProjectId(authData.projectId || null)
+                setOauthCurrentEmail(authData.email || null)
+                setOauthProjectDetectSource(authData.projectId ? 'oauth_auth_json' : null)
+              }
+            }
+          } catch {
+            // ignore
+          }
+          const provResp = await fetch('/api/providers')
+          if (provResp.ok) {
+            const nextProviders = await provResp.json()
+            if (!cancelled) setProviders(nextProviders)
+          }
+        }
+      } catch {
+        // ignore transient polling errors
+      }
+    }, 1000)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [oauthSessionId])
 
   async function saveKey(id: string) {
     setSaving(s => ({ ...s, [id]: true }))
@@ -224,6 +300,77 @@ export function ProviderSetup({
       })
     } finally {
       setDetecting(false)
+    }
+  }
+
+  async function startGeminiOAuthSetup() {
+    setOauthStatus('starting')
+    setOauthMessage('Starting OAuth setup...')
+    try {
+      const resp = await fetch('/api/oauth/google-gemini-cli/start', {
+        method: 'POST',
+      })
+      const data = await resp.json()
+      if (!resp.ok) {
+        if (resp.status === 409 && data?.sessionId) {
+          setOauthSessionId(data.sessionId)
+          setOauthStatus(data.status || 'running')
+          setOauthMessage('OAuth session already running, reattached to active session.')
+          if (!oauthStartedAt) setOauthStartedAt(Date.now())
+          return
+        }
+        setOauthStatus('error')
+        setOauthMessage(data?.error || 'Failed to start OAuth setup')
+        return
+      }
+      setOauthSessionId(data.sessionId)
+      setOauthStatus('running')
+      setOauthStartedAt(Date.now())
+    } catch {
+      setOauthStatus('error')
+      setOauthMessage('Failed to start OAuth setup')
+    }
+  }
+
+  async function retryGeminiOAuthSetup() {
+    setOauthMessage('Retrying OAuth setup...')
+    await startGeminiOAuthSetup()
+  }
+
+  async function submitManualOAuthRedirect() {
+    if (!oauthSessionId || !oauthManualRedirectUrl.trim()) return
+    try {
+      const resp = await fetch(`/api/oauth/google-gemini-cli/manual/${encodeURIComponent(oauthSessionId)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ redirectUrl: oauthManualRedirectUrl.trim() }),
+      })
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}))
+        setOauthStatus('error')
+        setOauthMessage(data?.error || 'Manual callback submission failed')
+        return
+      }
+      setOauthMessage('Manual callback submitted, waiting for token exchange...')
+    } catch {
+      setOauthStatus('error')
+      setOauthMessage('Manual callback submission failed')
+    }
+  }
+
+  async function detectProjectId() {
+    try {
+      const resp = await fetch('/api/oauth/google-gemini-cli/detect-project')
+      const data = await resp.json().catch(() => ({}))
+      if (!resp.ok || !data?.projectId) {
+        setOauthMessage('No project ID detected automatically')
+        return
+      }
+      setOauthCurrentProjectId(data.projectId)
+      setOauthProjectDetectSource(data.source || 'detected')
+      setOauthMessage(`Detected project ID from ${data.source || 'unknown source'}`)
+    } catch {
+      setOauthMessage('Project ID detection failed')
     }
   }
 
@@ -447,6 +594,76 @@ export function ProviderSetup({
                   />
                 </div>
               </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground w-28 shrink-0">Gemini OAuth</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={startGeminiOAuthSetup}
+                  disabled={oauthStatus === 'starting' || oauthStatus === 'awaiting_auth' || oauthStatus === 'running'}
+                  className="h-7 text-[11px]"
+                >
+                  Setup OAuth Gemini
+                </Button>
+                <span className="text-[11px] text-muted-foreground">
+                  {oauthStatus === 'idle' ? 'Opens Google login in a new tab' : oauthMessage || oauthStatus}
+                </span>
+                {(oauthStatus === 'awaiting_auth' || oauthStatus === 'running') && oauthStartedAt && (Date.now() - oauthStartedAt > 120_000) && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={retryGeminiOAuthSetup}
+                    className="h-7 text-[11px]"
+                  >
+                    Retry
+                  </Button>
+                )}
+              </div>
+              <div className="ml-[7.25rem] text-[11px] text-muted-foreground leading-relaxed">
+                1) Click <span className="text-foreground">Setup OAuth Gemini</span>.<br />
+                2) Sign in with Google in the opened tab.<br />
+                3) If redirected to <span className="text-foreground">http://localhost:8085/oauth2callback...</span>, copy the full URL.<br />
+                4) Paste it into <span className="text-foreground">Manual callback</span> below and click <span className="text-foreground">Submit</span>.
+              </div>
+              <div className="ml-[7.25rem] text-[11px] text-muted-foreground">
+                Active account: <span className="text-foreground">{oauthCurrentEmail || '(not connected)'}</span>
+                {' | '}
+                Project ID: <span className="text-foreground">{oauthCurrentProjectId || '(unknown)'}</span>
+                {oauthProjectDetectSource ? (
+                  <>
+                    {' '}
+                    <span>(source: {oauthProjectDetectSource})</span>
+                  </>
+                ) : null}
+                {' '}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={detectProjectId}
+                  className="h-6 text-[10px] ml-2"
+                >
+                  Detect Project ID
+                </Button>
+              </div>
+              {(oauthStatus === 'awaiting_auth' || oauthStatus === 'running') && (
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-muted-foreground w-28 shrink-0">Manual callback</span>
+                  <Input
+                    value={oauthManualRedirectUrl}
+                    onChange={e => setOauthManualRedirectUrl(e.target.value)}
+                    placeholder="Paste http://localhost:8085/oauth2callback?... from browser"
+                    className="flex-1 h-7 text-xs"
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={submitManualOAuthRedirect}
+                    className="h-7 text-[11px]"
+                  >
+                    Submit
+                  </Button>
+                </div>
+              )}
             </div>
           </div>
 

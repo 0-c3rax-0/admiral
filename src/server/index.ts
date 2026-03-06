@@ -11,6 +11,7 @@ import commands from './routes/commands'
 import preferences from './routes/preferences'
 import stats from './routes/stats'
 import map from './routes/map'
+import oauth from './routes/oauth'
 import { addStatsEvent, addStatsSnapshot, getPreference, listProfiles } from './lib/db'
 import { agentManager } from './lib/agent-manager'
 
@@ -29,6 +30,7 @@ app.route('/api/commands', commands)
 app.route('/api/preferences', preferences)
 app.route('/api/stats', stats)
 app.route('/api/map', map)
+app.route('/api/oauth', oauth)
 
 // Health check
 app.get('/api/health', (c) => c.json({ ok: true }))

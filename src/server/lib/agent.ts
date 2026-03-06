@@ -159,12 +159,12 @@ export class Agent {
 
     this.log('system', `Starting LLM loop with ${profile.provider}/${profile.model}`)
 
-    const { model, apiKey, failoverApiKey } = resolveModel(`${profile.provider}/${profile.model}`)
+    const { model, apiKey, failoverApiKey } = await resolveModel(`${profile.provider}/${profile.model}`)
     let failoverModel: Model<any> | undefined
     let failoverModelApiKey: string | undefined = failoverApiKey
     if (profile.failover_provider && profile.failover_model) {
       try {
-        const resolved = resolveModel(`${profile.failover_provider}/${profile.failover_model}`)
+        const resolved = await resolveModel(`${profile.failover_provider}/${profile.failover_model}`)
         failoverModel = resolved.model
         failoverModelApiKey = resolved.apiKey || resolved.failoverApiKey || failoverModelApiKey
       } catch (err) {
@@ -285,7 +285,7 @@ export class Agent {
               ? compactInputModel
               : (compactInputProvider ? `${compactInputProvider}/${compactInputModel}` : '')
             if (compactModelSpec) {
-              const resolvedCompaction = resolveModel(compactModelSpec)
+              const resolvedCompaction = await resolveModel(compactModelSpec)
               compactionModel = resolvedCompaction.model
               compactionApiKey = resolvedCompaction.apiKey || resolvedCompaction.failoverApiKey
             }
@@ -299,7 +299,7 @@ export class Agent {
               ? altSolverModel
               : (altSolverProvider ? `${altSolverProvider}/${altSolverModel}` : '')
             if (altModelSpec) {
-              const resolvedAdvisor = resolveModel(altModelSpec)
+              const resolvedAdvisor = await resolveModel(altModelSpec)
               advisorModel = resolvedAdvisor.model
               advisorApiKey = resolvedAdvisor.apiKey || resolvedAdvisor.failoverApiKey
             }
