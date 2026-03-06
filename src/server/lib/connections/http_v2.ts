@@ -27,6 +27,7 @@ export class HttpV2Connection implements GameConnection {
   private commandRouteMap: Map<string, string> = new Map()
   private specLog: SpecLogFn | undefined
   private v1FallbackLogged = false
+  private ensureSessionPromise: Promise<void> | null = null
 
   constructor(serverUrl: string) {
     this.baseUrl = serverUrl.replace(/\/$/, '') + '/api/v2'
@@ -204,6 +205,18 @@ export class HttpV2Connection implements GameConnection {
   private async ensureSession(): Promise<void> {
     if (this.session && !this.isSessionExpiring()) return
 
+    // Coalesce concurrent callers onto a single in-flight attempt rather than
+    // each starting their own retry loop (which would multiply session creation
+    // requests against the server's rate limit).
+    if (!this.ensureSessionPromise) {
+      this.ensureSessionPromise = this.createSession().finally(() => {
+        this.ensureSessionPromise = null
+      })
+    }
+    return this.ensureSessionPromise
+  }
+
+  private async createSession(): Promise<void> {
     let lastError: Error | null = null
     for (let attempt = 0; attempt < MAX_RECONNECT_ATTEMPTS; attempt++) {
       try {
