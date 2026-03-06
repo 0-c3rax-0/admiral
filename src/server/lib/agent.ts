@@ -267,6 +267,25 @@ export class Agent {
         const llmTimeoutMs = llmTimeoutStr ? parseInt(llmTimeoutStr, 10) * 1000 || undefined : undefined
         const freshForBudget = getProfile(this.profileId)
         const contextBudgetRatio = freshForBudget?.context_budget ?? undefined
+        const compactInputEnabled = getPreference('compact_input_enabled') === 'true'
+        const compactInputProvider = (getPreference('compact_input_provider') || '').trim()
+        const compactInputModel = (getPreference('compact_input_model') || '').trim()
+        let compactionModel: Model<any> | undefined
+        let compactionApiKey: string | undefined
+        if (compactInputEnabled && compactInputModel) {
+          try {
+            const compactModelSpec = compactInputModel.includes('/')
+              ? compactInputModel
+              : (compactInputProvider ? `${compactInputProvider}/${compactInputModel}` : '')
+            if (compactModelSpec) {
+              const resolvedCompaction = resolveModel(compactModelSpec)
+              compactionModel = resolvedCompaction.model
+              compactionApiKey = resolvedCompaction.apiKey || resolvedCompaction.failoverApiKey
+            }
+          } catch (err) {
+            this.log('error', `Compact-input model invalid: ${err instanceof Error ? err.message : String(err)}`)
+          }
+        }
 
         this.setActivity('Waiting for LLM response...')
         await runAgentTurn(
@@ -294,6 +313,9 @@ export class Agent {
             llmTimeoutMs,
             resumeRequest,
             contextBudgetRatio,
+            compactInputEnabled,
+            compactionModel,
+            compactionApiKey,
             onActivity: (a) => this.setActivity(a),
             onAdaptiveContext: (info) => {
               this._adaptiveMode = info.mode

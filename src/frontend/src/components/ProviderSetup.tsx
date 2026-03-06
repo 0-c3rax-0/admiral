@@ -3,6 +3,7 @@ import { KeyRound, Wifi, WifiOff, Search, Server, X } from 'lucide-react'
 import type { Provider } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { ModelPicker } from '@/components/ModelPicker'
 
 const LOCALHOST = '127.0.0.1'
 
@@ -44,6 +45,12 @@ interface Props {
   onStartupAutoconnectMaxDelaySecChange: (seconds: number) => void
   predict429Enabled: boolean
   onPredict429EnabledChange: (enabled: boolean) => void
+  compactInputEnabled: boolean
+  onCompactInputEnabledChange: (enabled: boolean) => void
+  compactInputProvider: string
+  onCompactInputProviderChange: (provider: string) => void
+  compactInputModel: string
+  onCompactInputModelChange: (model: string) => void
   onClose: () => void
 }
 
@@ -65,6 +72,12 @@ export function ProviderSetup({
   onStartupAutoconnectMaxDelaySecChange,
   predict429Enabled,
   onPredict429EnabledChange,
+  compactInputEnabled,
+  onCompactInputEnabledChange,
+  compactInputProvider,
+  onCompactInputProviderChange,
+  compactInputModel,
+  onCompactInputModelChange,
   onClose,
 }: Props) {
   const [providers, setProviders] = useState(initialProviders)
@@ -328,6 +341,45 @@ export function ProviderSetup({
                   />
                   Enable risk hints in logs
                 </label>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground w-28 shrink-0">Compact input</span>
+                <label className="inline-flex items-center gap-2 text-xs text-foreground cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={compactInputEnabled}
+                    onChange={e => onCompactInputEnabledChange(e.target.checked)}
+                  />
+                  Reduce LLM input context size
+                </label>
+                <span className="text-[11px] text-muted-foreground">
+                  Summarizes only when context exceeds budget (not every request)
+                </span>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground w-28 shrink-0">Reduce provider</span>
+                <select
+                  value={compactInputProvider}
+                  onChange={e => onCompactInputProviderChange(e.target.value)}
+                  className="h-7 min-w-36 bg-background border border-input px-2 text-xs font-jetbrains text-foreground"
+                >
+                  {providers.map(p => (
+                    <option key={p.id} value={p.id}>
+                      {PROVIDER_INFO[p.id]?.label || p.id}
+                    </option>
+                  ))}
+                </select>
+                <span className="text-[11px] text-muted-foreground">model provider for context reduction</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground w-28 shrink-0">Reduce model</span>
+                <div className="flex-1 min-w-0">
+                  <ModelPicker
+                    provider={compactInputProvider}
+                    value={compactInputModel}
+                    onChange={onCompactInputModelChange}
+                  />
+                </div>
               </div>
             </div>
           </div>

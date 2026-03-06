@@ -43,8 +43,10 @@ export interface LoopOptions {
   llmTimeoutMs?: number
   resumeRequest?: { id: number; idempotencyKey: string; attemptCount?: number }
   contextBudgetRatio?: number
-  onActivity?: (activity: string) => void
+  compactInputEnabled?: boolean
   compactionModel?: Model<any>  // Separate (cheaper) model for compaction summarization
+  compactionApiKey?: string
+  onActivity?: (activity: string) => void
   onAdaptiveContext?: (info: { mode: 'normal' | 'soft' | 'high' | 'critical'; effectiveRatio: number; rssBytes: number }) => void
 }
 
@@ -70,7 +72,9 @@ export async function runAgentTurn(
     if (options?.signal?.aborted) return
 
     enforceContextMessageCap(context)
-    await compactContext(summaryModel, context, compaction, options)
+    if (options?.compactInputEnabled) {
+      await compactContext(summaryModel, context, compaction, options)
+    }
 
     options?.onActivity?.('Waiting for LLM response...')
     let response: AssistantMessage
@@ -306,6 +310,7 @@ async function compactContext(
   context: Context,
   compaction?: CompactionState,
   options?: LoopOptions,
+  force = false,
 ): Promise<void> {
   // Proactively truncate oversized tool results to prevent token bloat
   for (const msg of context.messages) {
@@ -328,7 +333,7 @@ async function compactContext(
   const budget = Math.floor(model.contextWindow * ratio)
   const currentTokens = totalMessageTokens(context.messages)
 
-  if (currentTokens < budget) return
+  if (!force && currentTokens < budget) return
 
   const recentBudget = Math.floor(budget * 0.6)
   let recentTokens = 0
@@ -351,7 +356,8 @@ async function compactContext(
 
   let summary: string
   try {
-    summary = await summarizeViaLLM(model, oldMessages, compaction?.summary, options)
+    const summaryModel = options?.compactionModel || model
+    summary = await summarizeViaLLM(summaryModel, oldMessages, compaction?.summary, options)
   } catch {
     summary = compaction?.summary
       ? compaction.summary + '\n\n(Additional context was lost due to summarization failure.)'
@@ -412,7 +418,7 @@ async function summarizeViaLLM(
   try {
     const resp = await complete(model, summaryCtx, {
       signal,
-      apiKey: options?.apiKey || (!options?.apiKey ? options?.failoverApiKey : undefined),
+      apiKey: options?.compactionApiKey || options?.apiKey || (!options?.apiKey ? options?.failoverApiKey : undefined),
       maxTokens: SUMMARY_MAX_TOKENS,
     })
     clearTimeout(timeout)
@@ -446,6 +452,7 @@ async function completeWithRetry(
   // Always try primary first when available; failover is activated on demand.
   let useFailover = !primaryKey && !!failoverKey
   let moderationRemediations = 0
+  let contextOverflowRemediations = 0
 
   const timeoutMs = options?.llmTimeoutMs || DEFAULT_LLM_TIMEOUT_MS
   const messageCount = context.messages.length
@@ -548,6 +555,37 @@ async function completeWithRetry(
         log('system', `Emergency compaction complete: ${context.messages.length} messages, ~${totalMessageTokens(context.messages)} tokens`)
       }
 
+      if (options?.compactInputEnabled && isContextOverflowError(lastError) && contextOverflowRemediations < 2) {
+        const beforeCount = context.messages.length
+        const beforeTokens = totalMessageTokens(context.messages)
+        try {
+          await compactContext(model, context, compaction, options, true)
+          const afterCount = context.messages.length
+          const afterTokens = totalMessageTokens(context.messages)
+          if (afterCount < beforeCount || afterTokens < beforeTokens) {
+            contextOverflowRemediations++
+            log(
+              'system',
+              'Context overflow detected; summarized context and retrying request',
+              JSON.stringify(
+                {
+                  attempt: attempt + 1,
+                  before: { messageCount: beforeCount, estimatedTokens: beforeTokens },
+                  after: { messageCount: afterCount, estimatedTokens: afterTokens },
+                  error: lastError.message,
+                },
+                null,
+                2,
+              ),
+            )
+            attempt--
+            continue
+          }
+        } catch {
+          // fall through to standard retry path
+        }
+      }
+
       if (isModerationBlock(lastError)) {
         const moderationInfo = analyzeModerationContext(context)
         log(
@@ -645,6 +683,15 @@ async function emergencyCompact(
   }
 
   context.messages = [context.messages[0], summaryMessage, ...recentMessages]
+}
+
+function isContextOverflowError(err: Error): boolean {
+  const msg = (err.message || '').toLowerCase()
+  return msg.includes('context_length_exceeded')
+    || msg.includes('too many tokens')
+    || msg.includes('maximum context length')
+    || msg.includes('prompt is too long')
+    || (msg.includes('token') && msg.includes('limit'))
 }
 
 type RateRiskLevel = 'LOW' | 'MEDIUM' | 'HIGH'
