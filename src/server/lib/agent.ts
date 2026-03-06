@@ -265,8 +265,15 @@ export class Agent {
         const compactInputEnabled = getPreference('compact_input_enabled') === 'true'
         const compactInputProvider = (getPreference('compact_input_provider') || '').trim()
         const compactInputModel = (getPreference('compact_input_model') || '').trim()
+        const altSolverEnabled = getPreference('alt_solver_enabled') === 'true'
+        const altSolverAfterRoundsStr = getPreference('alt_solver_after_rounds')
+        const altSolverAfterRounds = altSolverAfterRoundsStr ? parseInt(altSolverAfterRoundsStr, 10) || 3 : 3
+        const altSolverProvider = (getPreference('alt_solver_provider') || '').trim()
+        const altSolverModel = (getPreference('alt_solver_model') || '').trim()
         let compactionModel: Model<any> | undefined
         let compactionApiKey: string | undefined
+        let advisorModel: Model<any> | undefined
+        let advisorApiKey: string | undefined
         if (compactInputEnabled && compactInputModel) {
           try {
             const compactModelSpec = compactInputModel.includes('/')
@@ -279,6 +286,20 @@ export class Agent {
             }
           } catch (err) {
             this.log('error', `Compact-input model invalid: ${err instanceof Error ? err.message : String(err)}`)
+          }
+        }
+        if (altSolverEnabled && altSolverModel) {
+          try {
+            const altModelSpec = altSolverModel.includes('/')
+              ? altSolverModel
+              : (altSolverProvider ? `${altSolverProvider}/${altSolverModel}` : '')
+            if (altModelSpec) {
+              const resolvedAdvisor = resolveModel(altModelSpec)
+              advisorModel = resolvedAdvisor.model
+              advisorApiKey = resolvedAdvisor.apiKey || resolvedAdvisor.failoverApiKey
+            }
+          } catch (err) {
+            this.log('error', `Alt-solver model invalid: ${err instanceof Error ? err.message : String(err)}`)
           }
         }
 
@@ -311,6 +332,10 @@ export class Agent {
             compactInputEnabled,
             compactionModel,
             compactionApiKey,
+            advisorEnabled: altSolverEnabled,
+            advisorAfterRounds: altSolverAfterRounds,
+            advisorModel,
+            advisorApiKey,
             onActivity: (a) => this.setActivity(a),
             onAdaptiveContext: (info) => {
               this._adaptiveMode = info.mode

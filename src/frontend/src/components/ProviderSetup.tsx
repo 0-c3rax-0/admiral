@@ -51,6 +51,14 @@ interface Props {
   onCompactInputProviderChange: (provider: string) => void
   compactInputModel: string
   onCompactInputModelChange: (model: string) => void
+  altSolverEnabled: boolean
+  onAltSolverEnabledChange: (enabled: boolean) => void
+  altSolverAfterRounds: number
+  onAltSolverAfterRoundsChange: (rounds: number) => void
+  altSolverProvider: string
+  onAltSolverProviderChange: (provider: string) => void
+  altSolverModel: string
+  onAltSolverModelChange: (model: string) => void
   onClose: () => void
 }
 
@@ -78,6 +86,14 @@ export function ProviderSetup({
   onCompactInputProviderChange,
   compactInputModel,
   onCompactInputModelChange,
+  altSolverEnabled,
+  onAltSolverEnabledChange,
+  altSolverAfterRounds,
+  onAltSolverAfterRoundsChange,
+  altSolverProvider,
+  onAltSolverProviderChange,
+  altSolverModel,
+  onAltSolverModelChange,
   onClose,
 }: Props) {
   const [providers, setProviders] = useState(initialProviders)
@@ -378,6 +394,56 @@ export function ProviderSetup({
                     provider={compactInputProvider}
                     value={compactInputModel}
                     onChange={onCompactInputModelChange}
+                  />
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground w-28 shrink-0">Alt solver</span>
+                <label className="inline-flex items-center gap-2 text-xs text-foreground cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={altSolverEnabled}
+                    onChange={e => onAltSolverEnabledChange(e.target.checked)}
+                  />
+                  Ask second LLM for alternative plan
+                </label>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground w-28 shrink-0">After rounds</span>
+                <Input
+                  type="number"
+                  value={altSolverAfterRounds}
+                  onChange={e => {
+                    const v = parseInt(e.target.value, 10)
+                    if (!isNaN(v) && v > 0) onAltSolverAfterRoundsChange(v)
+                  }}
+                  min={1}
+                  max={50}
+                  className="w-20 h-7 text-xs"
+                />
+                <span className="text-[11px] text-muted-foreground">trigger after this many tool rounds</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground w-28 shrink-0">Alt provider</span>
+                <select
+                  value={altSolverProvider}
+                  onChange={e => onAltSolverProviderChange(e.target.value)}
+                  className="h-7 min-w-36 bg-background border border-input px-2 text-xs font-jetbrains text-foreground"
+                >
+                  {providers.map(p => (
+                    <option key={p.id} value={p.id}>
+                      {PROVIDER_INFO[p.id]?.label || p.id}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground w-28 shrink-0">Alt model</span>
+                <div className="flex-1 min-w-0">
+                  <ModelPicker
+                    provider={altSolverProvider}
+                    value={altSolverModel}
+                    onChange={onAltSolverModelChange}
                   />
                 </div>
               </div>
