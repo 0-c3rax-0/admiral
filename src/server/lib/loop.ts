@@ -646,6 +646,9 @@ async function completeWithRetry(
       if (attempt < MAX_RETRIES - 1) {
         markLlmRequestRetryableError(request.id, lastError.message)
       }
+      const providerErrorMeta = errorType === 'provider_error'
+        ? extractProviderErrorMeta(lastError)
+        : undefined
       const errorLabel = errorType === 'aborted' ? 'LLM aborted'
         : errorType === 'timeout' ? 'LLM timeout'
         : 'LLM error'
@@ -658,6 +661,7 @@ async function completeWithRetry(
         attempt: attempt + 1,
         maxRetries: MAX_RETRIES,
         errorType,
+        providerErrorMeta,
         error: lastError.message,
       }, null, 2))
       await sleep(delay)
@@ -927,4 +931,37 @@ function classifyLlmError(err: Error): 'aborted' | 'timeout' | 'provider_error' 
   if (msg.includes('timed out')) return 'timeout'
   if (msg.includes('aborted') || msg.includes('aborterror')) return 'aborted'
   return 'provider_error'
+}
+
+function extractProviderErrorMeta(err: Error): {
+  statusCode?: number
+  is5xx?: boolean
+  noBody?: boolean
+  code?: string
+  name?: string
+} {
+  const anyErr = err as any
+  const msg = String(err.message || '')
+  const msgLower = msg.toLowerCase()
+
+  // Parse patterns like "500 status code (no body)".
+  const statusFromMsg = (() => {
+    const m = msg.match(/\b([1-5]\d\d)\b/)
+    if (!m) return undefined
+    const code = Number(m[1])
+    return Number.isFinite(code) ? code : undefined
+  })()
+
+  const statusCode =
+    (typeof anyErr.status === 'number' ? anyErr.status : undefined)
+    ?? (typeof anyErr.statusCode === 'number' ? anyErr.statusCode : undefined)
+    ?? statusFromMsg
+
+  return {
+    statusCode,
+    is5xx: typeof statusCode === 'number' ? statusCode >= 500 && statusCode <= 599 : undefined,
+    noBody: msgLower.includes('no body'),
+    code: typeof anyErr.code === 'string' ? anyErr.code : undefined,
+    name: typeof anyErr.name === 'string' ? anyErr.name : undefined,
+  }
 }
