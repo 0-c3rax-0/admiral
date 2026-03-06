@@ -132,7 +132,18 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
         }
         setProfiles(data as unknown as Profile[])
         setStatuses(newStatuses)
-        setPlayerDataMap(prev => ({ ...prev, ...newGameStates }))
+        setPlayerDataMap(prev => {
+          const next = { ...prev }
+          for (const [id, incoming] of Object.entries(newGameStates)) {
+            const existing = next[id]
+            const existingHasFullStatus = !!(existing && typeof existing === 'object' && 'player' in existing)
+            const incomingHasFullStatus = !!(incoming && typeof incoming === 'object' && 'player' in incoming)
+            // Keep richer get_status payloads instead of replacing them with slim snapshots.
+            if (existingHasFullStatus && !incomingHasFullStatus) continue
+            next[id] = incoming
+          }
+          return next
+        })
       } catch { /* ignore */ }
     }
     poll()
