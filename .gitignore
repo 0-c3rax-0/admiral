@@ -17,3 +17,4 @@ tsconfig.tsbuildinfo
 dist/
 src/frontend/dist/
 admiral
+test-results/

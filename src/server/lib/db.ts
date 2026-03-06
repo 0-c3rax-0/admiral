@@ -5,6 +5,8 @@ import type { Provider, Profile, LogEntry } from '../../shared/types'
 
 const DB_DIR = path.join(process.cwd(), 'data')
 const DB_PATH = path.join(DB_DIR, 'admiral.db')
+const RETENTION_DAYS = 3
+const SUCCESS_CONTEXT_RETENTION_HOURS = 3
 const MAX_LOG_ROWS_PER_PROFILE = 5000
 const LOG_PRUNE_EVERY_N_INSERTS = 100
 const MAX_STATS_ROWS_PER_PROFILE = 20_000
@@ -364,7 +366,6 @@ export function enqueueLlmRequest(input: {
     input.messageCount,
     input.estimatedTokens,
   )
-
   return { id: Number(result.lastInsertRowid), idempotencyKey: input.idempotencyKey }
 }
 
@@ -576,4 +577,40 @@ export function getAllPreferences(): Record<string, string> {
   const prefs: Record<string, string> = {}
   for (const row of rows) prefs[row.key] = row.value
   return prefs
+}
+
+export function pruneOldRows(): void {
+  const db = getDb()
+  const cutoffModifier = `-${RETENTION_DAYS} days`
+  const successContextCutoffModifier = `-${SUCCESS_CONTEXT_RETENTION_HOURS} hours`
+
+  db.query(
+    `UPDATE llm_requests
+     SET system_prompt = NULL,
+         messages_json = NULL
+     WHERE status = 'succeeded'
+       AND completed_at IS NOT NULL
+       AND completed_at < datetime('now', ?)
+       AND (system_prompt IS NOT NULL OR messages_json IS NOT NULL)`
+  ).run(successContextCutoffModifier)
+
+  db.query(
+    `DELETE FROM llm_requests
+     WHERE created_at < datetime('now', ?)`
+  ).run(cutoffModifier)
+
+  db.query(
+    `DELETE FROM log_entries
+     WHERE timestamp < datetime('now', ?)`
+  ).run(cutoffModifier)
+
+  db.query(
+    `DELETE FROM stats_snapshots
+     WHERE ts < datetime('now', ?)`
+  ).run(cutoffModifier)
+
+  db.query(
+    `DELETE FROM stats_events
+     WHERE ts < datetime('now', ?)`
+  ).run(cutoffModifier)
 }

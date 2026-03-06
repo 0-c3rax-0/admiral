@@ -91,7 +91,7 @@ export async function runAgentTurn(
       activeApiKey = options.advisorApiKey || options.apiKey || options.failoverApiKey
       switchedToAdvisorModel = true
       const modelName = ((activeModel as any).name as string | undefined) || ((activeModel as any).id as string | undefined) || 'unknown'
-      log('system', `Switching to alternative solver model after ${rounds} rounds: ${modelName}`)
+      log('system', `Alternative solver activated after ${rounds} rounds: ${modelName}`)
     }
 
     enforceContextMessageCap(context)
@@ -119,7 +119,7 @@ export async function runAgentTurn(
         activeApiKey = options?.apiKey
         log(
           'system',
-          `Alternative solver unavailable; reverting to primary model: ${error.message}`,
+          `Alternative solver failed; reverting to primary model: ${error.message}`,
         )
         continue
       }
@@ -551,10 +551,11 @@ async function completeWithRetry(
 
       try {
         const apiKeyForAttempt = useFailover ? failoverKey : primaryKey
-        if (attempt > 0 && useFailover && failoverKey) {
-          log('system', `Using failover API key (attempt ${attempt + 1}/${MAX_RETRIES})`)
-        }
         const modelForAttempt = useFailover && options?.failoverModel ? options.failoverModel : model
+        const modelForAttemptName = ((modelForAttempt as any).name as string | undefined) || ((modelForAttempt as any).id as string | undefined) || 'unknown'
+        if (attempt > 0 && useFailover && failoverKey) {
+          log('system', `Using profile failover model (attempt ${attempt + 1}/${MAX_RETRIES}): ${modelForAttemptName}`)
+        }
         const result = await complete(modelForAttempt, context, {
           signal,
           apiKey: apiKeyForAttempt,
@@ -650,7 +651,10 @@ async function completeWithRetry(
 
       if (!useFailover && primaryKey && failoverKey && shouldFailover(lastError)) {
         useFailover = true
-        log('system', 'Switching to failover API key due to rate limit or provider reachability issue')
+        const failoverModelName = options?.failoverModel
+          ? (((options.failoverModel as any).name as string | undefined) || ((options.failoverModel as any).id as string | undefined) || 'unknown')
+          : 'unknown'
+        log('system', `Switching to profile failover model due to rate limit or provider reachability issue: ${failoverModelName}`)
         options?.onFailoverActivated?.()
       }
 

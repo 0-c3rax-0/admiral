@@ -1,166 +1,252 @@
 # Admiral
 
-Admiral is a web-based agent manager for [SpaceMolt](https://spacemolt.com), the MMO played by AI. Run multiple agents simultaneously from your browser with full visibility into every LLM thought, tool call, and server response.
+This repository is a customized fork of [SpaceMolt/admiral](https://github.com/SpaceMolt/admiral), the web UI for running and observing multiple SpaceMolt agents.
 
-<img width="2560" height="1280" alt="192 168 64 10_3030__profile=2a8566a4-c5b2-4965-8c1b-3c80d62d1051" src="https://github.com/user-attachments/assets/dc38fad9-3522-4c49-9214-56ff5497ae21" />
+It keeps the core Admiral workflow, but adds several operational and LLM-orchestration features that are specific to this repo.
+
+This fork was developed primarily with help from Codex as the main coding agent.
+
+![Redacted Admiral dashboard](docs/assets/dashboard-redacted.png)
+
+## What This Repo Is
+
+- Bun + Hono backend with a Vite/React frontend
+- Multi-profile SpaceMolt agent manager
+- SQLite-backed local state in `data/admiral.db`
+- Full per-agent logs, directives, command tools, and profile state
+
+The app listens on `http://localhost:3031` by default.
 
 ## Quick Start
 
-### Download
-
-Grab a pre-built binary from [Releases](https://github.com/SpaceMolt/admiral/releases) -- standalone executables for Linux, macOS, and Windows. No runtime required.
-
-```bash
-# Extract and run
-tar xzf admiral-macos-arm64.tar.gz
-./admiral-macos-arm64
-```
-
-Open http://localhost:3031 in your browser. Data is stored in `data/admiral.db` (created automatically).
-
 ### From Source
 
-If you prefer to build from source, you'll need [Bun](https://bun.sh) v1.1+:
-
 ```bash
-git clone https://github.com/SpaceMolt/admiral.git
+git clone git@github.com:0-c3rax-0/admiral.git
 cd admiral
 bun install
+bun run dev
+```
+
+For a production build:
+
+```bash
 bun run build
 ./admiral
 ```
 
-## Development
+Data is stored under:
+
+- `data/admiral.db`
+- `data/memory/` for persisted profile memory
+
+## Main Features In This Fork
+
+### Multi-agent control
+
+Run multiple SpaceMolt profiles in parallel, each with its own:
+
+- connection
+- LLM loop
+- directive
+- logs
+- TODO state
+- persistent memory
+
+### Connection modes
+
+This repo supports:
+
+- `http`
+- `http_v2`
+- `websocket`
+- `websocket_v2`
+- `mcp`
+- `mcp_v2`
+
+Mode summary:
+
+- `http`: legacy polling mode
+- `http_v2`: current HTTP API v2 mode
+- `websocket`: legacy WebSocket mode
+- `websocket_v2`: WebSocket transport with heartbeat handling, reconnect logic, and automatic re-authentication retry for recoverable auth failures
+- `mcp`: legacy MCP mode
+- `mcp_v2`: Model Context Protocol v2 mode with tool discovery
+
+`websocket_v2` is documented in this fork because it is implemented as a distinct connection class, not just a label alias. Compared with the older `websocket` mode, it adds:
+
+- heartbeat ping/pong monitoring
+- reconnect backoff with stale-connection detection
+- retry of commands after session-expired or session-invalid auth failures
+- more defensive command send/error handling
+
+For most users, `http_v2` remains the safer default. `websocket_v2` is the lower-latency persistent transport option when you specifically want a live socket connection and the game server path is stable enough for it.
+
+### LLM providers
+
+Configured providers include:
+
+- Anthropic
+- OpenAI
+- Google AI
+- Google Gemini OAuth (`google-gemini-cli`)
+- Groq
+- xAI
+- Mistral
+- MiniMax
+- NVIDIA
+- OpenRouter
+- Ollama
+- LM Studio
+- Custom OpenAI-compatible endpoints
+
+### Provider failover
+
+Profiles can define a primary provider/model and a profile-level failover provider/model.
+
+When the current model hits rate limits or provider reachability errors, Admiral can switch to the configured failover model for the same turn.
+
+### Alternative solver
+
+This fork supports an alternative solver path:
+
+- trigger after N tool rounds
+- switch the current turn to an alternative model
+- if that alternative model fails, revert to the primary model
+- if needed, still use the normal profile failover path afterward
+
+This is useful for breaking repetitive loops without changing the default model for every request.
+
+### Google Gemini OAuth
+
+This repo includes a local OAuth flow for `google-gemini-cli`:
+
+- start OAuth from the UI
+- poll auth status
+- detect current project ID
+- store OAuth credentials in local preferences
+- use refreshed OAuth credentials automatically through `@mariozechner/pi-ai`
+
+### Persistent profile memory
+
+Profiles can save and reload long-lived memory snapshots from `data/memory/`.
+
+This memory is injected back into the agent context on later runs, separate from the transient turn context.
+
+### Context compaction
+
+The LLM loop can optionally compact context with a separate model/provider before requests get too large.
+
+### Startup autoconnect
+
+This fork can auto-connect enabled profiles on server startup, with configurable randomized delays to avoid a thundering herd.
+
+### Runtime stats
+
+The server periodically records profile runtime snapshots and events into SQLite for status/history views.
+
+### TODO and captain's log
+
+Each agent has:
+
+- a local TODO list used by the agent loop
+- access to the SpaceMolt captain's log through tools and UI
+
+## Changes Compared To Upstream `SpaceMolt/admiral`
+
+This fork currently adds or changes the following behavior relative to the normal Admiral repo:
+
+### LLM orchestration changes
+
+- profile-level failover provider/model support
+- alternative solver support after configurable tool rounds
+- clearer failover and alternative-solver logging
+- compact-input / context-compaction settings
+- restart recovery for in-flight requests persisted in SQLite
+
+### Provider changes
+
+- Google Gemini OAuth integration via `google-gemini-cli`
+- OAuth status and project-detection endpoints in the backend
+- frontend provider setup for OAuth login and manual redirect completion
+
+### Agent-state changes
+
+- persistent per-profile memory stored on disk
+- local TODO tooling integrated into the agent loop
+- additional captain's log tooling and side-panel usage
+
+### Operations changes
+
+- startup autoconnect with randomized delay windows
+- periodic runtime stats snapshots/events
+- built-in retention pruning for SQLite data
+- successful `llm_requests` keep full context briefly, then are compacted later to reduce DB growth
+
+## Fork-Specific Additions
+
+- Google Gemini OAuth support with local browser login flow and stored OAuth refresh state
+- alternative solver routing after configurable tool rounds
+- profile-level primary/failover provider-model orchestration
+- persistent per-profile memory stored on disk and reloadable from the UI
+- local TODO support wired into the tool loop
+- startup autoconnect for enabled profiles
+- built-in runtime retention and SQLite growth controls
+
+## Operational Differences From Upstream
+
+- this fork is tuned more aggressively for unattended multi-agent operation
+- LLM failover and alternative-solver behavior are first-class runtime features here
+- local SQLite retention behavior is part of the application, not an external ops step
+- successful LLM request payloads are intentionally compacted after a short diagnostic window
+- Google OAuth-backed Gemini usage is supported alongside API-key-based providers
+
+## Current Retention Behavior
+
+This fork now applies built-in local retention without any external cron/systemd timer:
+
+- rows older than 3 days are pruned from:
+  - `llm_requests`
+  - `log_entries`
+  - `stats_snapshots`
+  - `stats_events`
+- successful `llm_requests` keep `system_prompt` and `messages_json` for 3 hours
+- after 3 hours, successful requests are compacted by clearing those large fields
+- failed, pending, and processing requests keep their full context for diagnosis and restart recovery
+
+## Development Notes
+
+Run the app in development:
 
 ```bash
 bun run dev
 ```
 
-This starts both the API server and Vite frontend with hot reload via `concurrently`.
-
-## Run as a systemd service (Linux)
-
-Use this if Admiral should survive SSH logout and restart automatically after reboots.
-
-### 1. Create a dedicated user and install path (example)
+Typecheck:
 
 ```bash
-sudo useradd --system --create-home --home-dir /opt/admiral --shell /usr/sbin/nologin admiral || true
-sudo mkdir -p /opt/admiral
-sudo chown -R admiral:admiral /opt/admiral
+bun run typecheck
 ```
 
-Copy your `admiral` binary into `/opt/admiral` (or adjust paths below).
-
-### 2. systemd unit template
-
-Create `/etc/systemd/system/admiral.service`:
-
-```ini
-[Unit]
-Description=Admiral SpaceMolt Agent Manager
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=admiral
-Group=admiral
-WorkingDirectory=/opt/admiral
-ExecStart=/opt/admiral/admiral
-Restart=always
-RestartSec=5
-Environment=PORT=3031
-
-# Optional hardening
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-ProtectHome=true
-ReadWritePaths=/opt/admiral
-
-[Install]
-WantedBy=multi-user.target
-```
-
-### 3. Enable and start
+Production build:
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now admiral
-sudo systemctl status admiral --no-pager
+bun run build
 ```
 
-### 4. Logs and control
+## Notes About Upstream
+
+Upstream remains:
+
+- canonical upstream: `https://github.com/SpaceMolt/admiral`
+
+This fork is currently tracked from:
+
+- fork remote: `git@github.com:0-c3rax-0/admiral.git`
+
+If you need to compare behavior against upstream, start with:
 
 ```bash
-sudo journalctl -u admiral -f
-sudo systemctl restart admiral
-sudo systemctl stop admiral
+git fetch upstream
+git diff upstream/main...main
 ```
-
-### 5. Optional: API health monitoring with systemd timer
-
-`systemd` does not probe `/api/health` by itself. Use a timer + oneshot service:
-
-```bash
-# Copy healthcheck script
-sudo cp scripts/admiral-healthcheck.sh /opt/admiral/admiral-healthcheck.sh
-sudo chmod +x /opt/admiral/admiral-healthcheck.sh
-
-# Copy unit files
-sudo cp scripts/systemd/admiral-healthcheck.service /etc/systemd/system/admiral-healthcheck.service
-sudo cp scripts/systemd/admiral-healthcheck.timer /etc/systemd/system/admiral-healthcheck.timer
-
-# Reload + enable timer
-sudo systemctl daemon-reload
-sudo systemctl enable --now admiral-healthcheck.timer
-
-# Verify
-sudo systemctl status admiral-healthcheck.timer --no-pager
-sudo systemctl list-timers --all | grep admiral-healthcheck
-```
-
-When `/api/health` fails, the healthcheck restarts `admiral.service` automatically.
-
-## Features
-
-### Multiple Simultaneous Agents
-
-Run as many agents as you want at the same time. Each profile gets its own connection, LLM loop, and log stream. Switch between them instantly from the sidebar, which shows live connection status for every agent.
-
-### Any LLM Provider
-
-Admiral supports frontier cloud providers (Anthropic, OpenAI, Google, Groq, xAI, Mistral, MiniMax, OpenRouter), local models (Ollama, LM Studio), and any OpenAI-compatible endpoint via the custom provider. Configure API keys and endpoint URLs from the settings panel -- local providers are auto-detected on your network.
-
-### Full Activity Inspection
-
-Every agent action is logged in a Chrome DevTools-style log viewer. Filter by category -- LLM calls, tool executions, server responses, errors, system events -- and expand any entry to see the full detail. Token usage and costs are tracked per LLM call.
-
-### Command Panel with Dynamic Help
-
-Send game commands manually with autocomplete and fuzzy search across all 150+ SpaceMolt commands. Each command shows its parameters and descriptions inline so you don't need to look up the docs.
-
-### Quick Action Bar
-
-One-click buttons for common queries (status, cargo, system, ship, POI, market, skills, nearby) that fire the command and display results immediately. Useful for checking game state at a glance without interrupting the agent.
-
-### Player Status and Data
-
-View your agent's live game state -- empire, location, credits, ship, cargo, skills -- pulled directly from the server. Player colors are rendered from in-game customization.
-
-### Directives
-
-Set a high-level directive for each agent ("mine ore and sell it", "explore new systems", "hunt pirates"). Changing the directive restarts the agent's current turn immediately so it picks up the new mission without waiting.
-
-### Log and TODO
-
-Each agent maintains a local TODO list for tracking its own goals and progress. The server-side captain's log is also viewable and editable, letting you read and write log entries that persist across sessions.
-
-### Five Connection Modes
-
-Connect via HTTP v1 (polling), HTTP v2 (streaming), WebSocket (persistent), MCP v1, or MCP v2 (Model Context Protocol). HTTP v2 is the default and most reliable; WebSocket gives lower latency; MCP is for agents that use the standardized tool protocol.
-
-## Built with Claude Code
-
-Admiral was coded entirely with [Claude Code](https://docs.anthropic.com/en/docs/claude-code), Anthropic's agentic coding tool.

@@ -12,7 +12,7 @@ import preferences from './routes/preferences'
 import stats from './routes/stats'
 import map from './routes/map'
 import oauth from './routes/oauth'
-import { addStatsEvent, addStatsSnapshot, getPreference, listProfiles } from './lib/db'
+import { addStatsEvent, addStatsSnapshot, getPreference, listProfiles, pruneOldRows } from './lib/db'
 import { agentManager } from './lib/agent-manager'
 
 const app = new Hono()
@@ -169,6 +169,24 @@ function scheduleStatsSnapshots(): void {
 }
 
 scheduleStatsSnapshots()
+
+function scheduleRetentionPrune(): void {
+  const intervalMs = 15 * 60_000
+
+  const run = () => {
+    try {
+      pruneOldRows()
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[retention] prune failed: ${msg}`)
+    }
+  }
+
+  setTimeout(run, 30_000)
+  setInterval(run, intervalMs)
+}
+
+scheduleRetentionPrune()
 
 // Ensure API callers always get JSON (never HTML fallback) for unknown API paths.
 app.notFound((c) => {
