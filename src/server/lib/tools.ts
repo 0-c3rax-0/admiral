@@ -150,6 +150,9 @@ export function detectImmediateRecoveryHint(toolName: string, toolArgs: Record<s
   if (lower.includes('error: [not_enough_fuel]')) {
     return { reason: 'movement plan is blocked by insufficient fuel', suggestedStateCheck: 'get_status' }
   }
+  if (effectiveCommand === 'sell' && lower.includes('error: [invalid_payload]') && lower.includes('quantity must be greater than 0')) {
+    return { reason: 'sell was attempted with zero quantity or missing inventory', suggestedStateCheck: 'get_status' }
+  }
   if (effectiveCommand === 'sell' && (lower.includes('error: [market') || lower.includes('error: [sell'))) {
     return { reason: 'sell action failed due to market constraints', suggestedStateCheck: 'get_status' }
   }
@@ -437,6 +440,10 @@ function formatCommandError(command: string, code: string, message: string): str
     return `${prefix}\nInterpretation: the ship lacks fuel for this plan. Stop repeating the same movement action, refresh with get_status, and re-plan around refueling or a shorter route.`
   }
 
+  if (normalized === 'invalid_payload' && command === 'sell' && /quantity must be greater than 0/i.test(message)) {
+    return `${prefix}\nInterpretation: sell was called with quantity 0 or with no matching inventory available. Refresh with get_status or get_cargo, recompute the available amount, and only sell a positive quantity.`
+  }
+
   if ((normalized.includes('market') || normalized.includes('sell')) && command === 'sell') {
     return `${prefix}\nInterpretation: selling failed due to market or sale constraints. Refresh with get_status or market/cargo queries and choose a corrected sell plan instead of repeating the same sell action blindly.`
   }
@@ -457,6 +464,9 @@ function annotateNotification(tag: string, message: string): string {
   }
   if (upperTag === 'ACTION_ERROR' && /\bnot_enough_fuel\b/i.test(message)) {
     return `${message} Interpretation: the current route or action is blocked by fuel. Re-plan around refueling or a nearer destination instead of retrying the same move.`
+  }
+  if (upperTag === 'ACTION_ERROR' && /\binvalid_payload\b/i.test(message) && /quantity must be greater than 0/i.test(message)) {
+    return `${message} Interpretation: the sell plan used quantity 0 or stale cargo information. Re-check inventory and only sell a positive available amount.`
   }
   if (upperTag === 'OK' && /\b\"action\":\"dock\"\b/i.test(message)) {
     return `${message} Interpretation: docking succeeded; treat the ship as docked.`

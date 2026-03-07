@@ -666,6 +666,14 @@ async function completeWithRetry(
         requestId: request.id,
         idempotencyKey,
         model: { name: (model as any).name || 'unknown', contextWindow: model.contextWindow },
+        attemptRouting: {
+          path: useFailover ? 'failover' : 'primary',
+          provider: resolveProviderName(useFailover && options?.failoverModel ? options.failoverModel : model),
+          model: ((useFailover && options?.failoverModel ? options.failoverModel : model) as any).name
+            || ((useFailover && options?.failoverModel ? options.failoverModel : model) as any).id
+            || 'unknown',
+          baseUrl: resolveBaseUrl(useFailover && options?.failoverModel ? options.failoverModel : model),
+        },
         messageCount: context.messages.length,
         estimatedTokens: totalMessageTokens(context.messages),
         attempt: attempt + 1,
@@ -978,4 +986,18 @@ function extractProviderErrorMeta(err: Error): {
     code: typeof anyErr.code === 'string' ? anyErr.code : undefined,
     name: typeof anyErr.name === 'string' ? anyErr.name : undefined,
   }
+}
+
+function resolveProviderName(model: Model<any>): string {
+  const provider = (model as any).provider
+  if (typeof provider === 'string' && provider.trim()) return provider
+
+  const name = ((model as any).name as string | undefined) || ((model as any).id as string | undefined) || ''
+  if (name.includes('/')) return name.split('/')[0]
+  return 'unknown'
+}
+
+function resolveBaseUrl(model: Model<any>): string | undefined {
+  const baseUrl = (model as any).baseUrl
+  return typeof baseUrl === 'string' && baseUrl.trim() ? baseUrl : undefined
 }
