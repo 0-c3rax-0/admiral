@@ -20,6 +20,18 @@ export interface CommandResult {
   result?: unknown
   structuredContent?: unknown
   notifications?: unknown[]
+  meta?: {
+    accepted?: boolean
+    pending?: boolean
+    command?: string
+    tick?: number
+    ticks?: number
+    eta_tick?: number
+    distance_au?: number
+    destination_id?: string
+    destination_name?: string
+    arrived?: boolean
+  }
   error?: { code: string; message: string; wait_seconds?: number }
 }
 

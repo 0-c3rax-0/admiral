@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
-import { X, MapPin, Users, Building2, Pickaxe } from 'lucide-react'
+import { X, MapPin, Users, Building2, Pickaxe, ExternalLink } from 'lucide-react'
 import type { Profile } from '@/types'
+import { SYSTEM_KB_SLUG_BY_ID } from '@/lib/systemKbMap'
 
 type GalaxySystem = {
   id: string
@@ -63,6 +64,12 @@ function extractOreHints(poi: SystemPoi): string[] {
     }
   }
   return Array.from(out)
+}
+
+function buildSystemKbUrl(systemId: string | undefined): string {
+  if (!systemId) return ''
+  const kbSlug = SYSTEM_KB_SLUG_BY_ID[systemId] || systemId
+  return `https://rsned.github.io/spacemolt-kb/systems/${encodeURIComponent(kbSlug)}.html`
 }
 
 export function GalaxyMapModal({ open, onClose, gameserverUrl, profiles, playerDataMap }: Props) {
@@ -130,6 +137,7 @@ export function GalaxyMapModal({ open, onClose, gameserverUrl, profiles, playerD
   }, [mapData])
 
   const selectedSystem = selectedSystemId ? systemsById.get(selectedSystemId) : undefined
+  const selectedSystemKbUrl = buildSystemKbUrl(selectedSystem?.id)
   const stationPois = (detail?.pois || []).filter((p) => p.type === 'station' || !!p.station_name)
   const miningPois = (detail?.pois || []).filter((p) => ['asteroid', 'asteroid_belt', 'ice_field', 'gas_cloud'].includes(p.type))
   const oreHints = Array.from(new Set(miningPois.flatMap(extractOreHints)))
@@ -217,6 +225,22 @@ export function GalaxyMapModal({ open, onClose, gameserverUrl, profiles, playerD
                   if (names.length === 0) return <div className="text-muted-foreground">No tracked account currently in this system.</div>
                   return <div className="text-[hsl(var(--smui-cyan))]">{names.join(', ')}</div>
                 })()}
+              </div>
+            )}
+
+            {selectedSystem && (
+              <div className="border border-border/70 p-2.5 bg-background/40">
+                <div className="text-[10px] uppercase tracking-[1.2px] text-muted-foreground mb-1">Knowledge Base</div>
+                <a
+                  href={selectedSystemKbUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1.5 text-[hsl(var(--smui-cyan))] hover:text-foreground transition-colors"
+                >
+                  Open {selectedSystem.name} entry
+                  <ExternalLink size={12} />
+                </a>
+                <div className="mt-1 break-all text-muted-foreground">{selectedSystemKbUrl}</div>
               </div>
             )}
 

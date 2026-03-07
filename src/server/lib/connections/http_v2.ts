@@ -1,6 +1,7 @@
 import type { GameConnection, LoginResult, RegisterResult, CommandResult, NotificationHandler } from './interface'
 import { USER_AGENT } from './interface'
 import { fetchOpenApiSpec, type SpecLogFn } from '../schema'
+import { normalizeCommandResult } from './command-meta'
 
 const MAX_RECONNECT_ATTEMPTS = 6
 const RECONNECT_BASE_DELAY = 5_000
@@ -332,7 +333,7 @@ export class HttpV2Connection implements GameConnection {
       if (data.structuredContent !== undefined && data.structuredContent !== null) {
         data.result = data.structuredContent
       }
-      return data as CommandResult
+      return normalizeCommandResult(command, data as CommandResult)
     } catch {
       return { error: { code: 'http_error', message: `HTTP ${resp.status}` } }
     }

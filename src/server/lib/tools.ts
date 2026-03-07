@@ -3,6 +3,7 @@ import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
 import { getProfile, updateProfile } from './db'
 import { fetchGameCommands } from './schema'
+import { getPendingNavigation, updatePendingNavigationFromResult } from './navigation-guard'
 
 // --- Tool Definitions ---
 
@@ -55,6 +56,13 @@ const MAX_RESULT_CHARS = 4000
 const MAX_TOOL_RESULT_LOG_DETAIL_CHARS = 8000
 const COMMAND_SUGGEST_CACHE_TTL_MS = 5 * 60 * 1000
 const commandSuggestCache = new Map<string, { expiresAt: number; names: string[] }>()
+const BLOCKED_GAME_COMMAND_PATTERNS = [
+  /\bself_destruct\b/,
+  /\bdelete_(account|character|player|profile)\b/,
+  /\breset_(account|character|player|profile)\b/,
+  /\bwipe_(account|character|player|profile)\b/,
+  /\bterminate_(account|character|player|profile)\b/,
+] as const
 
 export type LogFn = (type: string, summary: string, detail?: string) => void
 
@@ -88,10 +96,29 @@ export async function executeTool(
     commandArgs = args.args as Record<string, unknown> | undefined
     command = sanitizeCommandName(command)
     if (!command) return 'Error: missing \'command\' argument'
+    if (isBlockedGameCommand(command)) {
+      const errMsg = `Error: blocked unsafe command '${command}'. Irreversible self-destruction or account-reset actions are never allowed.`
+      ctx.log('error', errMsg)
+      return errMsg
+    }
     const resolved = await resolveCommandName(ctx.profileId, command, ctx.connection)
     if (resolved !== command) {
       ctx.log('system', `Adjusted command: ${command} -> ${resolved}`)
       command = resolved
+    }
+    if (isBlockedGameCommand(command)) {
+      const errMsg = `Error: blocked unsafe command '${command}'. Irreversible self-destruction or account-reset actions are never allowed.`
+      ctx.log('error', errMsg)
+      return errMsg
+    }
+    if ((command === 'travel' || command === 'jump')) {
+      const pendingNavigation = getPendingNavigation(ctx.profileId)
+      if (pendingNavigation) {
+        const destination = pendingNavigation.destination ? ` to ${pendingNavigation.destination}` : ''
+        const errMsg = `Error: blocked duplicate navigation command '${command}' while previous ${pendingNavigation.command}${destination} is still pending. Wait for get_status/ACTION_RESULT before issuing another navigation mutation.`
+        ctx.log('error', errMsg)
+        return errMsg
+      }
     }
   } else {
     command = name
@@ -115,6 +142,8 @@ export async function executeTool(
       ctx.log('tool_result', errMsg)
       return errMsg
     }
+
+    updatePendingNavigationFromResult(ctx.profileId, command, commandArgs || {}, resp)
 
     const result = formatToolResult(command, resp.result, resp.notifications)
     ctx.log('tool_result', truncate(result, 200), truncateResultForLog(result))
@@ -253,6 +282,11 @@ function sanitizeCommandName(value: string): string {
     .trim()
     .replace(/^["'`]+|["'`]+$/g, '')
     .replace(/[>.,;:!?]+$/g, '')
+}
+
+function isBlockedGameCommand(command: string): boolean {
+  const normalized = normalizeCommand(command)
+  return BLOCKED_GAME_COMMAND_PATTERNS.some((pattern) => pattern.test(normalized))
 }
 
 function levenshtein(a: string, b: string): number {
@@ -405,11 +439,34 @@ function formatPendingHint(command: string, result: unknown): string | null {
   if (record.pending !== true) return null
 
   const message = typeof record.message === 'string' ? record.message : `${command} accepted and queued for the next tick.`
+  const extras = formatTravelPendingDetails(command, record)
   return [
     `Pending action accepted: ${message}`,
+    extras,
     'Interpret this as progress, not a stuck server.',
     `Do not repeat "${command}" immediately. Wait for the next tick, then refresh with get_status or interpret resulting notifications before deciding the state.`,
-  ].join(' ')
+  ].filter(Boolean).join(' ')
+}
+
+function formatTravelPendingDetails(command: string, record: Record<string, unknown>): string {
+  if (command !== 'travel' && command !== 'jump') return ''
+  const parts: string[] = []
+  const au = toFiniteNumber(record.distance_au ?? record.au ?? record.distance)
+  const ticks = toFiniteNumber(record.ticks ?? record.tick_count ?? record.ticks_remaining ?? record.travel_ticks)
+  const etaTick = toFiniteNumber(record.eta_tick ?? record.arrival_tick)
+  if (au !== null) parts.push(`Distance ${au} AU.`)
+  if (ticks !== null) parts.push(`Estimated duration ${ticks} ticks.`)
+  if (etaTick !== null) parts.push(`ETA tick ${etaTick}.`)
+  return parts.join(' ')
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
 }
 
 function formatCommandError(command: string, code: string, message: string): string {

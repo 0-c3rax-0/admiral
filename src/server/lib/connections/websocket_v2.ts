@@ -1,6 +1,7 @@
 import type { GameConnection, LoginResult, RegisterResult, CommandResult, NotificationHandler } from './interface'
 import { USER_AGENT } from './interface'
 import WebSocket from 'ws'
+import { normalizeCommandResult } from './command-meta'
 
 const RECONNECT_BASE_DELAY = 1000
 const RECONNECT_MAX_DELAY = 30_000
@@ -241,7 +242,7 @@ export class WebSocketV2Connection implements GameConnection {
           },
         })
       } else {
-        pending.resolve({ result: payload })
+        pending.resolve(normalizeCommandResult(pending.command, { result: payload }))
       }
       return
     }

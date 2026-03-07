@@ -16,11 +16,15 @@ This repository is a customized fork of [SpaceMolt/admiral](https://github.com/S
 
 - profile-level primary and failover model routing
 - optional alternative solver for real loop/stall recovery
+- optional fleet supervisor with its own LLM for gentle cross-account nudges
 - Google Gemini OAuth support via `google-gemini-cli`
 - persistent per-profile memory in `data/memory/`
 - SQLite-backed logs, stats snapshots, request history, and preferences
 - startup autoconnect with jitter between accounts
 - free-query telemetry injected into the agent loop
+- normalized mutation metadata across HTTP and `websocket_v2`
+- restart-safe pending navigation guards backed by SQLite
+- local per-account mutation-stall detection instead of premature server-wide deadlock claims
 - dashboard-visible 429 risk indicators instead of pure log spam
 - dashboard and account status cards with richer gameplay stats
 - built-in retention and request-payload compaction
@@ -53,6 +57,7 @@ Important local paths:
 
 - `data/admiral.db`
 - `data/memory/`
+- `data/admiral.db` table `pending_mutations`
 - `dist/`
 - `/etc/systemd/system/admiral.service`
 
@@ -83,7 +88,7 @@ Recommended default:
 
 ## LLM Routing
 
-This fork has three separate model paths:
+This fork has four separate model paths:
 
 ### 1. Primary model
 
@@ -116,6 +121,22 @@ Current behavior:
 - used on rate limits, timeouts, or provider reachability problems
 - remains independent from the alternative solver
 
+### 4. Fleet supervisor
+
+Configured through preferences:
+
+- `supervisor_enabled`
+- `supervisor_provider`
+- `supervisor_model`
+
+Current behavior:
+
+- runs as a separate periodic fleet-level observer
+- looks at recent account state and log signals
+- can inject short nudges into running agents
+- does not execute game commands
+- is intended for soft guidance, not hard orchestration
+
 ## Free Query Telemetry
 
 This fork now uses free SpaceMolt query commands more aggressively without always spending another LLM step.
@@ -134,6 +155,42 @@ This helps agents:
 - react faster to empty or low-value mining situations
 - avoid blind ore hoarding
 - periodically notice practical ship upgrades
+
+## Mutation And Navigation Safety
+
+This fork now adds stronger mutation guardrails, especially for `travel` and `jump`.
+
+Current behavior:
+
+- command results are normalized across `http`, `http_v2`, and `websocket_v2`
+- mutation metadata can carry acceptance, pending state, tick, estimated ticks, ETA tick, distance/AU, and arrival state when the transport exposes it
+- duplicate `travel` or `jump` commands are blocked while a previous navigation mutation is still pending
+- pending navigation state is stored in SQLite and survives Admiral restarts
+- Admiral distinguishes local account/session mutation stalls from true global multi-account issues
+
+Operationally, agents should:
+
+- treat `pending: true` as accepted work, not instant failure
+- wait on `get_status` and notifications after navigation mutations
+- avoid stacking repeated navigation mutations on unresolved travel
+- describe long unresolved mutation behavior as account-local unless multiple independent accounts show the same evidence
+
+## Fleet Supervisor
+
+The optional fleet supervisor is a lightweight in-process observer inspired by an external chaperone pattern.
+
+It is meant to help with cases such as:
+
+- an account over-interpreting a local stall as a server-wide deadlock
+- an account ignoring fresh `ACTION_RESULT` or `jumped` evidence
+- an account drifting into poor replans after `not_docked` or `no_base`
+
+Design constraints:
+
+- it uses its own configured `provider/model`
+- it only sends nudges to already-running agents
+- it should not be treated as a second autonomous player
+- it should never recommend destructive recovery actions
 
 ## UI Stats And Risk Signals
 
@@ -213,4 +270,5 @@ journalctl -u admiral.service -n 50 --no-pager
 
 - This fork is tuned for unattended multi-agent operation, not only manual play assistance.
 - The settings UI exposes provider routing, compaction, alternative solver, OAuth, and startup autoconnect controls.
+- The galaxy map UI can open external SpaceMolt knowledge-base pages for the selected system, which loads information from `https://rsned.github.io/spacemolt-kb/`.
 - If you compare behavior with upstream Admiral, assume this fork is materially different unless verified in code.
