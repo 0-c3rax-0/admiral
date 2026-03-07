@@ -1,13 +1,14 @@
 import { Hono } from 'hono'
 import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile } from '../lib/db'
 import { agentManager } from '../lib/agent-manager'
+import { is429PredictionEnabled, predict429Risk } from '../lib/loop'
 
 const profiles = new Hono()
 
 // GET /api/profiles
 profiles.get('/', (c) => {
   const all = listProfiles()
-  return c.json(all.map(p => ({ ...p, ...agentManager.getStatus(p.id) })))
+  return c.json(all.map(p => ({ ...p, ...agentManager.getStatus(p.id), rate_risk: getRateRiskPayload(p.id) })))
 })
 
 // POST /api/profiles
@@ -48,7 +49,7 @@ profiles.get('/:id', (c) => {
   const profile = getProfile(c.req.param('id'))
   if (!profile) return c.json({ error: 'Not found' }, 404)
   const status = agentManager.getStatus(c.req.param('id'))
-  return c.json({ ...profile, ...status })
+  return c.json({ ...profile, ...status, rate_risk: getRateRiskPayload(c.req.param('id')) })
 })
 
 // PUT /api/profiles/:id
@@ -192,3 +193,9 @@ profiles.delete('/:id/memory', (c) => {
 })
 
 export default profiles
+
+function getRateRiskPayload(profileId: string) {
+  if (!is429PredictionEnabled()) return null
+  const risk = predict429Risk(profileId)
+  return risk.level === 'LOW' ? null : risk
+}

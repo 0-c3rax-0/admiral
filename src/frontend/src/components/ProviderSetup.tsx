@@ -54,8 +54,6 @@ interface Props {
   onCompactInputModelChange: (model: string) => void
   altSolverEnabled: boolean
   onAltSolverEnabledChange: (enabled: boolean) => void
-  altSolverAfterRounds: number
-  onAltSolverAfterRoundsChange: (rounds: number) => void
   altSolverProvider: string
   onAltSolverProviderChange: (provider: string) => void
   altSolverModel: string
@@ -89,8 +87,6 @@ export function ProviderSetup({
   onCompactInputModelChange,
   altSolverEnabled,
   onAltSolverEnabledChange,
-  altSolverAfterRounds,
-  onAltSolverAfterRoundsChange,
   altSolverProvider,
   onAltSolverProviderChange,
   altSolverModel,
@@ -384,7 +380,7 @@ export function ProviderSetup({
 
       {/* Modal */}
       <div
-        className="relative bg-card border border-border w-full max-w-[640px] max-h-[85vh] flex flex-col z-10"
+        className="relative bg-card border border-border w-full max-w-[min(96vw,1480px)] max-h-[92vh] flex flex-col z-10"
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
@@ -400,10 +396,13 @@ export function ProviderSetup({
         </div>
 
         {/* Content - scrollable */}
-        <div className="flex-1 overflow-y-auto px-4 py-3 space-y-5">
+        <div className="flex-1 overflow-y-auto px-4 py-3 space-y-5 xl:grid xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.35fr)] xl:gap-5 xl:space-y-0">
           {/* General section */}
-          <div>
-            <span className="text-[11px] text-[hsl(var(--smui-orange))] uppercase tracking-[1.5px] font-medium">General</span>
+          <div className="border border-border/60 bg-background/20 p-4">
+            <div className="flex items-center justify-between gap-3 mb-2.5">
+              <span className="text-[11px] text-[hsl(var(--smui-orange))] uppercase tracking-[1.5px] font-medium">General</span>
+              <span className="text-[10px] text-muted-foreground">Core runtime and LLM controls</span>
+            </div>
             <div className="space-y-2.5 mt-2.5">
               <div className="flex items-center gap-3">
                 <span className="text-xs text-muted-foreground w-28 shrink-0">Registration code</span>
@@ -552,23 +551,11 @@ export function ProviderSetup({
                     checked={altSolverEnabled}
                     onChange={e => onAltSolverEnabledChange(e.target.checked)}
                   />
-                  Ask second LLM for alternative plan
+                  Ask second LLM only when Admiral detects a loop or stalled plan
                 </label>
               </div>
-              <div className="flex items-center gap-3">
-                <span className="text-xs text-muted-foreground w-28 shrink-0">After rounds</span>
-                <Input
-                  type="number"
-                  value={altSolverAfterRounds}
-                  onChange={e => {
-                    const v = parseInt(e.target.value, 10)
-                    if (!isNaN(v) && v > 0) onAltSolverAfterRoundsChange(v)
-                  }}
-                  min={1}
-                  max={50}
-                  className="w-20 h-7 text-xs"
-                />
-                <span className="text-[11px] text-muted-foreground">trigger after this many tool rounds</span>
+              <div className="ml-[7.25rem] text-[11px] text-muted-foreground leading-relaxed">
+                Triggers only on repeated blocked actions, repeated identical command loops, or several rounds with unchanged results.
               </div>
               <div className="flex items-center gap-3">
                 <span className="text-xs text-muted-foreground w-28 shrink-0">Alt provider</span>
@@ -668,9 +655,12 @@ export function ProviderSetup({
           </div>
 
           {/* Providers section */}
-          <div>
-            <div className="flex items-center justify-between mb-2.5">
-              <span className="text-[11px] text-[hsl(var(--smui-frost-2))] uppercase tracking-[1.5px] font-medium">Providers</span>
+          <div className="border border-border/60 bg-background/20 p-4">
+            <div className="flex items-center justify-between mb-2.5 gap-3">
+              <div>
+                <span className="text-[11px] text-[hsl(var(--smui-frost-2))] uppercase tracking-[1.5px] font-medium">Providers</span>
+                <div className="text-[10px] text-muted-foreground mt-1">Credentials, local endpoints and provider health</div>
+              </div>
               <Button
                 variant="outline"
                 size="sm"
@@ -682,11 +672,11 @@ export function ProviderSetup({
                 {detecting ? 'Scanning...' : 'Detect Local'}
               </Button>
             </div>
-            <div className="space-y-1.5">
+            <div className="grid gap-2.5 2xl:grid-cols-2">
               {providers.map(p => {
                 const info = PROVIDER_INFO[p.id] || { label: p.id, description: '', isLocal: false, keyPlaceholder: '' }
                 return (
-                  <div key={p.id} className="border border-border/60 bg-background/30 px-3 py-2">
+                  <div key={p.id} className="border border-border/60 bg-background/30 px-3 py-3">
                     <div className="flex items-center gap-2.5">
                       <div className={`status-dot ${
                         p.status === 'valid' ? 'status-dot-green' :

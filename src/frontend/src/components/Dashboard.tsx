@@ -22,6 +22,15 @@ type RuntimeStatus = {
   running: boolean
   adaptive_mode?: 'normal' | 'soft' | 'high' | 'critical'
   effective_context_budget_ratio?: number | null
+  rate_risk?: {
+    level: 'LOW' | 'MEDIUM' | 'HIGH'
+    reason: string
+    recommendation: string
+    callsLast60s: number
+    errors429Last60s: number
+    errors429Last300s: number
+    failoverActivationsLast300s: number
+  } | null
 }
 
 type StatsSnapshot = {
@@ -70,6 +79,8 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
     lastSnapshotTs: string | null
     creditsDelta1h: number
     oreDelta1h: number
+    tradesDelta1h: number
+    systemsDelta1h: number
     events24h: number
   } | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(() => {
@@ -140,7 +151,10 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
             connected: !!p.connected,
             running: !!p.running,
             adaptive_mode: (p.adaptive_mode as RuntimeStatus['adaptive_mode']) || 'normal',
-            effective_context_budget_ratio: typeof p.effective_context_budget_ratio === 'number' ? p.effective_context_budget_ratio : null,
+            effective_context_budget_ratio: typeof p.effective_context_budget_ratio === 'number'
+              ? p.effective_context_budget_ratio
+              : null,
+            rate_risk: (p.rate_risk as RuntimeStatus['rate_risk']) || null,
           }
           if (p.gameState && typeof p.gameState === 'object') {
             newPlayerData[id] = p.gameState as Record<string, unknown>
@@ -329,67 +343,34 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
     setShowStats(true)
     setStatsLoading(true)
     try {
-      const now = Date.now()
-      const oneHourAgo = now - (60 * 60 * 1000)
-      const dayAgo = now - (24 * 60 * 60 * 1000)
-
-      const byProfile = await Promise.allSettled(
-        profiles.map(async (p) => {
-          const [snapResp, eventResp] = await Promise.all([
-            fetch(`/api/stats/${p.id}/snapshots?limit=240`),
-            fetch(`/api/stats/${p.id}/events?limit=200`),
-          ])
-          const snapJson = await snapResp.json().catch(() => ({ snapshots: [] as StatsSnapshot[] }))
-          const eventJson = await eventResp.json().catch(() => ({ events: [] as StatsEvent[] }))
-          return {
-            snapshots: (snapJson.snapshots || []) as StatsSnapshot[],
-            events: (eventJson.events || []) as StatsEvent[],
-          }
-        })
-      )
-
-      let snapshotCount = 0
-      let profilesWithData = 0
-      let lastSnapshotTs: string | null = null
-      let creditsDelta1h = 0
-      let oreDelta1h = 0
-      let events24h = 0
-
-      const num = (v: number | null | undefined): number => typeof v === 'number' && Number.isFinite(v) ? v : 0
-
-      for (const item of byProfile) {
-        if (item.status !== 'fulfilled') continue
-        const snapshots = item.value.snapshots
-        const events = item.value.events
-        snapshotCount += snapshots.length
-        if (snapshots.length > 0) profilesWithData++
-
-        const newest = snapshots[0]
-        if (newest?.ts && (!lastSnapshotTs || new Date(newest.ts).getTime() > new Date(lastSnapshotTs).getTime())) {
-          lastSnapshotTs = newest.ts
-        }
-
-        if (snapshots.length > 0) {
-          const anchor = snapshots.find(s => new Date(s.ts).getTime() <= oneHourAgo) || snapshots[snapshots.length - 1]
-          creditsDelta1h += num(newest?.credits) - num(anchor?.credits)
-          oreDelta1h += num(newest?.ore_mined) - num(anchor?.ore_mined)
-        }
-
-        events24h += events.filter(e => new Date(e.ts).getTime() >= dayAgo).length
-      }
-
-      setStatsDbSummary({
-        snapshotCount,
-        profilesWithData,
-        lastSnapshotTs,
-        creditsDelta1h,
-        oreDelta1h,
-        events24h,
-      })
+      const resp = await fetch('/api/stats/summary')
+      const summary = await resp.json()
+      setStatsDbSummary(summary)
     } finally {
       setStatsLoading(false)
     }
   }
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const resp = await fetch('/api/stats/summary')
+        if (!resp.ok) return
+        const summary = await resp.json()
+        if (!cancelled) setStatsDbSummary(summary)
+      } catch {
+        // ignore
+      }
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  const rateRiskProfiles = profiles
+    .map((p) => ({ name: p.name, risk: statuses[p.id]?.rate_risk || null }))
+    .filter((item) => item.risk && item.risk.level !== 'LOW')
+  const highRiskCount = rateRiskProfiles.filter((item) => item.risk?.level === 'HIGH').length
+  const mediumRiskCount = rateRiskProfiles.filter((item) => item.risk?.level === 'MEDIUM').length
 
   const hasValidProvider = providers.some(p => p.status === 'valid' || p.api_key)
 
@@ -495,6 +476,38 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
 
         {/* Content area */}
         <div className="flex-1 min-w-0">
+          <div className="grid grid-cols-2 lg:grid-cols-5 gap-px border-b border-border bg-border">
+            <div className="bg-card px-3 py-2">
+              <div className="text-[10px] uppercase tracking-[1.2px] text-muted-foreground">Credits 1h</div>
+              <div className={`text-sm font-medium ${statsDbSummary && statsDbSummary.creditsDelta1h >= 0 ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-red))]'}`}>
+                {statsDbSummary ? `${statsDbSummary.creditsDelta1h >= 0 ? '+' : ''}${Math.round(statsDbSummary.creditsDelta1h).toLocaleString()}` : '...'}
+              </div>
+            </div>
+            <div className="bg-card px-3 py-2">
+              <div className="text-[10px] uppercase tracking-[1.2px] text-muted-foreground">Ore 1h</div>
+              <div className={`text-sm font-medium ${statsDbSummary && statsDbSummary.oreDelta1h >= 0 ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-red))]'}`}>
+                {statsDbSummary ? `${statsDbSummary.oreDelta1h >= 0 ? '+' : ''}${Math.round(statsDbSummary.oreDelta1h).toLocaleString()}` : '...'}
+              </div>
+            </div>
+            <div className="bg-card px-3 py-2">
+              <div className="text-[10px] uppercase tracking-[1.2px] text-muted-foreground">Trades 1h</div>
+              <div className={`text-sm font-medium ${statsDbSummary && statsDbSummary.tradesDelta1h >= 0 ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-red))]'}`}>
+                {statsDbSummary ? `${statsDbSummary.tradesDelta1h >= 0 ? '+' : ''}${Math.round(statsDbSummary.tradesDelta1h).toLocaleString()}` : '...'}
+              </div>
+            </div>
+            <div className="bg-card px-3 py-2">
+              <div className="text-[10px] uppercase tracking-[1.2px] text-muted-foreground">429 Risk</div>
+              <div className={`text-sm font-medium ${highRiskCount > 0 ? 'text-[hsl(var(--smui-red))]' : mediumRiskCount > 0 ? 'text-[hsl(var(--smui-orange))]' : 'text-[hsl(var(--smui-green))]'}`}>
+                {highRiskCount > 0 ? `${highRiskCount} high` : mediumRiskCount > 0 ? `${mediumRiskCount} medium` : 'stable'}
+              </div>
+            </div>
+            <div className="bg-card px-3 py-2">
+              <div className="text-[10px] uppercase tracking-[1.2px] text-muted-foreground">Last Snapshot</div>
+              <div className="text-sm font-medium text-foreground">
+                {statsDbSummary?.lastSnapshotTs ? new Date(statsDbSummary.lastSnapshotTs).toLocaleTimeString() : 'n/a'}
+              </div>
+            </div>
+          </div>
           {activeProfile ? (
             <ProfileView
               profile={activeProfile}
@@ -652,6 +665,18 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
                       </span>
                     </div>
                     <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Trades (1h)</span>
+                      <span className={statsDbSummary.tradesDelta1h >= 0 ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-red))]'}>
+                        {statsDbSummary.tradesDelta1h >= 0 ? '+' : ''}{Math.round(statsDbSummary.tradesDelta1h).toLocaleString()}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Systems (1h)</span>
+                      <span className={statsDbSummary.systemsDelta1h >= 0 ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-red))]'}>
+                        {statsDbSummary.systemsDelta1h >= 0 ? '+' : ''}{Math.round(statsDbSummary.systemsDelta1h).toLocaleString()}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
                       <span className="text-muted-foreground">Events (24h)</span>
                       <span className="text-foreground">{statsDbSummary.events24h.toLocaleString()}</span>
                     </div>
@@ -663,6 +688,20 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
                     </div>
                   </>
                 )}
+              </div>
+              <div className="mt-2 border-t border-border/60 pt-2">
+                <div className="text-[10px] text-muted-foreground uppercase tracking-[1.2px] mb-1.5">429 Risk</div>
+                {rateRiskProfiles.length === 0 && (
+                  <div className="text-[11px] text-[hsl(var(--smui-green))]">No current elevated risk.</div>
+                )}
+                {rateRiskProfiles.slice(0, 6).map((item) => (
+                  <div key={item.name} className="flex items-start justify-between gap-3 py-0.5">
+                    <span className="text-muted-foreground">{item.name}</span>
+                    <span className={item.risk?.level === 'HIGH' ? 'text-[hsl(var(--smui-red))]' : 'text-[hsl(var(--smui-orange))]'}>
+                      {item.risk?.level}
+                    </span>
+                  </div>
+                ))}
               </div>
             </div>
           </div>

@@ -1,82 +1,74 @@
 ```text
-    _       _           _           _ 
+    _       _           _           _
    / \   __| |_ __ ___ (_)_ __ __ _| |
   / _ \ / _` | '_ ` _ \| | '__/ _` | |
  / ___ \ (_| | | | | | | | | | (_| | |
 /_/   \_\__,_|_| |_| |_|_|_|  \__,_|_|
-
-                  __/___            
-            _____/______|           
-    _______/_____\_______\_____     
-    \              <^>          \    
-  ~~~\___________________________/~~~
-      /  .-.              .-.  \     
-     |  ( o )            ( o )  |    
-     |      .-.__  __.-.        |    
-      \       \  \/  /         /     
-   .--' \       '--'        /'--.    
-  /_____/|  _    ____    _  |\____\   
-        \| / |  / __ \  | \ |/        
-         |/  |_/ /  \ \_|  \|         
-            /___/    \___\            
 ```
 
-This repository is a customized fork of [SpaceMolt/admiral](https://github.com/SpaceMolt/admiral), the web UI for running and observing multiple SpaceMolt agents.
+# Admiral Fork
 
-It keeps the core Admiral workflow, but adds several operational and LLM-orchestration features that are specific to this repo.
-
-This fork was developed primarily with help from Codex as the main coding agent.
+This repository is a customized fork of [SpaceMolt/admiral](https://github.com/SpaceMolt/admiral). It keeps the multi-profile Admiral UI, but adds more aggressive unattended-operation features for running many SpaceMolt agents at once.
 
 ![Redacted Admiral dashboard](docs/assets/dashboard-redacted.png)
 
-## What This Repo Is
+## What This Fork Adds
 
-- Bun + Hono backend with a Vite/React frontend
-- Multi-profile SpaceMolt agent manager
-- SQLite-backed local state in `data/admiral.db`
-- Full per-agent logs, directives, command tools, and profile state
+- profile-level primary and failover model routing
+- optional alternative solver for real loop/stall recovery
+- Google Gemini OAuth support via `google-gemini-cli`
+- persistent per-profile memory in `data/memory/`
+- SQLite-backed logs, stats snapshots, request history, and preferences
+- startup autoconnect with jitter between accounts
+- free-query telemetry injected into the agent loop
+- dashboard-visible 429 risk indicators instead of pure log spam
+- dashboard and account status cards with richer gameplay stats
+- built-in retention and request-payload compaction
 
 The app listens on `http://localhost:3031` by default.
 
 ## Quick Start
 
-### From Source
+Development:
 
 ```bash
-git clone git@github.com:0-c3rax-0/admiral.git
-cd admiral
 bun install
 bun run dev
 ```
 
-For a production build:
+Production:
 
 ```bash
 bun run build
 ./admiral
 ```
 
-Data is stored under:
+Systemd deployments in this repo use:
+
+```text
+admiral.service
+```
+
+Important local paths:
 
 - `data/admiral.db`
-- `data/memory/` for persisted profile memory
+- `data/memory/`
+- `dist/`
+- `/etc/systemd/system/admiral.service`
 
-## Main Features In This Fork
+## Runtime Model
 
-### Multi-agent control
+Each profile has its own:
 
-Run multiple SpaceMolt profiles in parallel, each with its own:
-
-- connection
-- LLM loop
+- connection mode
 - directive
+- LLM loop
 - logs
 - TODO state
 - persistent memory
+- primary and failover provider/model
 
-### Connection modes
-
-This repo supports:
+Supported connection modes:
 
 - `http`
 - `http_v2`
@@ -85,146 +77,101 @@ This repo supports:
 - `mcp`
 - `mcp_v2`
 
-Mode summary:
+Recommended default:
 
-- `http`: legacy polling mode
-- `http_v2`: current HTTP API v2 mode
-- `websocket`: legacy WebSocket mode
-- `websocket_v2`: WebSocket transport with heartbeat handling, reconnect logic, and automatic re-authentication retry for recoverable auth failures
-- `mcp`: legacy MCP mode
-- `mcp_v2`: Model Context Protocol v2 mode with tool discovery
+- `http_v2`
 
-`websocket_v2` is documented in this fork because it is implemented as a distinct connection class, not just a label alias. Compared with the older `websocket` mode, it adds:
+## LLM Routing
 
-- heartbeat ping/pong monitoring
-- reconnect backoff with stale-connection detection
-- retry of commands after session-expired or session-invalid auth failures
-- more defensive command send/error handling
+This fork has three separate model paths:
 
-For most users, `http_v2` remains the safer default. `websocket_v2` is the lower-latency persistent transport option when you specifically want a live socket connection and the game server path is stable enough for it.
+### 1. Primary model
 
-### LLM providers
+The profile's configured `provider/model`.
 
-Configured providers include:
+### 2. Alternative solver
 
-- Anthropic
-- OpenAI
-- Google AI
-- Google Gemini OAuth (`google-gemini-cli`)
-- Groq
-- xAI
-- Mistral
-- MiniMax
-- NVIDIA
-- OpenRouter
-- Ollama
-- LM Studio
-- Custom OpenAI-compatible endpoints
+Configured through preferences:
 
-### Provider failover
+- `alt_solver_enabled`
+- `alt_solver_provider`
+- `alt_solver_model`
 
-Profiles can define a primary provider/model and a profile-level failover provider/model.
+Current behavior:
 
-When the current model hits rate limits or provider reachability errors, Admiral can switch to the configured failover model for the same turn.
+- it does not switch after a fixed round count anymore
+- it activates only when Admiral detects a likely loop or stalled plan
+- signals include repeated identical tool rounds, repeated blocked error rounds, or several rounds with unchanged results
+- if the alternative solver fails, the turn falls back to the primary model
 
-### Alternative solver
+### 3. Profile failover
 
-This fork supports an alternative solver path:
+Configured per profile:
 
-- trigger after N tool rounds
-- switch the current turn to an alternative model
-- if that alternative model fails, revert to the primary model
-- if needed, still use the normal profile failover path afterward
+- `failover_provider`
+- `failover_model`
 
-This is useful for breaking repetitive loops without changing the default model for every request.
+Current behavior:
 
-### Google Gemini OAuth
+- used on rate limits, timeouts, or provider reachability problems
+- remains independent from the alternative solver
 
-This repo includes a local OAuth flow for `google-gemini-cli`:
+## Free Query Telemetry
 
-- start OAuth from the UI
-- poll auth status
-- detect current project ID
-- store OAuth credentials in local preferences
-- use refreshed OAuth credentials automatically through `@mariozechner/pi-ai`
+This fork now uses free SpaceMolt query commands more aggressively without always spending another LLM step.
 
-### Persistent profile memory
+Between turns, Admiral can inject compact telemetry based on commands such as:
 
-Profiles can save and reload long-lived memory snapshots from `data/memory/`.
+- `get_status`
+- `get_cargo`
+- `view_market`
+- `shipyard_showroom`
+- `browse_ships`
 
-This memory is injected back into the agent context on later runs, separate from the transient turn context.
+This helps agents:
 
-### Context compaction
+- mine until cargo is near full without wasting turns on repetitive status checks
+- react faster to empty or low-value mining situations
+- avoid blind ore hoarding
+- periodically notice practical ship upgrades
 
-The LLM loop can optionally compact context with a separate model/provider before requests get too large.
+## UI Stats And Risk Signals
 
-### Startup autoconnect
+This fork exposes more operational state directly in the web UI.
 
-This fork can auto-connect enabled profiles on server startup, with configurable randomized delays to avoid a thundering herd.
+Dashboard-level signals now include:
 
-### Runtime stats
+- `Credits 1h`
+- `Ore 1h`
+- `Trades 1h`
+- `429 Risk`
+- last stats snapshot time
 
-The server periodically records profile runtime snapshots and events into SQLite for status/history views.
+Per-account status cards now also surface broader playstyle metrics when available from `get_status`, including:
 
-### TODO and captain's log
+- kills
+- completed missions
+- non-resource loot onboard
 
-Each agent has:
+`Loot` is intentionally separate from mined resources. Ore, gas, and ice still appear through normal cargo and mining-related stats.
 
-- a local TODO list used by the agent loop
-- access to the SpaceMolt captain's log through tools and UI
+## Google Gemini OAuth
 
-## Changes Compared To Upstream `SpaceMolt/admiral`
+This repo includes a local OAuth flow for `google-gemini-cli`.
 
-This fork currently adds or changes the following behavior relative to the normal Admiral repo:
+It supports:
 
-### LLM orchestration changes
+- starting OAuth from the UI
+- polling session status
+- detecting the active Google project
+- storing OAuth credentials in preferences
+- refreshing credentials via `@mariozechner/pi-ai`
 
-- profile-level failover provider/model support
-- alternative solver support after configurable tool rounds
-- clearer failover and alternative-solver logging
-- compact-input / context-compaction settings
-- restart recovery for in-flight requests persisted in SQLite
+## Retention
 
-### Provider changes
+Retention is built into the server process.
 
-- Google Gemini OAuth integration via `google-gemini-cli`
-- OAuth status and project-detection endpoints in the backend
-- frontend provider setup for OAuth login and manual redirect completion
-
-### Agent-state changes
-
-- persistent per-profile memory stored on disk
-- local TODO tooling integrated into the agent loop
-- additional captain's log tooling and side-panel usage
-
-### Operations changes
-
-- startup autoconnect with randomized delay windows
-- periodic runtime stats snapshots/events
-- built-in retention pruning for SQLite data
-- successful `llm_requests` keep full context briefly, then are compacted later to reduce DB growth
-
-## Fork-Specific Additions
-
-- Google Gemini OAuth support with local browser login flow and stored OAuth refresh state
-- alternative solver routing after configurable tool rounds
-- profile-level primary/failover provider-model orchestration
-- persistent per-profile memory stored on disk and reloadable from the UI
-- local TODO support wired into the tool loop
-- startup autoconnect for enabled profiles
-- built-in runtime retention and SQLite growth controls
-
-## Operational Differences From Upstream
-
-- this fork is tuned more aggressively for unattended multi-agent operation
-- LLM failover and alternative-solver behavior are first-class runtime features here
-- local SQLite retention behavior is part of the application, not an external ops step
-- successful LLM request payloads are intentionally compacted after a short diagnostic window
-- Google OAuth-backed Gemini usage is supported alongside API-key-based providers
-
-## Current Retention Behavior
-
-This fork now applies built-in local retention without any external cron/systemd timer:
+Current behavior:
 
 - rows older than 3 days are pruned from:
   - `llm_requests`
@@ -232,16 +179,10 @@ This fork now applies built-in local retention without any external cron/systemd
   - `stats_snapshots`
   - `stats_events`
 - successful `llm_requests` keep `system_prompt` and `messages_json` for 3 hours
-- after 3 hours, successful requests are compacted by clearing those large fields
-- failed, pending, and processing requests keep their full context for diagnosis and restart recovery
+- after 3 hours, successful request payloads are compacted
+- pending and failed requests keep their context for restart recovery and debugging
 
-## Development Notes
-
-Run the app in development:
-
-```bash
-bun run dev
-```
+## Useful Commands
 
 Typecheck:
 
@@ -249,25 +190,27 @@ Typecheck:
 bun run typecheck
 ```
 
-Production build:
+Build:
 
 ```bash
 bun run build
 ```
 
-## Notes About Upstream
-
-Upstream remains:
-
-- canonical upstream: `https://github.com/SpaceMolt/admiral`
-
-This fork is currently tracked from:
-
-- fork remote: `git@github.com:0-c3rax-0/admiral.git`
-
-If you need to compare behavior against upstream, start with:
+Restart via systemd:
 
 ```bash
-git fetch upstream
-git diff upstream/main...main
+systemctl restart admiral.service
+systemctl status admiral.service --no-pager
 ```
+
+Recent service logs:
+
+```bash
+journalctl -u admiral.service -n 50 --no-pager
+```
+
+## Notes
+
+- This fork is tuned for unattended multi-agent operation, not only manual play assistance.
+- The settings UI exposes provider routing, compaction, alternative solver, OAuth, and startup autoconnect controls.
+- If you compare behavior with upstream Admiral, assume this fork is materially different unless verified in code.

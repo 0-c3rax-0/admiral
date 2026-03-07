@@ -22,6 +22,8 @@ const PROMPT_PATH = path.join(process.cwd(), 'prompt.md')
 const MEMORY_DIR = path.join(process.cwd(), 'data', 'memory')
 const AGENTS_DIR = path.join(process.cwd(), 'data', 'agents')
 const CONTINUE_NUDGE_INTERVAL = 6
+const MARKET_TELEMETRY_INTERVAL = 3
+const SHIP_TELEMETRY_INTERVAL = 8
 
 let _promptMd: string | null = null
 function getPromptMd(): string {
@@ -51,6 +53,7 @@ export class Agent {
   private memorySummary: string = ''
   private lastSavedMemory: string = ''
   private pendingRecoveryNudge: string | null = null
+  private telemetryCycle = 0
   constructor(profileId: string) {
     this.profileId = profileId
   }
@@ -93,6 +96,132 @@ export class Agent {
     if (data && typeof data === 'object' && ('player' in data || 'ship' in data || 'location' in data)) {
       this._gameState = data as Record<string, unknown>
     }
+  }
+
+  private async executeSilentQuery(command: string, args?: Record<string, unknown>): Promise<CommandResult | null> {
+    if (!this.connection) return null
+    try {
+      return await this.connection.execute(command, args)
+    } catch {
+      return null
+    }
+  }
+
+  private getCargoUsage(): { used: number | null; capacity: number | null } {
+    const ship = (this._gameState?.ship as Record<string, unknown> | undefined) || {}
+    return {
+      used: toFiniteNumber(ship.cargo_used),
+      capacity: toFiniteNumber(ship.cargo_capacity),
+    }
+  }
+
+  private isLikelyDocked(): boolean {
+    const location = (this._gameState?.location as Record<string, unknown> | undefined) || {}
+    const player = (this._gameState?.player as Record<string, unknown> | undefined) || {}
+    const poiType = String(location.poi_type || player.current_poi_type || '').toLowerCase()
+    const poiName = String(location.poi_name || player.current_poi || '').toLowerCase()
+    return poiType.includes('station') || poiType.includes('base') || poiType.includes('shipyard') || poiName.includes('station') || poiName.includes('base')
+  }
+
+  private async collectFreeTelemetry(): Promise<string | null> {
+    const statusResp = await this.executeSilentQuery('get_status')
+    if (!statusResp || statusResp.error) return null
+    this.cacheGameState(statusResp)
+
+    this.telemetryCycle++
+
+    const sections: string[] = []
+    const verifiedState = formatVerifiedGameState(this._gameState)
+    if (verifiedState) sections.push(`Verified state:\n${verifiedState}`)
+
+    const cargoInfo = await this.collectCargoTelemetry()
+    if (cargoInfo) sections.push(cargoInfo)
+
+    const cargo = this.getCargoUsage()
+    const cargoRatio = cargo.used !== null && cargo.capacity ? cargo.used / cargo.capacity : null
+    const likelyDocked = this.isLikelyDocked()
+
+    if (likelyDocked && (this.telemetryCycle % MARKET_TELEMETRY_INTERVAL === 0 || (cargoRatio !== null && cargoRatio >= 0.75))) {
+      const marketInfo = await this.collectMarketTelemetry()
+      if (marketInfo) sections.push(marketInfo)
+    }
+
+    if (likelyDocked && this.telemetryCycle % SHIP_TELEMETRY_INTERVAL === 0) {
+      const shipInfo = await this.collectShipTelemetry()
+      if (shipInfo) sections.push(shipInfo)
+    }
+
+    if (sections.length === 0) return null
+    return [
+      '## Automatic Telemetry',
+      'Admiral refreshed free query commands directly. Treat this snapshot as current and prefer using it instead of re-running routine get_status/get_cargo checks unless you need a fresher answer after an action.',
+      ...sections,
+    ].join('\n\n')
+  }
+
+  private async collectCargoTelemetry(): Promise<string | null> {
+    const cargoResp = await this.executeSilentQuery('get_cargo')
+    if (!cargoResp || cargoResp.error) return null
+    const data = ((cargoResp.structuredContent ?? cargoResp.result) as Record<string, unknown> | undefined) || {}
+    const entries = extractCargoEntries(data)
+    const cargo = this.getCargoUsage()
+    const lines: string[] = []
+    if (cargo.used !== null && cargo.capacity !== null) {
+      const percent = cargo.capacity > 0 ? Math.round((cargo.used / cargo.capacity) * 100) : 0
+      lines.push(`Cargo load: ${cargo.used}/${cargo.capacity} (${percent}%)`)
+      if (percent >= 85) lines.push('Cargo is nearly full. Prefer unloading/selling over continued mining.')
+    }
+    if (entries.length > 0) {
+      const summary = entries
+        .slice(0, 6)
+        .map((entry) => `${entry.name} x${entry.quantity}`)
+        .join(', ')
+      lines.push(`Cargo manifest: ${summary}`)
+      const oreEntries = entries.filter((entry) => /ore|ice|gas/i.test(entry.id) || /ore|ice|gas/i.test(entry.name))
+      if (oreEntries.length > 0) {
+        lines.push(`Sellable raw materials onboard: ${oreEntries.map((entry) => `${entry.name} x${entry.quantity}`).join(', ')}`)
+      }
+    } else {
+      lines.push('Cargo manifest: empty')
+    }
+    return lines.join('\n')
+  }
+
+  private async collectMarketTelemetry(): Promise<string | null> {
+    const marketResp = await this.executeSilentQuery('view_market', { category: 'ore' })
+    if (!marketResp || marketResp.error) return null
+    const data = ((marketResp.structuredContent ?? marketResp.result) as Record<string, unknown> | undefined) || {}
+    const summary = summarizeMarket(data)
+    return summary ? `Ore market snapshot:\n${summary}` : null
+  }
+
+  private async collectShipTelemetry(): Promise<string | null> {
+    const showroomResp = await this.executeSilentQuery('shipyard_showroom', {})
+    const browseResp = await this.executeSilentQuery('browse_ships', {})
+    const showroomItems = showroomResp?.error ? [] : extractShipOffers((showroomResp?.structuredContent ?? showroomResp?.result) as Record<string, unknown> | undefined)
+    const listedItems = browseResp?.error ? [] : extractShipOffers((browseResp?.structuredContent ?? browseResp?.result) as Record<string, unknown> | undefined)
+    const combined = [...showroomItems, ...listedItems]
+    if (combined.length === 0) return null
+
+    const credits = toFiniteNumber(((this._gameState?.player as Record<string, unknown> | undefined) || {}).credits)
+    const practical = combined
+      .filter((offer) => offer.price !== null)
+      .sort((a, b) => (a.price ?? Number.MAX_SAFE_INTEGER) - (b.price ?? Number.MAX_SAFE_INTEGER))
+      .slice(0, 5)
+
+    if (practical.length === 0) return null
+
+    const affordable = credits !== null ? practical.filter((offer) => (offer.price ?? Number.MAX_SAFE_INTEGER) <= credits) : []
+    const chosen = affordable.length > 0 ? affordable : practical
+    const lines = chosen.map((offer) => {
+      const price = offer.price !== null ? `${offer.price} cr` : 'price unknown'
+      const label = [offer.name, offer.classId].filter(Boolean).join(' / ')
+      return `- ${label || 'Unknown ship'} at ${price}`
+    })
+    const header = affordable.length > 0
+      ? 'Affordable ship opportunities:'
+      : 'Nearby ship opportunities to monitor:'
+    return `${header}\n${lines.join('\n')}`
   }
 
   private log: LogFn = (type, summary, detail?) => {
@@ -272,8 +401,6 @@ export class Agent {
         const compactInputProvider = (getPreference('compact_input_provider') || '').trim()
         const compactInputModel = (getPreference('compact_input_model') || '').trim()
         const altSolverEnabled = getPreference('alt_solver_enabled') === 'true'
-        const altSolverAfterRoundsStr = getPreference('alt_solver_after_rounds')
-        const altSolverAfterRounds = altSolverAfterRoundsStr ? parseInt(altSolverAfterRoundsStr, 10) || 3 : 3
         const altSolverProvider = (getPreference('alt_solver_provider') || '').trim()
         const altSolverModel = (getPreference('alt_solver_model') || '').trim()
         let compactionModel: Model<any> | undefined
@@ -339,7 +466,6 @@ export class Agent {
             compactionModel,
             compactionApiKey,
             advisorEnabled: altSolverEnabled,
-            advisorAfterRounds: altSolverAfterRounds,
             advisorModel,
             advisorApiKey,
             onActivity: (a) => this.setActivity(a),
@@ -399,6 +525,9 @@ export class Agent {
 
       const nudgeParts: string[] = []
       if (pendingEvents) nudgeParts.push('## Events Since Last Action\n' + pendingEvents + '\n')
+
+      const telemetryNudge = await this.collectFreeTelemetry()
+      if (telemetryNudge) nudgeParts.push(telemetryNudge)
 
       // Drain any human nudges
       if (this.pendingNudges.length > 0) {
@@ -736,13 +865,16 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - Use local tools (read_todo, update_todo, save_credentials, status_log) directly by name -- NEVER wrap them in game().
 - After registering, IMMEDIATELY save credentials with save_credentials.
 - Read and update your TODO list regularly to track goals and progress.
-- Query commands are free and unlimited -- use them often.
+- Query commands are free and unlimited, but Admiral also injects automatic telemetry snapshots from free queries. Prefer those snapshots for routine status/cargo/market checks so you do not waste turns re-querying the same information.
 - Action commands cost 1 tick (10 seconds).
 - If an action returns \`pending: true\`, the command was accepted and queued for the next tick. Treat that as progress. Do not call it a deadlock just because the world state has not updated yet.
 - If you see a state error like \`not_docked\` after \`undock\`, or \`already_docked\` after \`dock\`, interpret it as evidence that the desired state may already be true. Refresh with \`get_status\` before retrying or claiming the server is frozen.
 - If you hit errors like \`already_in_system\`, \`cargo_full\`, \`not_enough_fuel\`, \`invalid_payload\` for a zero-quantity sell, or a market/sell rejection, treat them as planning feedback. Verify state, change strategy, and avoid repeating the same blocked action.
 - Never claim a stuck mutation queue, deadlock, or server freeze unless multiple fresh observations explicitly prove commands are neither executing nor changing state after verification with \`get_status\`.
 - Always check fuel before traveling and cargo space before mining.
+- Mining loops should be practical: mine until cargo is near full (roughly 80-90%), but stop early if yields fail, the location lacks resources, cargo is full, or a better unload/travel opportunity appears.
+- Do not hoard ore blindly. When docked with valuable raw materials, inspect the market before selling. Avoid dumping into obviously bad instant bids; prefer corrected pricing or listing behavior when needed.
+- Periodically check for practical ship upgrades when docked at a shipyard or base. Favor upgrades that materially improve cargo, mining throughput, survivability, or travel efficiency and are affordable without stalling progress.
 - Be social -- chat with players you meet.
 - Prioritize faction coordination: use faction chat frequently to share status, plans, threats, trade needs, and requests for support.
 - Interact in faction chat: react to incoming messages, answer teammates, ask follow-up questions, and agree on concrete coordinated actions.
@@ -862,6 +994,105 @@ function stringifyStateValue(value: unknown): string {
   if (typeof value === 'string') return value
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
   return ''
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+function extractCargoEntries(data: Record<string, unknown> | undefined): Array<{ id: string; name: string; quantity: number }> {
+  if (!data) return []
+  const candidates = [
+    data.items,
+    data.cargo,
+    (data.result as Record<string, unknown> | undefined)?.items,
+    (data.ship as Record<string, unknown> | undefined)?.cargo,
+  ]
+
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) continue
+    const entries = candidate
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null
+        const record = item as Record<string, unknown>
+        const id = String(record.item_id || record.id || '')
+        const name = String(record.name || record.item_name || id || 'item')
+        const quantity = toFiniteNumber(record.quantity ?? record.qty ?? record.amount)
+        if (!quantity || quantity <= 0) return null
+        return { id, name, quantity }
+      })
+      .filter((entry): entry is { id: string; name: string; quantity: number } => Boolean(entry))
+    if (entries.length > 0) return entries
+  }
+
+  return []
+}
+
+function summarizeMarket(data: Record<string, unknown> | undefined): string {
+  if (!data) return ''
+  const candidates = [
+    data.items,
+    data.orders,
+    data.market,
+    (data.result as Record<string, unknown> | undefined)?.items,
+  ]
+
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) continue
+    const lines = candidate
+      .slice(0, 6)
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null
+        const record = item as Record<string, unknown>
+        const name = String(record.name || record.item_name || record.item_id || '').trim()
+        if (!name) return null
+        const bid = toFiniteNumber(record.best_bid ?? record.bid_price ?? record.buy_price ?? record.highest_buy)
+        const ask = toFiniteNumber(record.best_ask ?? record.ask_price ?? record.sell_price ?? record.lowest_sell)
+        const volume = toFiniteNumber(record.quantity ?? record.available ?? record.volume)
+        const parts = [name]
+        if (bid !== null) parts.push(`bid ${bid}`)
+        if (ask !== null) parts.push(`ask ${ask}`)
+        if (volume !== null) parts.push(`qty ${volume}`)
+        return `- ${parts.join(', ')}`
+      })
+      .filter((line): line is string => Boolean(line))
+    if (lines.length > 0) return lines.join('\n')
+  }
+
+  return ''
+}
+
+function extractShipOffers(data: Record<string, unknown> | undefined): Array<{ name: string; classId: string; price: number | null }> {
+  if (!data) return []
+  const candidates = [
+    data.ships,
+    data.listings,
+    data.offers,
+    (data.result as Record<string, unknown> | undefined)?.ships,
+  ]
+
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) continue
+    const offers = candidate
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null
+        const record = item as Record<string, unknown>
+        const name = String(record.name || record.ship_name || record.class_name || '').trim()
+        const classId = String(record.ship_class || record.class_id || record.ship_class_id || '').trim()
+        const price = toFiniteNumber(record.price ?? record.ask_price ?? record.cost ?? record.sale_price)
+        if (!name && !classId) return null
+        return { name, classId, price }
+      })
+      .filter((offer): offer is { name: string; classId: string; price: number | null } => Boolean(offer))
+    if (offers.length > 0) return offers
+  }
+
+  return []
 }
 
 function parseNotificationMeta(n: unknown): { type: string; message: string } | null {
