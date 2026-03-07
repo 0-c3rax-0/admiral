@@ -58,6 +58,11 @@ const commandSuggestCache = new Map<string, { expiresAt: number; names: string[]
 
 export type LogFn = (type: string, summary: string, detail?: string) => void
 
+export interface ImmediateRecoveryHint {
+  reason: string
+  suggestedStateCheck: 'get_status'
+}
+
 interface ToolContext {
   connection: GameConnection
   profileId: string
@@ -100,7 +105,7 @@ export async function executeTool(
     const resp = await ctx.connection.execute(command, commandArgs && Object.keys(commandArgs).length > 0 ? commandArgs : undefined)
 
     if (resp.error) {
-      let errMsg = `Error: [${resp.error.code}] ${resp.error.message}`
+      let errMsg = formatCommandError(command, resp.error.code, resp.error.message)
       if (resp.error.code === 'unknown_command' || resp.error.code === 'invalid_command') {
         const suggestions = await suggestCommands(ctx.profileId, command, ctx.connection)
         if (suggestions.length > 0) {
@@ -120,6 +125,36 @@ export async function executeTool(
     ctx.log('error', errMsg)
     return errMsg
   }
+}
+
+export function detectImmediateRecoveryHint(toolName: string, toolArgs: Record<string, unknown>, result: string): ImmediateRecoveryHint | null {
+  const effectiveCommand = toolName === 'game'
+    ? sanitizeCommandName(String(toolArgs.command || ''))
+    : toolName
+  const lower = result.toLowerCase()
+
+  if (!effectiveCommand) return null
+
+  if (lower.includes('error: [not_docked]') && effectiveCommand === 'undock') {
+    return { reason: 'undock reported not_docked, so the ship is likely already undocked', suggestedStateCheck: 'get_status' }
+  }
+  if (lower.includes('error: [already_docked]') && effectiveCommand === 'dock') {
+    return { reason: 'dock reported already_docked, so the ship is likely already docked', suggestedStateCheck: 'get_status' }
+  }
+  if (lower.includes('error: [already_in_system]')) {
+    return { reason: 'travel target is already satisfied', suggestedStateCheck: 'get_status' }
+  }
+  if (lower.includes('error: [cargo_full]')) {
+    return { reason: 'cargo capacity is exhausted and the current gather plan is blocked', suggestedStateCheck: 'get_status' }
+  }
+  if (lower.includes('error: [not_enough_fuel]')) {
+    return { reason: 'movement plan is blocked by insufficient fuel', suggestedStateCheck: 'get_status' }
+  }
+  if (effectiveCommand === 'sell' && (lower.includes('error: [market') || lower.includes('error: [sell'))) {
+    return { reason: 'sell action failed due to market constraints', suggestedStateCheck: 'get_status' }
+  }
+
+  return null
 }
 
 async function suggestCommands(profileId: string, attempted: string, connection: GameConnection): Promise<string[]> {
@@ -306,6 +341,11 @@ function formatArgs(args: Record<string, unknown>): string {
 
 function formatToolResult(name: string, result: unknown, notifications?: unknown[]): string {
   const parts: string[] = []
+  const pendingHint = formatPendingHint(name, result)
+  if (pendingHint) {
+    parts.push(pendingHint)
+    parts.push('')
+  }
   if (notifications && Array.isArray(notifications) && notifications.length > 0) {
     parts.push('Notifications:')
     for (const n of notifications) {
@@ -353,7 +393,75 @@ function parseNotification(n: unknown): { tag: string; text: string } | null {
   } else {
     message = (notif.message as string) || JSON.stringify(n)
   }
-  return { tag, text: message }
+  return { tag, text: annotateNotification(tag, message) }
+}
+
+function formatPendingHint(command: string, result: unknown): string | null {
+  if (!result || typeof result !== 'object') return null
+  const record = result as Record<string, unknown>
+  if (record.pending !== true) return null
+
+  const message = typeof record.message === 'string' ? record.message : `${command} accepted and queued for the next tick.`
+  return [
+    `Pending action accepted: ${message}`,
+    'Interpret this as progress, not a stuck server.',
+    `Do not repeat "${command}" immediately. Wait for the next tick, then refresh with get_status or interpret resulting notifications before deciding the state.`,
+  ].join(' ')
+}
+
+function formatCommandError(command: string, code: string, message: string): string {
+  const prefix = `Error: [${code}] ${message}`
+  const normalized = code.trim().toLowerCase()
+
+  if (normalized === 'not_docked' && command === 'undock') {
+    return `${prefix}\nInterpretation: your ship is already undocked, so the previous undock likely already took effect. Do not call this a deadlock. Refresh with get_status and continue from the undocked state.`
+  }
+
+  if (normalized === 'already_docked' && command === 'dock') {
+    return `${prefix}\nInterpretation: your ship is already docked. Treat the intended dock state as satisfied, refresh with get_status if needed, and continue.`
+  }
+
+  if (normalized === 'not_docked' && command !== 'undock') {
+    return `${prefix}\nInterpretation: this command requires a docked ship, but the ship is currently not docked. Refresh with get_status and adjust the plan instead of assuming the server is frozen.`
+  }
+
+  if (normalized === 'already_in_system') {
+    return `${prefix}\nInterpretation: you are already at the intended destination. Treat travel as already satisfied, refresh with get_status if needed, and continue with the next step instead of retrying travel.`
+  }
+
+  if (normalized === 'cargo_full') {
+    return `${prefix}\nInterpretation: cargo is full. Stop repeating resource-gathering actions. Refresh with get_status or get_cargo and switch to selling, transferring, refining, or another cargo-clearing step.`
+  }
+
+  if (normalized === 'not_enough_fuel') {
+    return `${prefix}\nInterpretation: the ship lacks fuel for this plan. Stop repeating the same movement action, refresh with get_status, and re-plan around refueling or a shorter route.`
+  }
+
+  if ((normalized.includes('market') || normalized.includes('sell')) && command === 'sell') {
+    return `${prefix}\nInterpretation: selling failed due to market or sale constraints. Refresh with get_status or market/cargo queries and choose a corrected sell plan instead of repeating the same sell action blindly.`
+  }
+
+  return prefix
+}
+
+function annotateNotification(tag: string, message: string): string {
+  const upperTag = tag.trim().toUpperCase()
+  if (upperTag === 'ACTION_ERROR' && /\bnot_docked\b/i.test(message)) {
+    return `${message} Interpretation: the ship is already undocked or an earlier undock already completed. Refresh state before retrying and do not infer a stuck mutation queue from this alone.`
+  }
+  if (upperTag === 'ACTION_ERROR' && /\balready_in_system\b/i.test(message)) {
+    return `${message} Interpretation: travel is already satisfied because the ship is already in the target system. Continue with the next step instead of retrying travel.`
+  }
+  if (upperTag === 'ACTION_ERROR' && /\bcargo_full\b/i.test(message)) {
+    return `${message} Interpretation: cargo capacity is exhausted. Stop gathering more resources and switch to unloading, selling, or another cargo-clearing action.`
+  }
+  if (upperTag === 'ACTION_ERROR' && /\bnot_enough_fuel\b/i.test(message)) {
+    return `${message} Interpretation: the current route or action is blocked by fuel. Re-plan around refueling or a nearer destination instead of retrying the same move.`
+  }
+  if (upperTag === 'OK' && /\b\"action\":\"dock\"\b/i.test(message)) {
+    return `${message} Interpretation: docking succeeded; treat the ship as docked.`
+  }
+  return message
 }
 
 function jsonToYaml(value: unknown, indent: number = 0): string {
