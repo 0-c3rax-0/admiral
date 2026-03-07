@@ -49,6 +49,7 @@ export class Agent {
   private memorySummary: string = ''
   private lastSavedMemory: string = ''
   private _gameState: Record<string, unknown> | null = null
+  private pendingRecoveryNudge: string | null = null
   constructor(profileId: string) {
     this.profileId = profileId
   }
@@ -370,13 +371,22 @@ export class Agent {
       try {
         const pollResp = await this.connection.execute('get_status')
         this.cacheGameState(pollResp)
-        if (pollResp.notifications && Array.isArray(pollResp.notifications) && pollResp.notifications.length > 0) {
-          pendingEvents = pollResp.notifications
+        const notifications = Array.isArray(pollResp.notifications) ? pollResp.notifications : []
+        if (notifications.length > 0) {
+          pendingEvents = notifications
             .map(n => {
               const s = formatNotificationSummary(n)
               return `  > ${s}`
             })
             .join('\n')
+
+          if (shouldForceStateRefreshFromNotifications(notifications)) {
+            const refreshResp = await this.connection.execute('get_status')
+            this.cacheGameState(refreshResp)
+            this.log('system', 'Automatic state refresh triggered after dock/undock-related notification')
+            pendingEvents += '\n  > [SYSTEM] Automatic recovery: refreshed state with get_status after dock/undock event.'
+            this.pendingRecoveryNudge = buildRecoveryNudge(notifications, this._gameState)
+          }
         }
       } catch {
         // Best-effort
@@ -392,6 +402,11 @@ export class Agent {
           nudgeParts.push(`## Human Nudge\nYour human operator has sent you guidance: ${n}\nTake this into account for your next actions.\n`)
           this.log('system', `Nudge delivered: ${n.slice(0, 100)}`)
         }
+      }
+      if (this.pendingRecoveryNudge) {
+        nudgeParts.push(this.pendingRecoveryNudge)
+        this.log('system', 'Recovery re-plan nudge delivered after contradictory action outcome')
+        this.pendingRecoveryNudge = null
       }
       if (nudgeParts.length > 0) {
         idleLoopCount = 0
@@ -718,6 +733,10 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - Read and update your TODO list regularly to track goals and progress.
 - Query commands are free and unlimited -- use them often.
 - Action commands cost 1 tick (10 seconds).
+- If an action returns \`pending: true\`, the command was accepted and queued for the next tick. Treat that as progress. Do not call it a deadlock just because the world state has not updated yet.
+- If you see a state error like \`not_docked\` after \`undock\`, or \`already_docked\` after \`dock\`, interpret it as evidence that the desired state may already be true. Refresh with \`get_status\` before retrying or claiming the server is frozen.
+- If you hit errors like \`already_in_system\`, \`cargo_full\`, \`not_enough_fuel\`, or a market/sell rejection, treat them as planning feedback. Verify state, change strategy, and avoid repeating the same blocked action.
+- Never claim a stuck mutation queue, deadlock, or server freeze unless multiple fresh observations explicitly prove commands are neither executing nor changing state after verification with \`get_status\`.
 - Always check fuel before traveling and cargo space before mining.
 - Be social -- chat with players you meet.
 - Prioritize faction coordination: use faction chat frequently to share status, plans, threats, trade needs, and requests for support.
@@ -743,6 +762,120 @@ function formatNotificationSummary(n: unknown): string {
   }
 
   return `[${type.toUpperCase()}] ${JSON.stringify(n).slice(0, 200)}`
+}
+
+function shouldForceStateRefreshFromNotifications(notifications: unknown[]): boolean {
+  return notifications.some((n) => {
+    const parsed = parseNotificationMeta(n)
+    if (!parsed) return false
+
+    return isRecoveryRelevantNotification(parsed)
+  })
+}
+
+function buildRecoveryNudge(notifications: unknown[], gameState: Record<string, unknown> | null): string {
+  const reasons = notifications
+    .map((n) => parseNotificationMeta(n))
+    .filter((value): value is { type: string; message: string } => Boolean(value))
+    .filter((parsed) => isRecoveryRelevantNotification(parsed))
+    .map(({ type, message }) => `- ${type}: ${message}`)
+
+  return [
+    '## Recovery Replan',
+    'Your previous action assumptions are no longer trustworthy.',
+    'Stop repeating the last blocked or contradictory action.',
+    'Re-evaluate from the verified current game state below and build a fresh plan from here.',
+    reasons.length > 0 ? 'Observed contradictory or blocked signals:\n' + reasons.join('\n') : 'Observed contradictory or blocked action signals.',
+    'Verified current state from fresh get_status:',
+    formatVerifiedGameState(gameState),
+    'Use the verified state as authoritative. If the intended result is already satisfied or the current action is blocked by fuel, cargo, travel, or market constraints, continue with a corrected next strategic step instead of retrying the same action.',
+  ].join('\n\n')
+}
+
+function isRecoveryRelevantNotification(parsed: { type: string; message: string }): boolean {
+  const type = parsed.type.toUpperCase()
+  const message = parsed.message.toLowerCase()
+
+  if (type === 'ACTION_ERROR' && (
+    message.includes('not_docked') ||
+    message.includes('already_docked') ||
+    message.includes('already_in_system') ||
+    message.includes('cargo_full') ||
+    message.includes('not_enough_fuel') ||
+    message.includes('market') ||
+    message.includes('sell')
+  )) {
+    return true
+  }
+
+  if (type === 'OK' && (
+    message.includes('"action":"dock"') ||
+    message.includes('"action":"undock"') ||
+    message.includes('"command":"dock"') ||
+    message.includes('"command":"undock"') ||
+    message.includes('"action":"travel"') ||
+    message.includes('"command":"travel"') ||
+    message.includes('"action":"sell"') ||
+    message.includes('"command":"sell"')
+  )) {
+    return true
+  }
+
+  return false
+}
+
+function formatVerifiedGameState(gameState: Record<string, unknown> | null): string {
+  if (!gameState) return '- get_status succeeded, but no structured game state was available.'
+
+  const player = (gameState.player as Record<string, unknown> | undefined) || {}
+  const ship = (gameState.ship as Record<string, unknown> | undefined) || {}
+  const location = (gameState.location as Record<string, unknown> | undefined) || {}
+
+  const systemName = stringifyStateValue(player.current_system ?? location.system_name) || '?'
+  const poiName = stringifyStateValue(player.current_poi ?? location.poi_name) || '?'
+  const credits = stringifyStateValue(player.credits) || '?'
+  const shipName = stringifyStateValue(ship.name) || stringifyStateValue(ship.ship_name) || '?'
+  const cargoUsed = stringifyStateValue(ship.cargo_used) || '?'
+  const cargoCapacity = stringifyStateValue(ship.cargo_capacity) || '?'
+  const fuel = stringifyStateValue(ship.fuel) || '?'
+  const maxFuel = stringifyStateValue(ship.max_fuel) || '?'
+  const hull = stringifyStateValue(ship.hull) || '?'
+  const maxHull = stringifyStateValue(ship.max_hull) || '?'
+
+  return [
+    `- Location: ${systemName} / ${poiName}`,
+    `- Credits: ${credits}`,
+    `- Ship: ${shipName}`,
+    `- Cargo: ${cargoUsed}/${cargoCapacity}`,
+    `- Fuel: ${fuel}/${maxFuel}`,
+    `- Hull: ${hull}/${maxHull}`,
+  ].join('\n')
+}
+
+function stringifyStateValue(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  return ''
+}
+
+function parseNotificationMeta(n: unknown): { type: string; message: string } | null {
+  if (typeof n !== 'object' || n === null) return null
+
+  const notif = n as Record<string, unknown>
+  const type = String((notif.type as string) || (notif.msg_type as string) || 'event')
+  let data = notif.data as Record<string, unknown> | string | undefined
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data) } catch { /* leave as string */ }
+  }
+
+  if (data && typeof data === 'object') {
+    const message = (data.message as string) || (data.content as string) || JSON.stringify(data)
+    return { type, message }
+  }
+
+  if (typeof data === 'string') return { type, message: data }
+  if (typeof notif.message === 'string') return { type, message: notif.message }
+  return { type, message: JSON.stringify(n) }
 }
 
 function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {

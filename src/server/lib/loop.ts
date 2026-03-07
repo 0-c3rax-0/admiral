@@ -2,7 +2,7 @@ import { complete } from '@mariozechner/pi-ai'
 import type { Model, Context, AssistantMessage, ToolCall, Message } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
 import type { LogFn } from './tools'
-import { executeTool } from './tools'
+import { detectImmediateRecoveryHint, executeTool } from './tools'
 import {
   enqueueLlmRequest,
   getLlmRateWindowStats,
@@ -225,6 +225,26 @@ export async function runAgentTurn(
         timestamp: Date.now(),
       }
       context.messages.push(toolResultMessage)
+
+      const recoveryHint = detectImmediateRecoveryHint(toolCall.name, toolCall.arguments, result)
+      if (recoveryHint) {
+        log('system', `Immediate recovery triggered: ${recoveryHint.reason}`)
+
+        const verification = await executeTool('game', { command: recoveryHint.suggestedStateCheck }, toolCtx, 'Immediate recovery state verification')
+        const verificationMessage: Message = {
+          role: 'user' as const,
+          content: [
+            '## Immediate Recovery Replan',
+            `The just-executed action needs re-evaluation: ${recoveryHint.reason}.`,
+            `A fresh ${recoveryHint.suggestedStateCheck} was executed immediately. Treat its result below as authoritative and revise the plan now instead of repeating the blocked action.`,
+            'Verified state/result:',
+            verification,
+          ].join('\n\n'),
+          timestamp: Date.now(),
+        }
+        context.messages.push(verificationMessage)
+        break
+      }
     }
 
     rounds++
