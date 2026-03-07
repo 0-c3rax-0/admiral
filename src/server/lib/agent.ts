@@ -740,7 +740,7 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - Action commands cost 1 tick (10 seconds).
 - If an action returns \`pending: true\`, the command was accepted and queued for the next tick. Treat that as progress. Do not call it a deadlock just because the world state has not updated yet.
 - If you see a state error like \`not_docked\` after \`undock\`, or \`already_docked\` after \`dock\`, interpret it as evidence that the desired state may already be true. Refresh with \`get_status\` before retrying or claiming the server is frozen.
-- If you hit errors like \`already_in_system\`, \`cargo_full\`, \`not_enough_fuel\`, or a market/sell rejection, treat them as planning feedback. Verify state, change strategy, and avoid repeating the same blocked action.
+- If you hit errors like \`already_in_system\`, \`cargo_full\`, \`not_enough_fuel\`, \`invalid_payload\` for a zero-quantity sell, or a market/sell rejection, treat them as planning feedback. Verify state, change strategy, and avoid repeating the same blocked action.
 - Never claim a stuck mutation queue, deadlock, or server freeze unless multiple fresh observations explicitly prove commands are neither executing nor changing state after verification with \`get_status\`.
 - Always check fuel before traveling and cargo space before mining.
 - Be social -- chat with players you meet.
@@ -801,16 +801,17 @@ function isRecoveryRelevantNotification(parsed: { type: string; message: string 
   const type = parsed.type.toUpperCase()
   const message = parsed.message.toLowerCase()
 
-  if (type === 'ACTION_ERROR' && (
-    message.includes('not_docked') ||
-    message.includes('already_docked') ||
-    message.includes('already_in_system') ||
-    message.includes('cargo_full') ||
-    message.includes('not_enough_fuel') ||
-    message.includes('market') ||
-    message.includes('sell')
-  )) {
-    return true
+    if (type === 'ACTION_ERROR' && (
+      message.includes('not_docked') ||
+      message.includes('already_docked') ||
+      message.includes('already_in_system') ||
+      message.includes('cargo_full') ||
+      message.includes('not_enough_fuel') ||
+      (message.includes('invalid_payload') && message.includes('quantity must be greater than 0')) ||
+      message.includes('market') ||
+      message.includes('sell')
+    )) {
+      return true
   }
 
   if (type === 'OK' && (
