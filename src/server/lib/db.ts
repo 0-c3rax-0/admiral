@@ -176,6 +176,7 @@ function migrate(db: Database): void {
 
   // Clean up legacy preferences
   db.exec("DELETE FROM preferences WHERE key = 'display_format'")
+  db.exec("DELETE FROM preferences WHERE key = 'alt_solver_after_rounds'")
 
   // Seed default providers
   const defaultProviders = [

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Shield, Heart, Fuel, Package, Cpu, Zap, MapPin, DollarSign } from 'lucide-react'
+import { Shield, Heart, Fuel, Package, Cpu, Zap, MapPin, DollarSign, Crosshair, ScrollText, Gem } from 'lucide-react'
 
 const LS_KEY = 'admiral-status-compact'
 
@@ -31,10 +31,24 @@ export function PlayerStatus({ data }: Props) {
   const player = (data.player || {}) as Record<string, unknown>
   const ship = (data.ship || {}) as Record<string, unknown>
   const location = (data.location || {}) as Record<string, unknown>
+  const rawStats = (player.stats || {}) as Record<string, unknown>
+  const completedMissions = (player.completed_missions || {}) as Record<string, unknown>
+  const cargo = Array.isArray(ship.cargo) ? ship.cargo as Array<Record<string, unknown>> : []
 
   // v1 puts system/poi in player, v2 puts them in location
   const systemName = player.current_system || location.system_name || '?'
   const poiName = player.current_poi || location.poi_name || '?'
+  const piratesDestroyed = toNum(rawStats.pirates_destroyed)
+  const shipsDestroyed = toNum(rawStats.ships_destroyed)
+  const basesDestroyed = toNum(rawStats.bases_destroyed)
+  const totalKills = piratesDestroyed + shipsDestroyed + basesDestroyed
+  const missionCount = Object.keys(completedMissions).length
+  const lootUnits = cargo
+    .filter((item) => {
+      const itemId = String(item.item_id || '').toLowerCase()
+      return itemId !== '' && !itemId.includes('ore') && !itemId.includes('ice') && !itemId.includes('gas')
+    })
+    .reduce((sum, item) => sum + toNum(item.quantity), 0)
 
   const stats: { icon: React.ReactNode; label: string; value: string; sub?: string; color?: string }[] = [
     { icon: <MapPin size={12} />, label: 'Location', value: `${systemName}`, sub: String(poiName) },
@@ -45,6 +59,9 @@ export function PlayerStatus({ data }: Props) {
     { icon: <Package size={12} />, label: 'Cargo', value: `${ship.cargo_used || 0}/${ship.cargo_capacity || 0}`, color: 'var(--smui-green)' },
     { icon: <Cpu size={12} />, label: 'CPU', value: `${ship.cpu_used || 0}/${ship.cpu_capacity || 0}`, color: 'var(--smui-purple)' },
     { icon: <Zap size={12} />, label: 'Power', value: `${ship.power_used || 0}/${ship.power_capacity || 0}`, color: 'var(--smui-frost-3)' },
+    { icon: <Crosshair size={12} />, label: 'Kills', value: totalKills.toLocaleString(), sub: `NPC ${piratesDestroyed} | PvP ${shipsDestroyed}`, color: 'var(--smui-red)' },
+    { icon: <ScrollText size={12} />, label: 'Missions', value: missionCount.toLocaleString(), sub: 'completed', color: 'var(--smui-frost-2)' },
+    { icon: <Gem size={12} />, label: 'Loot', value: lootUnits.toLocaleString(), sub: lootUnits > 0 ? 'non-resource cargo' : 'none onboard', color: 'var(--smui-green)' },
   ]
 
   if (compact) {
@@ -65,7 +82,7 @@ export function PlayerStatus({ data }: Props) {
 
   return (
     <div
-      className="group/status grid grid-cols-4 lg:grid-cols-8 gap-[1px] bg-border border-b border-border cursor-pointer hover:opacity-80 transition-opacity"
+      className="group/status grid grid-cols-3 md:grid-cols-4 xl:grid-cols-6 2xl:grid-cols-11 gap-[1px] bg-border border-b border-border cursor-pointer hover:opacity-80 transition-opacity"
       onClick={toggle}
     >
       {stats.map(s => <StatCard key={s.label} {...s} />)}
@@ -89,4 +106,13 @@ function StatCard({ icon, label, value, sub, color }: { icon: React.ReactNode; l
       {sub && <span className="text-[10px] text-muted-foreground mt-0.5 block truncate">{sub}</span>}
     </div>
   )
+}
+
+function toNum(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+  return 0
 }

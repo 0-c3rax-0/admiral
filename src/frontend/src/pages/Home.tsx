@@ -20,7 +20,6 @@ export function Home() {
   const [compactInputProvider, setCompactInputProvider] = useState('openai')
   const [compactInputModel, setCompactInputModel] = useState('')
   const [altSolverEnabled, setAltSolverEnabled] = useState(false)
-  const [altSolverAfterRounds, setAltSolverAfterRounds] = useState(3)
   const [altSolverProvider, setAltSolverProvider] = useState('openai')
   const [altSolverModel, setAltSolverModel] = useState('')
 
@@ -79,10 +78,6 @@ export function Home() {
       }
       if (prefs.alt_solver_enabled) {
         setAltSolverEnabled(prefs.alt_solver_enabled === 'true')
-      }
-      if (prefs.alt_solver_after_rounds) {
-        const v = parseInt(prefs.alt_solver_after_rounds, 10)
-        if (!isNaN(v) && v > 0) setAltSolverAfterRounds(v)
       }
       if (prefs.alt_solver_provider) {
         setAltSolverProvider(prefs.alt_solver_provider)
@@ -258,19 +253,6 @@ export function Home() {
     }
   }, [])
 
-  const handleSetAltSolverAfterRounds = useCallback(async (rounds: number) => {
-    setAltSolverAfterRounds(rounds)
-    try {
-      await fetch('/api/preferences', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key: 'alt_solver_after_rounds', value: String(rounds) }),
-      })
-    } catch {
-      // ignore
-    }
-  }, [])
-
   const handleSetAltSolverProvider = useCallback(async (provider: string) => {
     setAltSolverProvider(provider)
     try {
@@ -342,8 +324,6 @@ export function Home() {
           onCompactInputModelChange={handleSetCompactInputModel}
           altSolverEnabled={altSolverEnabled}
           onAltSolverEnabledChange={handleSetAltSolverEnabled}
-          altSolverAfterRounds={altSolverAfterRounds}
-          onAltSolverAfterRoundsChange={handleSetAltSolverAfterRounds}
           altSolverProvider={altSolverProvider}
           onAltSolverProviderChange={handleSetAltSolverProvider}
           altSolverModel={altSolverModel}

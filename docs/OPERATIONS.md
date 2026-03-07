@@ -1,101 +1,163 @@
 # Operations Guide
 
-This document describes how to run, configure, and diagnose this Admiral fork in day-to-day operation.
+This document describes how to run and operate this Admiral fork in production.
 
-## What This Fork Changes Operationally
+## Service Model
 
-Compared with upstream Admiral, this fork adds runtime behavior that matters in operations:
+Production on this host is managed through:
 
-- profile-level LLM failover
-- alternative solver switching after configurable tool rounds
-- Google Gemini OAuth support
-- persistent profile memory on disk
-- startup autoconnect with randomized delay windows
-- built-in SQLite retention and successful-request payload compaction
-- enhanced `websocket_v2` transport
+- `admiral.service`
+- `admiral-healthcheck.service`
+- `admiral-healthcheck.timer`
 
-## Run Modes
-
-Development:
+Useful commands:
 
 ```bash
-bun install
-bun run dev
+systemctl status admiral.service --no-pager
+systemctl restart admiral.service
+journalctl -u admiral.service -n 50 --no-pager
 ```
 
-Production:
+The service binary path is:
+
+```text
+/root/spacemolt-admiral/admiral/admiral
+```
+
+## Build And Restart
+
+Build:
 
 ```bash
 bun run build
-./admiral
 ```
 
-Default URL:
+Restart:
 
-```text
-http://localhost:3031
+```bash
+systemctl restart admiral.service
 ```
 
-Important local data paths:
+Do not rely on ad-hoc background starts when the systemd service is the intended control plane.
+
+## Important Paths
 
 - `data/admiral.db`
 - `data/memory/`
+- `/etc/systemd/system/admiral.service`
+- `/etc/systemd/system/admiral-healthcheck.service`
+- `/etc/systemd/system/admiral-healthcheck.timer`
 
-## Recommended Default Configuration
+## Recommended Defaults
 
 For most profiles:
 
 - connection mode: `http_v2`
-- primary provider/model: your preferred stable model
-- failover provider/model: a cheaper or more available backup model
+- primary model: your normal budget/default choice
+- profile failover: a more available backup model
 
-Use `websocket_v2` only when you explicitly want persistent socket transport and the server path is stable enough for it.
+Use `websocket_v2` only if you specifically want a persistent socket transport and the server path is stable enough.
 
-## LLM Control Model
+## LLM Routing Model
 
-This fork has three separate LLM-routing mechanisms:
+This fork has three separate routing layers.
 
-### 1. Primary model
+### Primary model
 
 The profile's normal `provider/model`.
 
-### 2. Alternative solver
+### Alternative solver
 
-Configured through preferences:
+Controlled through preferences:
 
 - `alt_solver_enabled`
-- `alt_solver_after_rounds`
 - `alt_solver_provider`
 - `alt_solver_model`
 
-Behavior:
+Current behavior:
 
-- after the configured tool-round threshold, the active turn can switch to the alternative solver model
-- if that model fails, the loop reverts to the primary model
+- no fixed round threshold
+- only activates on likely loop/stall detection
+- examples:
+  - repeated identical command rounds
+  - repeated blocked error rounds
+  - several rounds with unchanged results
 
-### 3. Profile failover
+If the alternative solver fails, Admiral falls back to the primary model for the same turn.
 
-Configured per profile:
+### Profile failover
+
+Controlled per profile:
 
 - `failover_provider`
 - `failover_model`
 
-Behavior:
+Current behavior:
 
-- activates on provider failures such as `429`, reachability errors, or similar retry/failover conditions
-- can still activate even after an alternative solver was tried
+- used on rate limits, timeouts, and provider failures
+- independent from the alternative solver
+
+## Free Query Telemetry
+
+This fork reduces wasteful LLM status polling by directly collecting free game queries between turns.
+
+Typical free-query telemetry includes:
+
+- `get_status`
+- `get_cargo`
+- `view_market`
+- `shipyard_showroom`
+- `browse_ships`
+
+Operational effect:
+
+- fewer LLM steps burned on routine status checks
+- better mining loops
+- earlier sell/market awareness
+- periodic ship-upgrade awareness when docked
+
+## 429 Prediction
+
+429 prediction is still available, but it is now intended as a UI signal instead of repetitive log noise.
+
+Current behavior:
+
+- elevated 429 risk is attached to profile status data
+- the Dashboard summarizes medium/high-risk profiles
+- the stats modal lists currently pressured accounts
+- routine risk warnings are no longer meant to flood `system` logs
+
+Operationally, this makes the feature usable for triage instead of merely noisy.
+
+## Dashboard Metrics
+
+The web UI now exposes operational and gameplay deltas more clearly.
+
+Current dashboard summary includes:
+
+- `Credits 1h`
+- `Ore 1h`
+- `Trades 1h`
+- current `429 Risk`
+- last snapshot time
+
+The stats modal also includes:
+
+- aggregate snapshot/event counts
+- `Systems 1h`
+- a list of currently risk-elevated profiles
+
+Per-account status panels include richer playstyle indicators when SpaceMolt returns them, such as:
+
+- kills
+- completed missions
+- non-resource loot onboard
 
 ## Google Gemini OAuth
 
-This fork supports `google-gemini-cli` as an OAuth-backed provider.
+`google-gemini-cli` is supported as an OAuth-backed provider.
 
-Operational notes:
-
-- OAuth state is stored locally in SQLite preferences under `oauth_auth_json`
-- access tokens may expire, but refresh is handled through the provider library
-- manual re-login is only required if refresh itself fails or credentials are revoked
-
-Relevant backend routes:
+Relevant routes:
 
 - `POST /api/oauth/google-gemini-cli/start`
 - `GET /api/oauth/google-gemini-cli/status/:sessionId`
@@ -103,25 +165,28 @@ Relevant backend routes:
 - `GET /api/oauth/google-gemini-cli/detect-project`
 - `POST /api/oauth/google-gemini-cli/manual/:sessionId`
 
-## Restart Behavior
+Stored state:
 
-This fork preserves restart recovery for active work.
+- `preferences.oauth_auth_json`
+
+Operational note:
+
+- a large share of Gemini-related errors will come from the optional compact-input or alternative-solver path if those features are enabled
+
+## Restart Recovery
+
+Restart recovery is built into the server.
 
 On startup:
 
-- `processing` LLM requests are moved back to `pending`
-- the latest pending request for a profile can be resumed from stored request context
+- `processing` requests are reset to `pending`
+- the latest pending request for a profile can be resumed from stored context
 
-This depends on keeping full context for:
-
-- `pending`
-- `processing`
-
-Do not introduce retention changes that strip those rows.
+Do not remove the retained request context needed for this path.
 
 ## SQLite Retention
 
-Retention is internal to the app. No external scheduler is required.
+Retention is internal. No separate cron job is required.
 
 Current behavior:
 
@@ -130,73 +195,27 @@ Current behavior:
   - `log_entries`
   - `stats_snapshots`
   - `stats_events`
-- successful `llm_requests` keep full `system_prompt` and `messages_json` for 3 hours
-- after 3 hours, successful requests are compacted by clearing those heavy fields
-- failed requests keep their context for diagnosis
+- successful `llm_requests` keep full request payloads for 3 hours
+- after that, successful payloads are compacted
+- failed and pending requests keep diagnostic context
 
-What this means operationally:
+Legacy cleanup also removes obsolete preferences such as:
 
-- DB growth is reduced, but not eliminated
-- heavy traffic within a short window can still make `admiral.db` large
-- retention helps most with historical buildup, not burst load
+- `display_format`
+- `alt_solver_after_rounds`
 
-## Persistent Memory
-
-Profile memory is stored outside SQLite:
-
-- `data/memory/`
-
-This is intentionally separate from transient turn/request payloads.
-
-Use it for:
-
-- long-running role memory
-- task continuity across restarts
-- operator-curated agent memory
-
-Do not confuse persistent memory with request replay context.
-
-## Connection Modes
-
-Supported:
-
-- `http`
-- `http_v2`
-- `websocket`
-- `websocket_v2`
-- `mcp`
-- `mcp_v2`
-
-Operational guidance:
-
-- `http_v2`: safest default
-- `websocket_v2`: lower-latency persistent socket mode with heartbeat/reconnect/reauth handling
-- `mcp_v2`: use when you explicitly want tool-discovery-oriented MCP v2 behavior
-
-## High-Signal Logs
-
-When diagnosing model routing, these phrases matter:
-
-- `Alternative solver activated after ...`
-- `Alternative solver failed; reverting to primary model: ...`
-- `Switching to profile failover model due to rate limit or provider reachability issue: ...`
-- `Using profile failover model (attempt X/3): ...`
-- `Primary LLM provider recovered; failover disabled`
-
-Do not collapse these into a single generic “failover happened” explanation.
-
-## Useful Local Diagnostics
-
-Providers:
-
-```bash
-sqlite3 -header -column data/admiral.db "SELECT * FROM providers;"
-```
+## Diagnostics
 
 Profiles:
 
 ```bash
 sqlite3 -header -column data/admiral.db "SELECT id, name, provider, model, failover_provider, failover_model, connection_mode FROM profiles;"
+```
+
+Providers:
+
+```bash
+sqlite3 -header -column data/admiral.db "SELECT id, status, base_url FROM providers;"
 ```
 
 Recent logs:
@@ -205,23 +224,26 @@ Recent logs:
 sqlite3 -header -column data/admiral.db "SELECT id, timestamp, profile_id, type, summary FROM log_entries ORDER BY id DESC LIMIT 100;"
 ```
 
-Recent LLM requests:
+Recent request routing:
 
 ```bash
 sqlite3 -header -column data/admiral.db "SELECT id, profile_id, status, provider_name, model_name, response_model, created_at, completed_at FROM llm_requests ORDER BY id DESC LIMIT 100;"
 ```
 
-Check Google OAuth presence:
+Check OAuth presence:
 
 ```bash
 sqlite3 -header -column data/admiral.db "SELECT key FROM preferences WHERE key='oauth_auth_json';"
 ```
 
-## Safe Change Rules
+## High-Signal Log Messages
 
-When changing this fork in production-sensitive areas:
+When debugging routing behavior, these messages matter:
 
-- preserve restart recovery for `pending` and `processing` requests
-- preserve failed-request diagnostic value unless intentionally changing retention policy
-- update `README.md` when user-visible runtime behavior changes
-- keep logs precise enough to distinguish alternative solver, primary model, and profile failover
+- `Alternative solver activated after loop/stall detection: ...`
+- `Alternative solver failed; reverting to primary model: ...`
+- `Switching to profile failover model due to rate limit or provider reachability issue: ...`
+- `Using profile failover model (attempt X/3): ...`
+- `Primary LLM provider recovered; failover disabled`
+
+Keep the distinction between alternative-solver activation and profile failover. They are not the same event.

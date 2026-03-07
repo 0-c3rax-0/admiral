@@ -1,172 +1,119 @@
-# Agent Guide For This Admiral Fork
+# Agent Guide
 
-This document is for coding agents and operators working inside this repository. It describes how this fork differs from upstream Admiral, how it is configured, and how it should be used safely.
-
-## Scope
-
-Use this guide when working on:
-
-- profile configuration
-- LLM provider setup
-- failover behavior
-- alternative solver behavior
-- Google Gemini OAuth
-- persistent memory
-- connection mode selection
-- SQLite retention and diagnostics
+This document is for coding agents and operators working inside this repository.
 
 ## Repository Identity
 
-This repo is a fork of `SpaceMolt/admiral`, with additional runtime and orchestration behavior.
+This repo is a fork of `SpaceMolt/admiral` with additional orchestration and operations behavior.
 
 Upstream:
 
 - `https://github.com/SpaceMolt/admiral`
 
-Fork remote in this repo:
+Do not assume upstream README text or upstream runtime behavior matches this fork.
 
-- `git@github.com:0-c3rax-0/admiral.git`
+## Runtime Differences From Upstream
 
-Do not assume upstream README or upstream runtime behavior fully matches this fork.
+This fork adds or changes:
 
-## High-Level Fork Differences
-
-This fork adds important behavior on top of standard Admiral:
-
-- profile-level failover provider/model
-- alternative solver after configurable tool rounds
+- profile-level primary and failover provider/model routing
+- alternative solver activation only on detected loops or stalled plans
 - Google Gemini OAuth via `google-gemini-cli`
 - persistent per-profile memory under `data/memory/`
 - startup autoconnect with jitter
-- runtime stats snapshots/events
-- built-in SQLite retention and payload compaction
-- `websocket_v2` as a real distinct connection implementation
+- runtime stats snapshots and events in SQLite
+- built-in SQLite retention and request payload compaction
+- free-query telemetry injection for better mining/trading loops
+- UI-visible 429 risk summaries
+- broader account status cards with combat/mission/loot indicators
+- `websocket_v2` as a real separate implementation
 
-## Important Runtime Files
+## Files That Matter
 
-- `data/admiral.db`: local SQLite state
-- `data/memory/`: persistent profile memory
-- `src/server/lib/agent.ts`: agent bootstrap and per-profile loop wiring
-- `src/server/lib/loop.ts`: LLM turn loop, failover, alternative solver, compaction
-- `src/server/lib/db.ts`: schema, retention, request persistence
-- `src/server/routes/oauth.ts`: Google Gemini OAuth flow
-- `src/server/lib/connections/websocket_v2.ts`: enhanced WebSocket v2 transport
+- `src/server/lib/agent.ts`
+- `src/server/lib/loop.ts`
+- `src/server/lib/db.ts`
+- `src/server/lib/model.ts`
+- `src/server/routes/oauth.ts`
+- `src/frontend/src/components/ProviderSetup.tsx`
+- `data/admiral.db`
+- `data/memory/`
 
-## How To Run
+## Alternative Solver
 
-Development:
-
-```bash
-bun install
-bun run dev
-```
-
-Production build:
-
-```bash
-bun run build
-./admiral
-```
-
-Default app URL:
-
-```text
-http://localhost:3031
-```
-
-## Provider Configuration Model
-
-Providers are stored in the `providers` table.
-
-Profiles store:
-
-- `provider`
-- `model`
-- `failover_provider`
-- `failover_model`
-- `connection_mode`
-
-Provider-level API storage includes:
-
-- `api_key`
-- `failover_api_key`
-- `base_url`
-- `status`
-
-Do not confuse:
-
-- profile failover model selection
-- provider failover API key storage
-- alternative solver configuration
-
-These are related but separate mechanisms.
-
-## Connection Modes
-
-Supported modes:
-
-- `http`
-- `http_v2`
-- `websocket`
-- `websocket_v2`
-- `mcp`
-- `mcp_v2`
-
-Preferred default:
-
-- use `http_v2` unless there is a specific reason to prefer another mode
-
-Use `websocket_v2` when you want:
-
-- persistent socket transport
-- heartbeat supervision
-- reconnect backoff
-- re-auth retry on recoverable session/auth failures
-
-Do not describe `websocket_v2` as an alias for `websocket`. In this fork it is implemented separately.
-
-## Alternative Solver Behavior
-
-The alternative solver is configured through preferences:
+Configuration:
 
 - `alt_solver_enabled`
-- `alt_solver_after_rounds`
 - `alt_solver_provider`
 - `alt_solver_model`
 
-Current behavior in this fork:
+Current behavior:
 
-- the primary model handles the first tool rounds
-- after the configured round threshold, the active model for the same turn switches to the alternative solver model
-- if the alternative solver fails due to rate-limit or reachability style errors, the loop reverts to the primary model
-- after that, the normal profile failover path can still activate if needed
+- not based on a fixed tool-round threshold anymore
+- activates only when Admiral detects likely looping or stalling
+- loop signals include repeated identical command rounds, repeated blocked error rounds, or unchanged results across multiple rounds
+- if it fails, the turn returns to the primary model
 
-Do not describe the alternative solver as "just advisory text". That was an earlier state; this fork now uses it as a real model switch inside the active turn.
+Do not describe the alternative solver as a generic “advisor after N rounds”. That is no longer accurate.
 
-## Failover Behavior
+## Profile Failover
 
-Profile failover is distinct from the alternative solver.
+Profile failover is separate from the alternative solver.
+
+Configuration:
+
+- `failover_provider`
+- `failover_model`
 
 Current behavior:
 
-- profile failover activates on provider failures such as `429`, rate limit, timeout, or reachability problems
-- when active, the loop uses the profile's configured failover model and failover API key path
-- logs distinguish between alternative-solver activation and profile failover activation
+- used on rate limits, timeouts, or similar provider failures
+- still available even if the alternative solver exists
 
-Relevant log phrases:
+When writing docs or incident notes, distinguish:
 
-- `Alternative solver activated after ...`
-- `Alternative solver failed; reverting to primary model: ...`
-- `Switching to profile failover model due to rate limit or provider reachability issue: ...`
-- `Using profile failover model (attempt X/3): ...`
+- alternative solver activation
+- profile failover activation
 
-When diagnosing runtime behavior, use these exact distinctions.
+## Free Query Telemetry
+
+This fork now injects compact telemetry from free game queries between turns.
+
+Common queries:
+
+- `get_status`
+- `get_cargo`
+- `view_market`
+- `shipyard_showroom`
+- `browse_ships`
+
+Intent:
+
+- reduce wasteful LLM status polling
+- improve mining loops
+- avoid cargo hoarding without market checks
+- notice practical ship upgrades when docked
+
+## UI Metrics
+
+This fork intentionally pushes more information into the web UI instead of leaving it buried in logs.
+
+Examples:
+
+- profile-level 429 risk in dashboard status data
+- dashboard 1-hour deltas for credits, ore, and trades
+- per-account status cards with kills, completed missions, and non-resource loot onboard
+
+Important distinction:
+
+- ore, gas, and ice remain part of normal cargo/mining displays
+- the `Loot` indicator is intentionally meant for non-resource cargo only
 
 ## Google Gemini OAuth
 
 This fork supports `google-gemini-cli` via local OAuth.
 
-API routes:
+Routes:
 
 - `POST /api/oauth/google-gemini-cli/start`
 - `GET /api/oauth/google-gemini-cli/status/:sessionId`
@@ -174,107 +121,51 @@ API routes:
 - `GET /api/oauth/google-gemini-cli/detect-project`
 - `POST /api/oauth/google-gemini-cli/manual/:sessionId`
 
-Stored state:
+Stored credentials:
 
-- OAuth credentials are stored in preferences under `oauth_auth_json`
+- `preferences.oauth_auth_json`
 
-Usage model:
+Do not assume Gemini is always the primary model. In this fork it may be:
 
-- Admiral resolves OAuth-backed providers in `src/server/lib/model.ts`
-- OAuth credentials are refreshed through `@mariozechner/pi-ai`
-- manual re-login is only needed if the refresh path itself fails
-
-Do not assume Google OAuth means "always primary". In this fork it may be used as:
-
-- the profile's primary model
+- a primary model
+- the compact-input model
 - the alternative solver model
 
-## Persistent Memory
+## Retention
 
-Persistent memory is stored outside SQLite in:
+Retention is enforced in the server process.
 
-- `data/memory/`
+Current behavior:
 
-Behavior:
-
-- a profile can load prior memory into new sessions
-- memory can be saved and reset via profile routes/UI
-- this is separate from `llm_requests.messages_json`
-
-When discussing storage growth, distinguish between:
-
-- SQLite request/log payload growth
-- profile memory files on disk
-
-## SQLite Retention
-
-Retention is built into the server process. No external cron or systemd timer is required.
-
-Current retention rules:
-
-- rows older than 3 days are pruned from:
+- 3-day pruning for:
   - `llm_requests`
   - `log_entries`
   - `stats_snapshots`
   - `stats_events`
-- successful `llm_requests` keep full `system_prompt` and `messages_json` for 3 hours
-- after 3 hours, successful requests have those large fields cleared
-- `pending`, `processing`, and `failed` requests keep their full context
+- 3-hour retention of full successful request payloads
+- later payload compaction for successful requests
+- failed and pending requests retain diagnostic context
 
-This design preserves:
+Legacy preference cleanup includes:
 
-- restart resume behavior
-- diagnosis for failed requests
-- short-window diagnosis for successful requests
+- `display_format`
+- `alt_solver_after_rounds`
 
-## Restart Recovery
+## Operational Assumptions
 
-Restart recovery still depends on persisted `llm_requests`.
+Preferred production control plane:
 
-Current behavior:
+- `systemctl restart admiral.service`
+- `systemctl status admiral.service --no-pager`
+- `journalctl -u admiral.service -n 50 --no-pager`
 
-- `processing` requests are reset to `pending` on startup
-- the latest pending request for a profile can be resumed using stored `system_prompt` and `messages_json`
+Do not treat manual background starts as the normal production workflow when the systemd service exists.
 
-Do not strip context from `pending` or `processing` requests.
+## Safe Guidance
 
-## Operational Guidance
+When changing code or docs in this repo:
 
-When explaining or modifying this fork, keep these points accurate:
-
-- `http_v2` is the safe default transport
-- `websocket_v2` is a real upgraded WebSocket implementation
-- alternative solver is a live model switch, not only a suggestion
-- failover and alternative solver are different mechanisms
-- Google Gemini OAuth can be valid even when no API key is configured
-- DB retention exists, but recent heavy traffic can still make `admiral.db` large
-
-## Recommended Diagnostic Queries
-
-Useful checks when debugging local state:
-
-```bash
-sqlite3 data/admiral.db '.tables'
-sqlite3 -header -column data/admiral.db "SELECT * FROM providers;"
-sqlite3 -header -column data/admiral.db "SELECT id, name, provider, model, failover_provider, failover_model FROM profiles;"
-sqlite3 -header -column data/admiral.db "SELECT id, timestamp, profile_id, type, summary FROM log_entries ORDER BY id DESC LIMIT 50;"
-sqlite3 -header -column data/admiral.db "SELECT id, status, provider_name, model_name, response_model, created_at FROM llm_requests ORDER BY id DESC LIMIT 50;"
-```
-
-For Google OAuth diagnostics:
-
-```bash
-sqlite3 -header -column data/admiral.db "SELECT key, substr(value,1,300) FROM preferences WHERE key='oauth_auth_json';"
-```
-
-## Change Discipline
-
-When changing behavior in this fork:
-
-- update `README.md` if user-visible behavior changes
-- keep log wording precise when differentiating alternative solver vs. failover
-- preserve restart safety for `pending` and `processing` requests
-- avoid changes that silently erase failed-request diagnostics
-- use `apply_patch` for repo edits
-
-If behavior is uncertain, inspect the current code before describing it. This fork has already diverged from upstream in meaningful ways.
+- verify current behavior in code before describing it
+- do not document the alternative solver as round-count based
+- do not claim query commands are “free” in the LLM sense; they are free on the game side, but may still cost LLM turns if routed through model planning
+- keep the distinction between free direct telemetry and LLM-planned tool calls

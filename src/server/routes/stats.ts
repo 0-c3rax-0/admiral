@@ -1,7 +1,55 @@
 import { Hono } from 'hono'
-import { getProfile, listStatsEvents, listStatsSnapshots } from '../lib/db'
+import { listProfiles, getProfile, listStatsEvents, listStatsSnapshots } from '../lib/db'
 
 const stats = new Hono()
+
+stats.get('/summary', (c) => {
+  const profiles = listProfiles()
+  const now = Date.now()
+  const oneHourAgo = now - (60 * 60 * 1000)
+
+  let snapshotCount = 0
+  let profilesWithData = 0
+  let lastSnapshotTs: string | null = null
+  let creditsDelta1h = 0
+  let oreDelta1h = 0
+  let tradesDelta1h = 0
+  let systemsDelta1h = 0
+  let events24h = 0
+
+  for (const profile of profiles) {
+    const snapshots = listStatsSnapshots(profile.id, 240)
+    const events = listStatsEvents(profile.id, 200)
+    snapshotCount += snapshots.length
+    if (snapshots.length > 0) profilesWithData++
+
+    const newest = snapshots[0]
+    if (newest?.ts && (!lastSnapshotTs || new Date(newest.ts).getTime() > new Date(lastSnapshotTs).getTime())) {
+      lastSnapshotTs = newest.ts
+    }
+
+    if (snapshots.length > 0) {
+      const anchor = snapshots.find((s) => new Date(s.ts).getTime() <= oneHourAgo) || snapshots[snapshots.length - 1]
+      creditsDelta1h += num(newest?.credits) - num(anchor?.credits)
+      oreDelta1h += num(newest?.ore_mined) - num(anchor?.ore_mined)
+      tradesDelta1h += num(newest?.trades_completed) - num(anchor?.trades_completed)
+      systemsDelta1h += num(newest?.systems_explored) - num(anchor?.systems_explored)
+    }
+
+    events24h += events.filter((e) => new Date(e.ts).getTime() >= now - (24 * 60 * 60 * 1000)).length
+  }
+
+  return c.json({
+    snapshotCount,
+    profilesWithData,
+    lastSnapshotTs,
+    creditsDelta1h,
+    oreDelta1h,
+    tradesDelta1h,
+    systemsDelta1h,
+    events24h,
+  })
+})
 
 stats.get('/:id/snapshots', (c) => {
   const id = c.req.param('id')
@@ -24,3 +72,7 @@ stats.get('/:id/events', (c) => {
 })
 
 export default stats
+
+function num(v: number | null | undefined): number {
+  return typeof v === 'number' && Number.isFinite(v) ? v : 0
+}

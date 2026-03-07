@@ -47,7 +47,6 @@ export interface LoopOptions {
   compactionModel?: Model<any>
   compactionApiKey?: string
   advisorEnabled?: boolean
-  advisorAfterRounds?: number
   advisorModel?: Model<any>
   advisorApiKey?: string
   onActivity?: (activity: string) => void
@@ -69,12 +68,16 @@ export async function runAgentTurn(
   compaction?: CompactionState,
 ): Promise<void> {
   const maxRounds = options?.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS
-  const advisorAfterRounds = Math.max(1, options?.advisorAfterRounds ?? 3)
   let advisorUnavailable = false
   let switchedToAdvisorModel = false
   let activeModel = model
   let activeApiKey = options?.apiKey
   let rounds = 0
+  let advisorState: AdvisorStallState = {
+    repeatedRoundSignatureCount: 0,
+    stalledErrorRounds: 0,
+    stagnantRounds: 0,
+  }
 
   while (rounds < maxRounds) {
     if (options?.signal?.aborted) return
@@ -84,13 +87,13 @@ export async function runAgentTurn(
       !switchedToAdvisorModel &&
       options?.advisorEnabled &&
       options?.advisorModel &&
-      rounds >= advisorAfterRounds
+      shouldActivateAdvisor(advisorState, rounds)
     ) {
       activeModel = options.advisorModel
       activeApiKey = options.advisorApiKey || options.apiKey || options.failoverApiKey
       switchedToAdvisorModel = true
       const modelName = ((activeModel as any).name as string | undefined) || ((activeModel as any).id as string | undefined) || 'unknown'
-      log('system', `Alternative solver activated after ${rounds} rounds: ${modelName}`)
+      log('system', `Alternative solver activated after loop/stall detection: ${describeAdvisorTrigger(advisorState)}. Model: ${modelName}`)
     }
 
     enforceContextMessageCap(context)
@@ -202,6 +205,9 @@ export async function runAgentTurn(
     if (reasoning) log('llm_thought', reasoning)
 
     const toolCtx = { connection, profileId, log, todo: todo.value }
+    const roundToolFingerprints: string[] = []
+    const roundResultFingerprints: string[] = []
+    let roundErrorCount = 0
 
     let showedReason = false
     for (const toolCall of toolCalls) {
@@ -210,12 +216,15 @@ export async function runAgentTurn(
       options?.onActivity?.(`Executing tool: ${toolCall.name}`)
       const callReason = !showedReason ? reason : undefined
       showedReason = true
+      roundToolFingerprints.push(fingerprintToolCall(toolCall.name, toolCall.arguments))
       const result = await executeTool(toolCall.name, toolCall.arguments, toolCtx, callReason)
+      roundResultFingerprints.push(fingerprintResult(result))
 
       // If update_todo changed the todo via local tool, sync back
       todo.value = toolCtx.todo
 
       const isError = result.startsWith('Error')
+      if (isError) roundErrorCount++
       const toolResultMessage: Message = {
         role: 'toolResult',
         toolCallId: toolCall.id,
@@ -247,6 +256,13 @@ export async function runAgentTurn(
       }
     }
 
+    advisorState = updateAdvisorStallState(advisorState, {
+      toolSignature: roundToolFingerprints.join(' || '),
+      resultSignature: roundResultFingerprints.join(' || '),
+      hasErrors: roundErrorCount > 0,
+      allErrored: roundToolFingerprints.length > 0 && roundErrorCount === roundToolFingerprints.length,
+    })
+
     rounds++
 
   }
@@ -257,6 +273,80 @@ export async function runAgentTurn(
 function truncateForLog(text: string, max: number): string {
   if (text.length <= max) return text
   return `${text.slice(0, max)}\n\n... (truncated for log storage)`
+}
+
+interface AdvisorStallState {
+  previousRoundSignature?: string
+  previousResultSignature?: string
+  repeatedRoundSignatureCount: number
+  stalledErrorRounds: number
+  stagnantRounds: number
+}
+
+function shouldActivateAdvisor(state: AdvisorStallState, rounds: number): boolean {
+  if (rounds < 2) return false
+  return (
+    state.stalledErrorRounds >= 2 ||
+    state.repeatedRoundSignatureCount >= 2 ||
+    state.stagnantRounds >= 3
+  )
+}
+
+function describeAdvisorTrigger(state: AdvisorStallState): string {
+  if (state.stalledErrorRounds >= 2) return `repeated blocked error rounds (${state.stalledErrorRounds})`
+  if (state.repeatedRoundSignatureCount >= 2) return `repeated command loop (${state.repeatedRoundSignatureCount + 1} similar rounds)`
+  if (state.stagnantRounds >= 3) return `stagnant results (${state.stagnantRounds + 1} rounds)`
+  return 'stall detection'
+}
+
+function updateAdvisorStallState(
+  prev: AdvisorStallState,
+  round: { toolSignature: string; resultSignature: string; hasErrors: boolean; allErrored: boolean },
+): AdvisorStallState {
+  const sameTools = Boolean(round.toolSignature) && round.toolSignature === prev.previousRoundSignature
+  const sameResults = Boolean(round.resultSignature) && round.resultSignature === prev.previousResultSignature
+
+  return {
+    previousRoundSignature: round.toolSignature || prev.previousRoundSignature,
+    previousResultSignature: round.resultSignature || prev.previousResultSignature,
+    repeatedRoundSignatureCount: sameTools ? prev.repeatedRoundSignatureCount + 1 : 0,
+    stalledErrorRounds: round.allErrored && sameTools ? prev.stalledErrorRounds + 1 : 0,
+    stagnantRounds: sameResults ? prev.stagnantRounds + 1 : 0,
+  }
+}
+
+function fingerprintToolCall(name: string, args: Record<string, unknown>): string {
+  const normalizedArgs = stableStringify(normalizeValue(args))
+  return `${name}:${normalizedArgs}`
+}
+
+function fingerprintResult(result: string): string {
+  return result
+    .toLowerCase()
+    .replace(/\d+/g, '#')
+    .replace(/\s+/g, ' ')
+    .slice(0, 240)
+}
+
+function normalizeValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizeValue)
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    const out: Record<string, unknown> = {}
+    for (const key of Object.keys(record).sort()) {
+      out[key] = normalizeValue(record[key])
+    }
+    return out
+  }
+  return value
+}
+
+function stableStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value) || ''
+  } catch {
+    return String(value)
+  }
 }
 
 function enforceContextMessageCap(context: Context): void {
@@ -522,28 +612,6 @@ async function completeWithRetry(
     })
   const idempotencyKey = request.idempotencyKey
 
-  if (is429PredictionEnabled()) {
-    const risk = predict429Risk(profileId)
-    if (risk.level !== 'LOW') {
-      log(
-        'system',
-        `429 risk ${risk.level}: ${risk.reason}`,
-        JSON.stringify(
-          {
-            profileId,
-            callsLast60s: risk.callsLast60s,
-            errors429Last60s: risk.errors429Last60s,
-            errors429Last300s: risk.errors429Last300s,
-            failoverActivationsLast300s: risk.failoverActivationsLast300s,
-            recommendation: risk.recommendation,
-          },
-          null,
-          2,
-        ),
-      )
-    }
-  }
-
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
       markLlmRequestProcessing(request.id, (existing?.attemptCount || 0) + attempt + 1)
@@ -711,7 +779,7 @@ interface RateRiskAssessment {
   failoverActivationsLast300s: number
 }
 
-function predict429Risk(profileId: string): RateRiskAssessment {
+export function predict429Risk(profileId: string): RateRiskAssessment {
   const s = getLlmRateWindowStats(profileId)
 
   if (s.errors429Last60s >= 1 || s.callsLast60s >= 8) {
@@ -740,7 +808,7 @@ function predict429Risk(profileId: string): RateRiskAssessment {
   }
 }
 
-function is429PredictionEnabled(): boolean {
+export function is429PredictionEnabled(): boolean {
   const pref = getPreference('predict_429_enabled')
   if (pref == null || pref === '') return true
   return pref === 'true'
