@@ -134,6 +134,30 @@ function migrate(db: Database): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_llm_requests_profile_status ON llm_requests(profile_id, status, id DESC);
+
+    CREATE TABLE IF NOT EXISTS pending_mutations (
+      profile_id TEXT PRIMARY KEY,
+      command TEXT NOT NULL,
+      destination TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS supervisor_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      provider_name TEXT,
+      model_name TEXT,
+      candidate_count INTEGER NOT NULL DEFAULT 0,
+      nudges_sent INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      completed_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_supervisor_runs_created_at ON supervisor_runs(created_at DESC);
   `)
 
   // Migrations: add columns that may be missing from older databases
@@ -343,6 +367,14 @@ export interface LlmPendingSnapshot {
   messages_json: string | null
 }
 
+export interface PendingMutationSnapshot {
+  profile_id: string
+  command: string
+  destination: string | null
+  created_at: string
+  updated_at: string
+}
+
 export function enqueueLlmRequest(input: {
   profileId: string
   idempotencyKey: string
@@ -417,6 +449,29 @@ export function getLatestPendingLlmRequest(profileId: string): LlmPendingSnapsho
      ORDER BY id DESC
      LIMIT 1`
   ).get(profileId) as LlmPendingSnapshot | undefined
+}
+
+export function getPendingMutation(profileId: string): PendingMutationSnapshot | undefined {
+  return getDb().query(
+    `SELECT profile_id, command, destination, created_at, updated_at
+     FROM pending_mutations
+     WHERE profile_id = ?`
+  ).get(profileId) as PendingMutationSnapshot | undefined
+}
+
+export function setPendingMutation(profileId: string, command: string, destination?: string): void {
+  getDb().query(
+    `INSERT INTO pending_mutations (profile_id, command, destination, created_at, updated_at)
+     VALUES (?, ?, ?, datetime('now'), datetime('now'))
+     ON CONFLICT(profile_id) DO UPDATE SET
+       command = excluded.command,
+       destination = excluded.destination,
+       updated_at = datetime('now')`
+  ).run(profileId, command, destination ?? null)
+}
+
+export function clearPendingMutation(profileId: string): void {
+  getDb().query('DELETE FROM pending_mutations WHERE profile_id = ?').run(profileId)
 }
 
 export function getLlmRateWindowStats(profileId: string): LlmRateWindowStats {
@@ -499,6 +554,19 @@ export interface StatsEventRow {
   value: string | null
 }
 
+export interface SupervisorRunRow {
+  id: number
+  status: string
+  provider_name: string | null
+  model_name: string | null
+  candidate_count: number
+  nudges_sent: number
+  last_error: string | null
+  created_at: string
+  updated_at: string
+  completed_at: string | null
+}
+
 export function addStatsSnapshot(snapshot: StatsSnapshotInput): number {
   const result = getDb().query(
     `INSERT INTO stats_snapshots (
@@ -558,6 +626,51 @@ export function listStatsEvents(profileId: string, limit: number = 100): StatsEv
   return getDb().query(
     'SELECT * FROM stats_events WHERE profile_id = ? ORDER BY id DESC LIMIT ?'
   ).all(profileId, limit) as StatsEventRow[]
+}
+
+export function createSupervisorRun(input: {
+  providerName?: string
+  modelName?: string
+  candidateCount: number
+}): number {
+  const result = getDb().query(
+    `INSERT INTO supervisor_runs (
+      status, provider_name, model_name, candidate_count, nudges_sent
+    ) VALUES ('processing', ?, ?, ?, 0)`
+  ).run(
+    input.providerName ?? null,
+    input.modelName ?? null,
+    input.candidateCount,
+  )
+  return Number(result.lastInsertRowid)
+}
+
+export function markSupervisorRunSucceeded(id: number, nudgesSent: number): void {
+  getDb().query(
+    `UPDATE supervisor_runs
+     SET status = 'succeeded',
+         nudges_sent = ?,
+         completed_at = datetime('now'),
+         updated_at = datetime('now')
+     WHERE id = ?`
+  ).run(nudgesSent, id)
+}
+
+export function markSupervisorRunFailed(id: number, error: string): void {
+  getDb().query(
+    `UPDATE supervisor_runs
+     SET status = 'failed',
+         last_error = ?,
+         completed_at = datetime('now'),
+         updated_at = datetime('now')
+     WHERE id = ?`
+  ).run(error, id)
+}
+
+export function listSupervisorRuns(limit: number = 100): SupervisorRunRow[] {
+  return getDb().query(
+    'SELECT * FROM supervisor_runs ORDER BY id DESC LIMIT ?'
+  ).all(limit) as SupervisorRunRow[]
 }
 
 // --- Preferences CRUD ---

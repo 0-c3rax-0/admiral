@@ -62,4 +62,5 @@ Guide selection rules:
 - **Captain's log**: Write entries for important events — they persist across sessions
 - Ships have hull, shield, armor, fuel, cargo, CPU, and power stats — modules use CPU + power
 - Police zones in empire systems protect you; police level drops further from empire cores
-- When destroyed, you respawn at your home base — credits and skills are preserved, ship and cargo are lost
+- When destroyed or self-destructed, you respawn at your home base, but this is a severe loss event: credits and skills are preserved, while your current ship, cargo, equipped modules, and other ship-bound upgrades are lost
+- Treat expensive mining equipment and badges attached to the ship/loadout as high-value assets. Never self-destruct just to fix navigation or position unless there is no other viable recovery path and the asset loss is clearly worth it

@@ -14,6 +14,7 @@ import map from './routes/map'
 import oauth from './routes/oauth'
 import { addStatsEvent, addStatsSnapshot, getPreference, listProfiles, pruneOldRows } from './lib/db'
 import { agentManager } from './lib/agent-manager'
+import { fleetSupervisor } from './lib/supervisor'
 
 const app = new Hono()
 app.use('*', cors())
@@ -169,6 +170,7 @@ function scheduleStatsSnapshots(): void {
 }
 
 scheduleStatsSnapshots()
+fleetSupervisor.start()
 
 function scheduleRetentionPrune(): void {
   const intervalMs = 15 * 60_000

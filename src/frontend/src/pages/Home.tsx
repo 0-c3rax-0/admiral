@@ -22,6 +22,10 @@ export function Home() {
   const [altSolverEnabled, setAltSolverEnabled] = useState(false)
   const [altSolverProvider, setAltSolverProvider] = useState('openai')
   const [altSolverModel, setAltSolverModel] = useState('')
+  const [supervisorEnabled, setSupervisorEnabled] = useState(false)
+  const [supervisorProvider, setSupervisorProvider] = useState('openai')
+  const [supervisorModel, setSupervisorModel] = useState('')
+  const [supervisorIntervalSec, setSupervisorIntervalSec] = useState(45)
 
   useEffect(() => {
     loadData()
@@ -84,6 +88,19 @@ export function Home() {
       }
       if (prefs.alt_solver_model) {
         setAltSolverModel(prefs.alt_solver_model)
+      }
+      if (prefs.supervisor_enabled) {
+        setSupervisorEnabled(prefs.supervisor_enabled === 'true')
+      }
+      if (prefs.supervisor_provider) {
+        setSupervisorProvider(prefs.supervisor_provider)
+      }
+      if (prefs.supervisor_model) {
+        setSupervisorModel(prefs.supervisor_model)
+      }
+      if (prefs.supervisor_interval_sec) {
+        const v = parseInt(prefs.supervisor_interval_sec, 10)
+        if (!isNaN(v) && v > 0) setSupervisorIntervalSec(v)
       }
 
       // Show settings if no profiles and no configured providers
@@ -279,6 +296,58 @@ export function Home() {
     }
   }, [])
 
+  const handleSetSupervisorEnabled = useCallback(async (enabled: boolean) => {
+    setSupervisorEnabled(enabled)
+    try {
+      await fetch('/api/preferences', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: 'supervisor_enabled', value: String(enabled) }),
+      })
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  const handleSetSupervisorProvider = useCallback(async (provider: string) => {
+    setSupervisorProvider(provider)
+    try {
+      await fetch('/api/preferences', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: 'supervisor_provider', value: provider }),
+      })
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  const handleSetSupervisorModel = useCallback(async (model: string) => {
+    setSupervisorModel(model)
+    try {
+      await fetch('/api/preferences', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: 'supervisor_model', value: model }),
+      })
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  const handleSetSupervisorIntervalSec = useCallback(async (seconds: number) => {
+    setSupervisorIntervalSec(seconds)
+    try {
+      await fetch('/api/preferences', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: 'supervisor_interval_sec', value: String(seconds) }),
+      })
+    } catch {
+      // ignore
+    }
+  }, [])
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-screen">
@@ -328,6 +397,14 @@ export function Home() {
           onAltSolverProviderChange={handleSetAltSolverProvider}
           altSolverModel={altSolverModel}
           onAltSolverModelChange={handleSetAltSolverModel}
+          supervisorEnabled={supervisorEnabled}
+          onSupervisorEnabledChange={handleSetSupervisorEnabled}
+          supervisorProvider={supervisorProvider}
+          onSupervisorProviderChange={handleSetSupervisorProvider}
+          supervisorModel={supervisorModel}
+          onSupervisorModelChange={handleSetSupervisorModel}
+          supervisorIntervalSec={supervisorIntervalSec}
+          onSupervisorIntervalSecChange={handleSetSupervisorIntervalSec}
           onClose={() => {
             setShowSettings(false)
             loadData()

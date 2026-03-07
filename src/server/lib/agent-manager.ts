@@ -1,5 +1,6 @@
-import { Agent, clearProfileMemory, readProfileMemory, writeProfileMemory } from './agent'
+import { Agent, clearProfileMemory, readProfileMemory, writeProfileMemory, type MutationState, type NavigationState } from './agent'
 import { getProfile, addLogEntry } from './db'
+import { getPendingNavigation } from './navigation-guard'
 
 const BACKOFF_BASE = 5_000      // 5 seconds
 const BACKOFF_MAX = 5 * 60_000  // 5 minutes
@@ -207,15 +208,24 @@ class AgentManager {
     running: boolean
     activity: string
     gameState: SlimGameState
+    mutation_state: MutationState
+    mutation_state_detail: string | null
+    navigation_state: NavigationState
+    navigation_state_detail: string | null
     adaptive_mode: 'normal' | 'soft' | 'high' | 'critical'
     effective_context_budget_ratio: number | null
   } {
     const agent = this.agents.get(profileId)
+    const persistedNavigation = !agent ? getPendingNavigation(profileId) : null
     return {
       connected: agent?.isConnected ?? false,
       running: agent?.isRunning ?? false,
       activity: agent?.activity ?? 'idle',
       gameState: slimGameState(agent?.gameState ?? null),
+      mutation_state: agent?.mutationState ?? (persistedNavigation ? 'navigation_pending' : 'idle'),
+      mutation_state_detail: agent?.mutationStateDetail ?? (persistedNavigation ? `${persistedNavigation.command}${persistedNavigation.destination ? ` to ${persistedNavigation.destination}` : ''} pending` : null),
+      navigation_state: agent?.navigationState ?? (persistedNavigation ? 'navigation_pending' : 'unknown'),
+      navigation_state_detail: agent?.navigationStateDetail ?? (persistedNavigation ? `${persistedNavigation.command}${persistedNavigation.destination ? ` to ${persistedNavigation.destination}` : ''} pending` : null),
       adaptive_mode: agent?.adaptiveMode ?? 'normal',
       effective_context_budget_ratio: agent?.effectiveContextBudgetRatio ?? null,
     }

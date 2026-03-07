@@ -1,5 +1,6 @@
 import type { GameConnection, LoginResult, RegisterResult, CommandResult, NotificationHandler } from './interface'
 import { USER_AGENT } from './interface'
+import { normalizeCommandResult } from './command-meta'
 
 const MAX_RECONNECT_ATTEMPTS = 6
 const RECONNECT_BASE_DELAY = 5_000
@@ -216,7 +217,7 @@ export class HttpConnection implements GameConnection {
       const data = asRecord(await resp.json())
       const session = toApiSession(data?.session)
       if (session) this.session = session
-      return (data ?? {}) as CommandResult
+      return normalizeCommandResult(command, (data ?? {}) as CommandResult)
     } catch {
       return { error: { code: 'http_error', message: `HTTP ${resp.status}` } }
     }

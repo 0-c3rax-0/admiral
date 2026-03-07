@@ -20,6 +20,10 @@ interface Props {
 type RuntimeStatus = {
   connected: boolean
   running: boolean
+  mutation_state?: 'idle' | 'mutation_pending' | 'navigation_pending' | 'local_stall'
+  mutation_state_detail?: string | null
+  navigation_state?: 'docked' | 'undocked' | 'at_resource_poi' | 'navigation_pending' | 'local_stall' | 'unknown'
+  navigation_state_detail?: string | null
   adaptive_mode?: 'normal' | 'soft' | 'high' | 'critical'
   effective_context_budget_ratio?: number | null
   rate_risk?: {
@@ -151,6 +155,10 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
             connected: !!p.connected,
             running: !!p.running,
             adaptive_mode: (p.adaptive_mode as RuntimeStatus['adaptive_mode']) || 'normal',
+            mutation_state: (p.mutation_state as RuntimeStatus['mutation_state']) || 'idle',
+            mutation_state_detail: typeof p.mutation_state_detail === 'string' ? p.mutation_state_detail : null,
+            navigation_state: (p.navigation_state as RuntimeStatus['navigation_state']) || 'unknown',
+            navigation_state_detail: typeof p.navigation_state_detail === 'string' ? p.navigation_state_detail : null,
             effective_context_budget_ratio: typeof p.effective_context_budget_ratio === 'number'
               ? p.effective_context_budget_ratio
               : null,
@@ -475,7 +483,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
         )}
 
         {/* Content area */}
-        <div className="flex-1 min-w-0">
+        <div className="flex-1 min-w-0 min-h-0 flex flex-col">
           <div className="grid grid-cols-2 lg:grid-cols-5 gap-px border-b border-border bg-border">
             <div className="bg-card px-3 py-2">
               <div className="text-[10px] uppercase tracking-[1.2px] text-muted-foreground">Credits 1h</div>
@@ -509,22 +517,24 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
             </div>
           </div>
           {activeProfile ? (
-            <ProfileView
-              profile={activeProfile}
-              providers={providers}
-              status={statuses[activeProfile.id] || { connected: false, running: false, adaptive_mode: 'normal', effective_context_budget_ratio: null }}
-              registrationCode={registrationCode}
-              playerData={playerDataMap[activeProfile.id] || null}
-              onPlayerData={(data) => setPlayerDataMap(prev => ({ ...prev, [activeProfile.id]: data }))}
-              onDelete={() => handleDeleteProfile(activeProfile.id)}
-              onRefresh={() => {
-                refreshProfiles()
-              }}
-              autoEditName={autoEditName}
-              onAutoEditNameDone={() => setAutoEditName(false)}
-              showProfileList={sidebarOpen}
-              onToggleProfileList={() => setSidebarOpen(v => { const next = !v; try { localStorage.setItem('admiral-sidebar-open', String(next)) } catch {}; return next })}
-            />
+            <div className="flex-1 min-h-0">
+              <ProfileView
+                profile={activeProfile}
+                providers={providers}
+                status={statuses[activeProfile.id] || { connected: false, running: false, adaptive_mode: 'normal', effective_context_budget_ratio: null }}
+                registrationCode={registrationCode}
+                playerData={playerDataMap[activeProfile.id] || null}
+                onPlayerData={(data) => setPlayerDataMap(prev => ({ ...prev, [activeProfile.id]: data }))}
+                onDelete={() => handleDeleteProfile(activeProfile.id)}
+                onRefresh={() => {
+                  refreshProfiles()
+                }}
+                autoEditName={autoEditName}
+                onAutoEditNameDone={() => setAutoEditName(false)}
+                showProfileList={sidebarOpen}
+                onToggleProfileList={() => setSidebarOpen(v => { const next = !v; try { localStorage.setItem('admiral-sidebar-open', String(next)) } catch {}; return next })}
+              />
+            </div>
           ) : (
             <div className="flex items-center justify-center h-full">
               <div className="text-center max-w-md px-6">

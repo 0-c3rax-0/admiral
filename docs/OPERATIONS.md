@@ -58,9 +58,15 @@ For most profiles:
 
 Use `websocket_v2` only if you specifically want a persistent socket transport and the server path is stable enough.
 
+Operational note:
+
+- `websocket_v2` now goes through the same mutation-metadata normalization path as the HTTP transports
+- pending travel/jump state is interpreted consistently across transports when the server exposes enough fields
+- pending navigation is cleared not only by `ACTION_RESULT`, but also by `OK jumped` and confirmed `get_status` destination evidence
+
 ## LLM Routing Model
 
-This fork has three separate routing layers.
+This fork has four separate routing layers.
 
 ### Primary model
 
@@ -96,6 +102,22 @@ Current behavior:
 
 - used on rate limits, timeouts, and provider failures
 - independent from the alternative solver
+
+### Fleet supervisor
+
+Controlled through preferences:
+
+- `supervisor_enabled`
+- `supervisor_provider`
+- `supervisor_model`
+
+Current behavior:
+
+- runs on a periodic fleet-wide pass
+- reviews active account states plus recent logs
+- may inject a short nudge into a running agent
+- does not issue game commands itself
+- should be used for soft coordination, not destructive recovery
 
 ## Free Query Telemetry
 
@@ -181,8 +203,50 @@ On startup:
 
 - `processing` requests are reset to `pending`
 - the latest pending request for a profile can be resumed from stored context
+- pending `travel`/`jump` state is restored from SQLite via `pending_mutations`
 
 Do not remove the retained request context needed for this path.
+
+## Mutation Stall And Navigation Guarding
+
+This fork now differentiates between:
+
+- normal accepted mutation progress
+- local account/session mutation stalls
+- broader multi-account server issues
+
+Current behavior:
+
+- duplicate `travel`/`jump` mutations are blocked while prior navigation is still pending
+- pending navigation survives process restarts through the `pending_mutations` table
+- after several verification cycles without `ACTION_RESULT`, Admiral emits a local-stall signal for that account instead of immediately treating the whole server as frozen
+- agents are instructed to describe such cases as local stalls unless multiple accounts independently show matching evidence
+
+Useful diagnostics:
+
+```bash
+sqlite3 -header -column data/admiral.db "SELECT * FROM pending_mutations;"
+```
+
+```bash
+sqlite3 -header -column data/admiral.db "SELECT id, timestamp, profile_id, type, summary FROM log_entries WHERE summary LIKE '%local-stall%' OR summary LIKE '%Mutation stall%' ORDER BY id DESC LIMIT 100;"
+```
+
+## Fleet Supervisor Operations
+
+The fleet supervisor is optional and configured in Settings.
+
+Use it when you want:
+
+- a separate model to watch for local stall/confusion patterns
+- gentle per-account nudges without hard-coding playbooks
+- less agent drift into premature `deadlock` or `server freeze` language
+
+Do not use it as:
+
+- a replacement for destructive-command blocking
+- a replacement for transport/state correctness fixes
+- a second autonomous game actor
 
 ## SQLite Retention
 

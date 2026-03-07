@@ -16,6 +16,8 @@ import { addLogEntry, getLatestPendingLlmRequest, getProfile, updateProfile, get
 import { EventEmitter } from 'events'
 import fs from 'fs'
 import path from 'path'
+import { reconcilePendingNavigationWithStatus, updatePendingNavigationFromNotification } from './navigation-guard'
+import { getPendingNavigation } from './navigation-guard'
 
 const TURN_INTERVAL = 2000
 const PROMPT_PATH = path.join(process.cwd(), 'prompt.md')
@@ -24,6 +26,11 @@ const AGENTS_DIR = path.join(process.cwd(), 'data', 'agents')
 const CONTINUE_NUDGE_INTERVAL = 6
 const MARKET_TELEMETRY_INTERVAL = 3
 const SHIP_TELEMETRY_INTERVAL = 8
+const MUTATION_STALL_NUDGE_THRESHOLD = 4
+const LOCAL_MUTATION_STUCK_THRESHOLD = 6
+
+export type MutationState = 'idle' | 'mutation_pending' | 'navigation_pending' | 'local_stall'
+export type NavigationState = 'docked' | 'undocked' | 'at_resource_poi' | 'navigation_pending' | 'local_stall' | 'unknown'
 
 let _promptMd: string | null = null
 function getPromptMd(): string {
@@ -53,6 +60,10 @@ export class Agent {
   private memorySummary: string = ''
   private lastSavedMemory: string = ''
   private pendingRecoveryNudge: string | null = null
+  private pendingMutationObserved = false
+  private loopsSincePendingMutation = 0
+  private loopsSinceActionResult = 0
+  private localMutationStuckReported = false
   private telemetryCycle = 0
   constructor(profileId: string) {
     this.profileId = profileId
@@ -86,6 +97,38 @@ export class Agent {
     return this._effectiveContextBudgetRatio
   }
 
+  get mutationState(): MutationState {
+    const pendingNavigation = getPendingNavigation(this.profileId)
+    if (this.loopsSincePendingMutation >= LOCAL_MUTATION_STUCK_THRESHOLD) return 'local_stall'
+    if (pendingNavigation) return 'navigation_pending'
+    if (this.pendingMutationObserved) return 'mutation_pending'
+    return 'idle'
+  }
+
+  get mutationStateDetail(): string | null {
+    const pendingNavigation = getPendingNavigation(this.profileId)
+    if (this.loopsSincePendingMutation >= LOCAL_MUTATION_STUCK_THRESHOLD) {
+      return `local stall after ${this.loopsSincePendingMutation} verification cycles without ACTION_RESULT`
+    }
+    if (pendingNavigation) {
+      const destination = pendingNavigation.destination ? ` to ${pendingNavigation.destination}` : ''
+      return `${pendingNavigation.command}${destination} pending`
+    }
+    if (this.pendingMutationObserved) {
+      return `pending mutation unresolved for ${this.loopsSincePendingMutation} verification cycles`
+    }
+    return null
+  }
+
+  get navigationState(): NavigationState {
+    if (this.mutationState === 'local_stall') return 'local_stall'
+    if (this.mutationState === 'navigation_pending') return 'navigation_pending'
+    return deriveNavigationState(this._gameState)
+  }
+
+  get navigationStateDetail(): string | null {
+    return describeNavigationState(this._gameState, this.navigationState, this.mutationStateDetail)
+  }
   private setActivity(activity: string) {
     this._activity = activity
     this.events.emit('activity', activity)
@@ -95,6 +138,7 @@ export class Agent {
     const data = result.structuredContent ?? result.result
     if (data && typeof data === 'object' && ('player' in data || 'ship' in data || 'location' in data)) {
       this._gameState = data as Record<string, unknown>
+      reconcilePendingNavigationWithStatus(this.profileId, result)
     }
   }
 
@@ -196,11 +240,17 @@ export class Agent {
   }
 
   private async collectShipTelemetry(): Promise<string | null> {
+    const commissionableCatalogResp = await this.executeSilentQuery('catalog', { type: 'ships', commissionable: true })
     const showroomResp = await this.executeSilentQuery('shipyard_showroom', {})
     const browseResp = await this.executeSilentQuery('browse_ships', {})
+    const commissionableItems = commissionableCatalogResp?.error ? [] : extractShipOffers((commissionableCatalogResp?.structuredContent ?? commissionableCatalogResp?.result) as Record<string, unknown> | undefined)
     const showroomItems = showroomResp?.error ? [] : extractShipOffers((showroomResp?.structuredContent ?? showroomResp?.result) as Record<string, unknown> | undefined)
     const listedItems = browseResp?.error ? [] : extractShipOffers((browseResp?.structuredContent ?? browseResp?.result) as Record<string, unknown> | undefined)
-    const combined = [...showroomItems, ...listedItems]
+    const combined = dedupeShipOffers([
+      ...commissionableItems,
+      ...showroomItems,
+      ...listedItems,
+    ])
     if (combined.length === 0) return null
 
     const credits = toFiniteNumber(((this._gameState?.player as Record<string, unknown> | undefined) || {}).credits)
@@ -257,6 +307,7 @@ export class Agent {
 
     // Set up notification handler
     this.connection.onNotification((n) => {
+      updatePendingNavigationFromNotification(this.profileId, n)
       this.log('notification', formatNotificationSummary(n), JSON.stringify(n, null, 2))
     })
 
@@ -503,6 +554,22 @@ export class Agent {
         const pollResp = await this.connection.execute('get_status')
         this.cacheGameState(pollResp)
         const notifications = Array.isArray(pollResp.notifications) ? pollResp.notifications : []
+        const sawActionResult = notifications.some((n) => isActionResultNotification(n))
+        const sawPendingMutation = notifications.some((n) => isPendingMutationNotification(n))
+        if (sawActionResult) {
+          this.pendingMutationObserved = false
+          this.loopsSincePendingMutation = 0
+          this.loopsSinceActionResult = 0
+          this.localMutationStuckReported = false
+        } else if (this.pendingMutationObserved) {
+          this.loopsSincePendingMutation++
+          this.loopsSinceActionResult++
+        }
+        if (sawPendingMutation) {
+          this.pendingMutationObserved = true
+          this.loopsSincePendingMutation = 0
+          this.localMutationStuckReported = false
+        }
         if (notifications.length > 0) {
           pendingEvents = notifications
             .map(n => {
@@ -528,6 +595,33 @@ export class Agent {
 
       const telemetryNudge = await this.collectFreeTelemetry()
       if (telemetryNudge) nudgeParts.push(telemetryNudge)
+
+      const mutationStateNudge = buildMutationStateNudge(this.mutationState, this.mutationStateDetail, this._gameState)
+      if (mutationStateNudge) nudgeParts.push(mutationStateNudge)
+
+      const navigationStateNudge = buildNavigationStateNudge(this.navigationState, this.navigationStateDetail, this._gameState)
+      if (navigationStateNudge) nudgeParts.push(navigationStateNudge)
+
+      const stallNudge = buildMutationStallNudge(
+        this.pendingMutationObserved,
+        this.loopsSincePendingMutation,
+        this.loopsSinceActionResult,
+        this._gameState,
+      )
+      if (stallNudge) {
+        nudgeParts.push(stallNudge)
+        this.log('system', 'Mutation stall recovery nudge delivered after prolonged pending state without action_result')
+      }
+
+      const localStuckSummary = buildLocalMutationStuckSummary(
+        this.loopsSincePendingMutation,
+        this.loopsSinceActionResult,
+        this._gameState,
+      )
+      if (this.pendingMutationObserved && localStuckSummary && !this.localMutationStuckReported) {
+        this.localMutationStuckReported = true
+        this.log('system', localStuckSummary)
+      }
 
       // Drain any human nudges
       if (this.pendingNudges.length > 0) {
@@ -868,8 +962,15 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - Query commands are free and unlimited, but Admiral also injects automatic telemetry snapshots from free queries. Prefer those snapshots for routine status/cargo/market checks so you do not waste turns re-querying the same information.
 - Action commands cost 1 tick (10 seconds).
 - If an action returns \`pending: true\`, the command was accepted and queued for the next tick. Treat that as progress. Do not call it a deadlock just because the world state has not updated yet.
+- Never describe the situation as a deadlock, stuck mutation queue, or server freeze unless you have strong evidence: at least 4 consecutive fresh verification cycles after a pending mutation, no \`ACTION_RESULT\` notification, and no meaningful state change despite repeated \`get_status\` checks.
+- If one specific account appears blocked for several verification cycles, describe it as a local mutation stall for that account/session only. Do not generalize that to the whole server unless multiple independent accounts show the same evidence.
+- If Admiral provides a \`Mutation State\` block, use it as a strong operational hint. Prefer those exact labels (\`idle\`, \`mutation_pending\`, \`navigation_pending\`, \`local_stall\`) instead of inventing stronger terms like deadlock or server-wide freeze, but still verify important decisions against fresh \`get_status\` evidence.
+- If Admiral provides a \`Navigation State\` block, treat it as a derived hint from recent \`get_status\` data, not as perfect ground truth. Before committing to important travel/dock/mine decisions, verify the current state yourself with fresh \`get_status\` if there is any ambiguity.
 - If you see a state error like \`not_docked\` after \`undock\`, or \`already_docked\` after \`dock\`, interpret it as evidence that the desired state may already be true. Refresh with \`get_status\` before retrying or claiming the server is frozen.
+- If you have verified a local stall for several cycles, do not stay in passive monitoring forever. After refreshing with \`get_status\`, test exactly one simple low-risk mutation that matches the verified state (typically a corrected \`dock\`, \`undock\`, \`sell\`, \`refuel\`, or other obvious local action).
+- When testing a recovery mutation, send only one probe action, wait for the result, and reassess from fresh \`get_status\`. Do not spam repeated retries of the same command.
 - If you hit errors like \`already_in_system\`, \`cargo_full\`, \`not_enough_fuel\`, \`invalid_payload\` for a zero-quantity sell, or a market/sell rejection, treat them as planning feedback. Verify state, change strategy, and avoid repeating the same blocked action.
+- Never use irreversible self-destruction, account reset, character wipe, or similarly destructive escape-hatch commands. Self-destruction is not a navigation shortcut: it can destroy the current ship, cargo, equipped modules, and expensive mining gear/badges tied to the loadout. If stranded or blocked, recover through travel, docking, refueling, repair, insurance, chat, or by waiting for better state information.
 - Never claim a stuck mutation queue, deadlock, or server freeze unless multiple fresh observations explicitly prove commands are neither executing nor changing state after verification with \`get_status\`.
 - Always check fuel before traveling and cargo space before mining.
 - Mining loops should be practical: mine until cargo is near full (roughly 80-90%), but stop early if yields fail, the location lacks resources, cargo is full, or a better unload/travel opportunity appears.
@@ -908,6 +1009,86 @@ function shouldForceStateRefreshFromNotifications(notifications: unknown[]): boo
 
     return isRecoveryRelevantNotification(parsed)
   })
+}
+
+function buildMutationStallNudge(
+  pendingMutationObserved: boolean,
+  loopsSincePendingMutation: number,
+  loopsSinceActionResult: number,
+  gameState: Record<string, unknown> | null,
+): string | null {
+  if (!pendingMutationObserved) return null
+  if (loopsSincePendingMutation < MUTATION_STALL_NUDGE_THRESHOLD) return null
+
+  return [
+    '## Mutation Stall Recovery',
+    `A previous mutation has remained unresolved for ${loopsSincePendingMutation} verification cycles without an ACTION_RESULT notification.`,
+    'Do not label this a global deadlock or server freeze.',
+    'Assume the evidence is still local and incomplete unless multiple independent observations prove otherwise.',
+    'Stop passive monitoring loops. Try an active recovery plan based on the verified state below.',
+    'Recovery priority order:',
+    '1. Refresh with get_status if you need a newer snapshot.',
+    '2. Check whether the intended effect already happened.',
+    '3. If docked/undocked state is unclear, use get_status and then a single corrected dock or undock.',
+    '4. If the state looks stable but still seems stuck, test exactly one simple low-risk mutation that matches the verified state before declaring continued stall.',
+    `5. Recommended probe from current state: ${describeRecoveryProbe(gameState)}`,
+    '6. If travel is blocked, verify fuel, current POI, and system before choosing a different reachable action.',
+    '7. Prefer productive local actions or information gathering over repeating the same mutation or declaring a freeze.',
+    `Current unresolved-action evidence age: ${loopsSinceActionResult} cycles since last ACTION_RESULT.`,
+    'Verified current state:',
+    formatVerifiedGameState(gameState),
+  ].join('\n\n')
+}
+
+function buildMutationStateNudge(
+  mutationState: MutationState,
+  detail: string | null,
+  gameState: Record<string, unknown> | null,
+): string | null {
+  if (mutationState === 'idle') return null
+  return [
+    '## Mutation State',
+    `Current mutation state: ${mutationState}`,
+    detail ? `Detail: ${detail}` : '',
+    'Use this label exactly when reasoning about the current situation. Do not escalate it to a global server-wide deadlock claim unless separate evidence proves that.',
+    'Verified current state:',
+    formatVerifiedGameState(gameState),
+  ].filter(Boolean).join('\n\n')
+}
+
+function buildNavigationStateNudge(
+  navigationState: NavigationState,
+  detail: string | null,
+  gameState: Record<string, unknown> | null,
+): string | null {
+  if (navigationState === 'unknown') return null
+  return [
+    '## Navigation State',
+    `Current navigation state: ${navigationState}`,
+    detail ? `Detail: ${detail}` : '',
+    'This is a derived planning hint from recent state, not a perfect guarantee.',
+    'Use it to form a hypothesis, then verify with fresh get_status before major navigation, docking, or mining choices if the situation is unclear.',
+    'Typical interpretation: docked => sell/refuel/upgrade, undocked => travel or mine, at_resource_poi => mine or leave, navigation_pending => wait and verify with get_status.',
+    'Verified current state:',
+    formatVerifiedGameState(gameState),
+  ].filter(Boolean).join('\n\n')
+}
+
+function buildLocalMutationStuckSummary(
+  loopsSincePendingMutation: number,
+  loopsSinceActionResult: number,
+  gameState: Record<string, unknown> | null,
+): string | null {
+  if (loopsSincePendingMutation < LOCAL_MUTATION_STUCK_THRESHOLD) return null
+
+  return [
+    '[local-stall] Account-specific mutation stall detected.',
+    `Pending mutation unresolved for ${loopsSincePendingMutation} verification cycles.`,
+    `No ACTION_RESULT observed for ${loopsSinceActionResult} cycles.`,
+    'Treat this as a local account/session problem unless other accounts show the same evidence.',
+    `Next recovery probe should be: ${describeRecoveryProbe(gameState)}.`,
+    formatVerifiedGameState(gameState),
+  ].join(' ')
 }
 
 function buildRecoveryNudge(notifications: unknown[], gameState: Record<string, unknown> | null): string {
@@ -979,9 +1160,12 @@ function formatVerifiedGameState(gameState: Record<string, unknown> | null): str
   const maxFuel = stringifyStateValue(ship.max_fuel) || '?'
   const hull = stringifyStateValue(ship.hull) || '?'
   const maxHull = stringifyStateValue(ship.max_hull) || '?'
+  const navigationState = deriveNavigationState(gameState)
+  const navigationDetail = describeNavigationState(gameState, navigationState, null)
 
   return [
     `- Location: ${systemName} / ${poiName}`,
+    `- Navigation state: ${navigationState}${navigationDetail ? ` (${navigationDetail})` : ''}`,
     `- Credits: ${credits}`,
     `- Ship: ${shipName}`,
     `- Cargo: ${cargoUsed}/${cargoCapacity}`,
@@ -994,6 +1178,87 @@ function stringifyStateValue(value: unknown): string {
   if (typeof value === 'string') return value
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
   return ''
+}
+
+function describeRecoveryProbe(gameState: Record<string, unknown> | null): string {
+  const navigationState = deriveNavigationState(gameState)
+  switch (navigationState) {
+    case 'docked':
+      return 'prefer exactly one undock() if your plan requires leaving the station, or exactly one sell/refuel only if that is the intended next step'
+    case 'at_resource_poi':
+      return 'prefer exactly one dock() if a station/base is reachable from here, otherwise exactly one mine() if cargo space exists and mining is the intended next step'
+    case 'undocked':
+      return 'prefer exactly one dock() if you are already at a base/station, otherwise exactly one travel() to a clearly valid nearby destination'
+    case 'navigation_pending':
+      return 'do not stack more navigation; refresh with get_status, verify whether you already arrived, then send at most one corrected dock/undock'
+    case 'local_stall':
+      return 'refresh with get_status, then send at most one simple mutation consistent with the verified state instead of repeating passive stall messages'
+    default:
+      return 'refresh with get_status, pick one simple mutation consistent with the verified state, and test it exactly once'
+  }
+}
+
+function deriveNavigationState(gameState: Record<string, unknown> | null): NavigationState {
+  if (!gameState) return 'unknown'
+  const player = (gameState.player as Record<string, unknown> | undefined) || {}
+  const location = (gameState.location as Record<string, unknown> | undefined) || {}
+  const poiType = String(location.poi_type || player.current_poi_type || '').toLowerCase()
+  const poiName = String(location.poi_name || player.current_poi || '').toLowerCase()
+
+  if (poiType.includes('station') || poiType.includes('base') || poiType.includes('shipyard') || poiName.includes('station') || poiName.includes('base')) {
+    return 'docked'
+  }
+  if (
+    poiType.includes('belt') ||
+    poiType.includes('field') ||
+    poiType.includes('ring') ||
+    poiType.includes('cloud') ||
+    poiType.includes('asteroid') ||
+    poiType.includes('ice') ||
+    poiName.includes('belt') ||
+    poiName.includes('ring')
+  ) {
+    return 'at_resource_poi'
+  }
+  if (poiName || poiType) return 'undocked'
+  return 'unknown'
+}
+
+function describeNavigationState(
+  gameState: Record<string, unknown> | null,
+  navigationState: NavigationState,
+  overrideDetail: string | null,
+): string | null {
+  if (overrideDetail) return overrideDetail
+  if (!gameState) return null
+  const player = (gameState.player as Record<string, unknown> | undefined) || {}
+  const location = (gameState.location as Record<string, unknown> | undefined) || {}
+  const systemName = stringifyStateValue(player.current_system ?? location.system_name) || '?'
+  const poiName = stringifyStateValue(player.current_poi ?? location.poi_name) || '?'
+
+  switch (navigationState) {
+    case 'docked':
+      return `currently at base/station in ${systemName} / ${poiName}`
+    case 'at_resource_poi':
+      return `currently at likely mining POI in ${systemName} / ${poiName}`
+    case 'undocked':
+      return `currently in space at ${systemName} / ${poiName}`
+    default:
+      return null
+  }
+}
+
+function isActionResultNotification(n: unknown): boolean {
+  const parsed = parseNotificationMeta(n)
+  return parsed?.type.toUpperCase() === 'ACTION_RESULT'
+}
+
+function isPendingMutationNotification(n: unknown): boolean {
+  const parsed = parseNotificationMeta(n)
+  if (!parsed) return false
+  const type = parsed.type.toUpperCase()
+  const message = parsed.message.toLowerCase()
+  return type === 'PENDING_ACTION' || (type === 'OK' && message.includes('"pending":true'))
 }
 
 function toFiniteNumber(value: unknown): number | null {
@@ -1035,6 +1300,22 @@ function extractCargoEntries(data: Record<string, unknown> | undefined): Array<{
 
 function summarizeMarket(data: Record<string, unknown> | undefined): string {
   if (!data) return ''
+  const normalizedEntries = extractMarketEntries(data)
+  if (normalizedEntries.length > 0) {
+    return normalizedEntries
+      .slice(0, 6)
+      .map((entry) => {
+        const parts = [entry.name]
+        if (entry.bid !== null) parts.push(`bid ${entry.bid}`)
+        if (entry.ask !== null) parts.push(`ask ${entry.ask}`)
+        if (entry.bidVolume !== null) parts.push(`buy vol ${entry.bidVolume}`)
+        if (entry.askVolume !== null) parts.push(`sell vol ${entry.askVolume}`)
+        if (entry.volume !== null && entry.bidVolume === null && entry.askVolume === null) parts.push(`qty ${entry.volume}`)
+        return `- ${parts.join(', ')}`
+      })
+      .join('\n')
+  }
+
   const candidates = [
     data.items,
     data.orders,
@@ -1073,7 +1354,9 @@ function extractShipOffers(data: Record<string, unknown> | undefined): Array<{ n
     data.ships,
     data.listings,
     data.offers,
+    data.items,
     (data.result as Record<string, unknown> | undefined)?.ships,
+    (data.result as Record<string, unknown> | undefined)?.items,
   ]
 
   for (const candidate of candidates) {
@@ -1093,6 +1376,135 @@ function extractShipOffers(data: Record<string, unknown> | undefined): Array<{ n
   }
 
   return []
+}
+
+function dedupeShipOffers(offers: Array<{ name: string; classId: string; price: number | null }>): Array<{ name: string; classId: string; price: number | null }> {
+  const deduped = new Map<string, { name: string; classId: string; price: number | null }>()
+  for (const offer of offers) {
+    const key = `${offer.classId.toLowerCase()}|${offer.name.toLowerCase()}`
+    const existing = deduped.get(key)
+    if (!existing) {
+      deduped.set(key, offer)
+      continue
+    }
+    if (existing.price === null && offer.price !== null) {
+      deduped.set(key, offer)
+      continue
+    }
+    if (existing.price !== null && offer.price !== null && offer.price < existing.price) {
+      deduped.set(key, offer)
+    }
+  }
+  return [...deduped.values()]
+}
+
+type MarketEntry = {
+  name: string
+  bid: number | null
+  ask: number | null
+  volume: number | null
+  bidVolume: number | null
+  askVolume: number | null
+}
+
+function extractMarketEntries(data: Record<string, unknown>): MarketEntry[] {
+  const directEntries = extractMarketEntriesFromArrayCandidates([
+    data.items,
+    data.orders,
+    data.market,
+    (data.result as Record<string, unknown> | undefined)?.items,
+    (data.result as Record<string, unknown> | undefined)?.orders,
+  ])
+  if (directEntries.length > 0) return directEntries
+
+  const orderbook = extractOrderbookEntries(data)
+  if (orderbook.length > 0) return orderbook
+
+  return []
+}
+
+function extractMarketEntriesFromArrayCandidates(candidates: unknown[]): MarketEntry[] {
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) continue
+    const entries = candidate
+      .map((item) => toMarketEntry(item))
+      .filter((entry): entry is MarketEntry => Boolean(entry))
+    if (entries.length > 0) return entries
+  }
+  return []
+}
+
+function extractOrderbookEntries(data: Record<string, unknown>): MarketEntry[] {
+  const roots = [
+    data,
+    data.result,
+    data.market,
+    (data.result as Record<string, unknown> | undefined)?.market,
+  ]
+
+  for (const root of roots) {
+    if (!root || typeof root !== 'object') continue
+    const record = root as Record<string, unknown>
+    const buyOrders = record.buy_orders
+    const sellOrders = record.sell_orders
+    if (!Array.isArray(buyOrders) && !Array.isArray(sellOrders)) continue
+
+    const grouped = new Map<string, MarketEntry>()
+    addOrderbookSide(grouped, buyOrders, 'buy')
+    addOrderbookSide(grouped, sellOrders, 'sell')
+    if (grouped.size > 0) {
+      return [...grouped.values()].sort((a, b) => a.name.localeCompare(b.name))
+    }
+  }
+
+  return []
+}
+
+function addOrderbookSide(grouped: Map<string, MarketEntry>, orders: unknown, side: 'buy' | 'sell'): void {
+  if (!Array.isArray(orders)) return
+
+  for (const order of orders) {
+    if (!order || typeof order !== 'object') continue
+    const record = order as Record<string, unknown>
+    const name = String(record.name || record.item_name || record.item_id || '').trim()
+    if (!name) continue
+
+    const price = toFiniteNumber(record.price ?? record.unit_price ?? record.bid_price ?? record.ask_price ?? record.buy_price ?? record.sell_price)
+    const volume = toFiniteNumber(record.quantity ?? record.remaining_quantity ?? record.volume ?? record.available)
+    const existing = grouped.get(name) || {
+      name,
+      bid: null,
+      ask: null,
+      volume: null,
+      bidVolume: null,
+      askVolume: null,
+    }
+
+    if (side === 'buy') {
+      if (price !== null && (existing.bid === null || price > existing.bid)) existing.bid = price
+      if (volume !== null) existing.bidVolume = (existing.bidVolume ?? 0) + volume
+    } else {
+      if (price !== null && (existing.ask === null || price < existing.ask)) existing.ask = price
+      if (volume !== null) existing.askVolume = (existing.askVolume ?? 0) + volume
+    }
+
+    grouped.set(name, existing)
+  }
+}
+
+function toMarketEntry(item: unknown): MarketEntry | null {
+  if (!item || typeof item !== 'object') return null
+  const record = item as Record<string, unknown>
+  const name = String(record.name || record.item_name || record.item_id || '').trim()
+  if (!name) return null
+  return {
+    name,
+    bid: toFiniteNumber(record.best_bid ?? record.bid_price ?? record.buy_price ?? record.highest_buy),
+    ask: toFiniteNumber(record.best_ask ?? record.ask_price ?? record.sell_price ?? record.lowest_sell),
+    volume: toFiniteNumber(record.quantity ?? record.available ?? record.volume),
+    bidVolume: toFiniteNumber(record.buy_volume ?? record.bid_volume),
+    askVolume: toFiniteNumber(record.sell_volume ?? record.ask_volume),
+  }
 }
 
 function parseNotificationMeta(n: unknown): { type: string; message: string } | null {

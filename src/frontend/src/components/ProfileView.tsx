@@ -93,6 +93,10 @@ interface Props {
   status: {
     connected: boolean
     running: boolean
+    mutation_state?: 'idle' | 'mutation_pending' | 'navigation_pending' | 'local_stall'
+    mutation_state_detail?: string | null
+    navigation_state?: 'docked' | 'undocked' | 'at_resource_poi' | 'navigation_pending' | 'local_stall' | 'unknown'
+    navigation_state_detail?: string | null
     adaptive_mode?: 'normal' | 'soft' | 'high' | 'critical'
     effective_context_budget_ratio?: number | null
   }
@@ -141,6 +145,10 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
   const isManual = !profile.provider || profile.provider === 'manual' || !profile.model
   const availableProviders = ['manual', ...providers.filter(p => p.status === 'valid' || p.api_key).map(p => p.id)]
   const adaptiveMode = status.adaptive_mode || 'normal'
+  const mutationState = status.mutation_state || 'idle'
+  const mutationStateDetail = status.mutation_state_detail || null
+  const navigationState = status.navigation_state || 'unknown'
+  const navigationStateDetail = status.navigation_state_detail || null
   const effectiveBudget = typeof status.effective_context_budget_ratio === 'number'
     ? `${Math.round(status.effective_context_budget_ratio * 100)}%`
     : null
@@ -740,6 +748,23 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
               {status.running && (
                 <span className="text-muted-foreground/60 ml-1.5">
                   mem:{adaptiveMode}{effectiveBudget ? `:${effectiveBudget}` : ''}
+                </span>
+              )}
+              {mutationState !== 'idle' && (
+                <span
+                  className={`ml-1.5 ${
+                    mutationState === 'local_stall'
+                      ? 'text-[hsl(var(--smui-orange))]'
+                      : 'text-muted-foreground/70'
+                  }`}
+                  title={mutationStateDetail || mutationState}
+                >
+                  state:{mutationState}
+                </span>
+              )}
+              {navigationState !== 'unknown' && (
+                <span className="text-muted-foreground/60 ml-1.5" title={navigationStateDetail || navigationState}>
+                  nav:{navigationState}
                 </span>
               )}
             </span>

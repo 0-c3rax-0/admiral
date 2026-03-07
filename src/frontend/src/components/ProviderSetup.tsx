@@ -58,6 +58,14 @@ interface Props {
   onAltSolverProviderChange: (provider: string) => void
   altSolverModel: string
   onAltSolverModelChange: (model: string) => void
+  supervisorEnabled: boolean
+  onSupervisorEnabledChange: (enabled: boolean) => void
+  supervisorProvider: string
+  onSupervisorProviderChange: (provider: string) => void
+  supervisorModel: string
+  onSupervisorModelChange: (model: string) => void
+  supervisorIntervalSec: number
+  onSupervisorIntervalSecChange: (seconds: number) => void
   onClose: () => void
 }
 
@@ -91,6 +99,14 @@ export function ProviderSetup({
   onAltSolverProviderChange,
   altSolverModel,
   onAltSolverModelChange,
+  supervisorEnabled,
+  onSupervisorEnabledChange,
+  supervisorProvider,
+  onSupervisorProviderChange,
+  supervisorModel,
+  onSupervisorModelChange,
+  supervisorIntervalSec,
+  onSupervisorIntervalSecChange,
   onClose,
 }: Props) {
   const [providers, setProviders] = useState(initialProviders)
@@ -580,6 +596,59 @@ export function ProviderSetup({
                     onChange={onAltSolverModelChange}
                   />
                 </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground w-28 shrink-0">Supervisor</span>
+                <label className="inline-flex items-center gap-2 text-xs text-foreground cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={supervisorEnabled}
+                    onChange={e => onSupervisorEnabledChange(e.target.checked)}
+                  />
+                  Fleet-wide gentle nudges from a separate LLM
+                </label>
+              </div>
+              <div className="ml-[7.25rem] text-[11px] text-muted-foreground leading-relaxed">
+                Observes active accounts, looks for confusion or local stalls, and injects short hints. It does not issue game commands and should not be used for destructive recovery.
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground w-28 shrink-0">Supervisor provider</span>
+                <select
+                  value={supervisorProvider}
+                  onChange={e => onSupervisorProviderChange(e.target.value)}
+                  className="h-7 min-w-36 bg-background border border-input px-2 text-xs font-jetbrains text-foreground"
+                >
+                  {providers.map(p => (
+                    <option key={p.id} value={p.id}>
+                      {PROVIDER_INFO[p.id]?.label || p.id}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground w-28 shrink-0">Supervisor model</span>
+                <div className="flex-1 min-w-0">
+                  <ModelPicker
+                    provider={supervisorProvider}
+                    value={supervisorModel}
+                    onChange={onSupervisorModelChange}
+                  />
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground w-28 shrink-0">Supervisor every</span>
+                <Input
+                  type="number"
+                  value={supervisorIntervalSec}
+                  onChange={e => {
+                    const v = parseInt(e.target.value, 10)
+                    if (!isNaN(v) && v > 0) onSupervisorIntervalSecChange(v)
+                  }}
+                  min={10}
+                  max={3600}
+                  className="w-20 h-7 text-xs"
+                />
+                <span className="text-[11px] text-muted-foreground">seconds between fleet passes</span>
               </div>
               <div className="flex items-center gap-3">
                 <span className="text-xs text-muted-foreground w-28 shrink-0">Gemini OAuth</span>
