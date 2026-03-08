@@ -111,6 +111,16 @@ export async function executeTool(
       ctx.log('error', errMsg)
       return errMsg
     }
+    const normalizedCatalog = normalizeCatalogArgs(command, commandArgs)
+    if (normalizedCatalog.changed) {
+      commandArgs = normalizedCatalog.args
+      ctx.log('system', normalizedCatalog.message)
+    }
+    const normalizedNavigation = normalizeNavigationArgs(command, commandArgs)
+    if (normalizedNavigation.changed) {
+      commandArgs = normalizedNavigation.args
+      ctx.log('system', normalizedNavigation.message)
+    }
     if ((command === 'travel' || command === 'jump')) {
       const pendingNavigation = getPendingNavigation(ctx.profileId)
       if (pendingNavigation) {
@@ -589,6 +599,80 @@ function annotateNotification(tag: string, message: string): string {
     return `${message} Interpretation: docking succeeded; treat the ship as docked.`
   }
   return message
+}
+
+function normalizeNavigationArgs(
+  command: string,
+  args: Record<string, unknown> | undefined,
+): { changed: boolean; args: Record<string, unknown> | undefined; message: string } {
+  if (!args) return { changed: false, args, message: '' }
+
+  const next = { ...args }
+  const changes: string[] = []
+
+  if (command === 'travel') {
+    const targetPoi = pickFirstStringArg(next.target_poi, next.poi_id, next.poi, next.poi_name, next.destination, next.target)
+    if (targetPoi && next.target_poi !== targetPoi) {
+      next.target_poi = targetPoi
+      changes.push(`target_poi=${targetPoi}`)
+    }
+    for (const key of ['poi_id', 'poi', 'poi_name', 'destination', 'target'] as const) {
+      if (key in next) delete next[key]
+    }
+  }
+
+  if (command === 'jump') {
+    const targetSystem = pickFirstStringArg(next.target_system, next.system_id, next.system, next.system_name, next.destination, next.target)
+    if (targetSystem && next.target_system !== targetSystem) {
+      next.target_system = targetSystem
+      changes.push(`target_system=${targetSystem}`)
+    }
+    for (const key of ['system_id', 'system', 'system_name', 'destination', 'target'] as const) {
+      if (key in next) delete next[key]
+    }
+  }
+
+  if (changes.length === 0) return { changed: false, args, message: '' }
+
+  return {
+    changed: true,
+    args: next,
+    message: `Normalized navigation args for ${command}: ${changes.join(', ')}`,
+  }
+}
+
+function normalizeCatalogArgs(
+  command: string,
+  args: Record<string, unknown> | undefined,
+): { changed: boolean; args: Record<string, unknown> | undefined; message: string } {
+  if (command !== 'catalog' || !args) return { changed: false, args, message: '' }
+  if (typeof args.type === 'string' && args.type.trim()) return { changed: false, args, message: '' }
+
+  const next = { ...args }
+  const category = typeof next.category === 'string' ? next.category.trim().toLowerCase() : ''
+  const search = typeof next.search === 'string' ? next.search.trim().toLowerCase() : ''
+
+  const inferredType =
+    category === 'refining' ||
+    category === 'alloy' ||
+    search.includes('recipe') ||
+    search.includes('blueprint')
+      ? 'recipes'
+      : 'items'
+
+  next.type = inferredType
+  return {
+    changed: true,
+    args: next,
+    message: `Normalized catalog args: injected type=${inferredType}`,
+  }
+}
+
+function pickFirstStringArg(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return null
 }
 
 function jsonToYaml(value: unknown, indent: number = 0): string {
