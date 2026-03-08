@@ -74,7 +74,7 @@ const TOUR_STEPS: DriveStep[] = [
     element: '[data-tour="sidebar"]',
     popover: {
       title: 'PROFILES',
-      description: 'Each profile is an independent agent with its own credentials, provider, and directives. Status dots show: grey = offline, orange = connected, green = agent running. Click + to create more. This panel can be collapsed using the icon in the top bar.',
+      description: 'Each profile is an independent agent with its own credentials, provider, and directives. The check badge shows connect state: red = disconnected, yellow = unknown, green = online. Click + to create more. This panel can be collapsed using the icon in the top bar.',
       side: 'right',
       align: 'start',
     },

@@ -14,6 +14,7 @@ import { agentManager } from './agent-manager'
 import { resolveModel } from './model'
 import type { MutationState, NavigationState } from './agent'
 import { createGameConnection } from './game-connection'
+import { fetchGameCommands, parseRuntimeCommandResult } from './schema'
 import type { Profile } from '../../shared/types'
 
 const DEFAULT_INTERVAL_SEC = 45
@@ -47,6 +48,11 @@ type AdviceSignal = {
   recommendedChecks: string[]
   recommendedActions: string[]
   whyNow?: string
+}
+
+type VerifiedCommands = {
+  names: Set<string>
+  loadedFrom: string
 }
 
 type MapSystem = {
@@ -105,6 +111,7 @@ class FleetSupervisor {
   private lastNudgeAtByProfile = new Map<string, number>()
   private lastNudgeTextByProfile = new Map<string, string>()
   private shipUpgradeSignalsCache = new Map<string, { expiresAt: number; signals: string[] }>()
+  private verifiedCommandsCache = new Map<string, { expiresAt: number; commands: VerifiedCommands | null }>()
 
   start(): void {
     if (this.timer) clearTimeout(this.timer)
@@ -229,7 +236,8 @@ class FleetSupervisor {
       const recentSignals = buildRecentSignals(logs.map((entry) => entry.summary))
       const routeSignals = await this.buildRouteSignals(profile.server_url, status)
       const shipUpgradeSignals = await this.buildShipUpgradeSignals(profile, status)
-      const adviceSignals = buildAdviceSignals(status, recentSignals, routeSignals, shipUpgradeSignals)
+      const verifiedCommands = await this.getVerifiedCommands(profile)
+      const adviceSignals = buildAdviceSignals(status, recentSignals, routeSignals, shipUpgradeSignals, verifiedCommands)
       const noisyState =
         status.mutation_state !== 'idle' ||
         recentSignals.length > 0 ||
@@ -309,6 +317,62 @@ class FleetSupervisor {
     return signals
   }
 
+  private async getVerifiedCommands(profile: Profile): Promise<VerifiedCommands | null> {
+    const cacheKey = `${profile.connection_mode}:${profile.server_url}`
+    const cached = this.verifiedCommandsCache.get(cacheKey)
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.commands
+    }
+
+    const runtimeCommands = await this.fetchRuntimeCommands(profile)
+    if (runtimeCommands.length > 0) {
+      const verified = {
+        names: new Set(runtimeCommands.map((command) => command.name.trim()).filter(Boolean)),
+        loadedFrom: 'runtime:get_commands',
+      }
+      this.verifiedCommandsCache.set(cacheKey, {
+        expiresAt: Date.now() + 10 * 60_000,
+        commands: verified,
+      })
+      return verified
+    }
+
+    const apiVersion = profile.connection_mode === 'http_v2' || profile.connection_mode === 'websocket_v2' || profile.connection_mode === 'mcp_v2'
+      ? 'v2'
+      : 'v1'
+    const baseUrl = profile.server_url.replace(/\/$/, '')
+    const commands = await fetchGameCommands(`${baseUrl}/api/${apiVersion}`).catch(() => [])
+    const verified = commands.length > 0
+      ? {
+        names: new Set(commands.map((command) => command.name.trim()).filter(Boolean)),
+        loadedFrom: `${baseUrl}/api/${apiVersion}/openapi.json`,
+      }
+      : null
+    this.verifiedCommandsCache.set(cacheKey, {
+      expiresAt: Date.now() + 10 * 60_000,
+      commands: verified,
+    })
+    return verified
+  }
+
+  private async fetchRuntimeCommands(profile: Profile): Promise<Array<{ name: string }>> {
+    if (!profile.username || !profile.password) return []
+
+    const connection = createGameConnection(profile)
+    try {
+      await connection.connect()
+      const login = await connection.login(profile.username, profile.password)
+      if (!login.success) return []
+      const response = await connection.execute('get_commands', {})
+      if (response.error) return []
+      return parseRuntimeCommandResult(response.result)
+    } catch {
+      return []
+    } finally {
+      await connection.disconnect().catch(() => {})
+    }
+  }
+
   private scheduleNext(): void {
     if (this.timer) clearTimeout(this.timer)
     const delayMs = getSupervisorIntervalSec() * 1000
@@ -334,6 +398,8 @@ function buildRecentSignals(summaries: string[]): string[] {
     if (lower.includes('error: [not_docked]')) add('not_docked error observed recently')
     if (lower.includes('error: [no_base]')) add('no_base error observed recently')
     if (lower.includes('error: [already_in_system]')) add('already_in_system error observed recently')
+    if (lower.includes('error: [not_enough_fuel]')) add('not_enough_fuel error observed recently')
+    if (lower.includes('error: [invalid_payload]') && lower.includes('quantity must be greater than 0')) add('sell quantity zero error observed recently')
     if (lower.includes('[action_result]')) add('recent action_result observed')
     if (lower.includes('"action":"jumped"')) add('recent jumped confirmation observed')
     if (lower.includes('pending action accepted')) add('recent mutation accepted as pending')
@@ -347,6 +413,7 @@ function buildAdviceSignals(
   recentSignals: string[],
   routeSignals: string[],
   shipUpgradeSignals: string[],
+  verifiedCommands: VerifiedCommands | null,
 ): AdviceSignal[] {
   const signals: AdviceSignal[] = []
   const ship = status.gameState?.ship
@@ -372,7 +439,7 @@ function buildAdviceSignals(
         ...(cargoItems.length > 0 ? [`cargo_items=${cargoItems.slice(0, 4).join(', ')}`] : []),
       ],
       recommendedChecks: isDocked ? ['get_cargo', 'market'] : ['get_cargo'],
-      recommendedActions: isDocked ? ['sell cargo'] : ['dock before selling or transferring cargo'],
+      recommendedActions: isDocked ? ['sell'] : ['dock'],
       whyNow: 'the gather plan is blocked until cargo capacity is freed',
     })
   }
@@ -384,7 +451,7 @@ function buildAdviceSignals(
       summary: 'The pending navigation target is not a direct hop; re-plan the route before jumping again.',
       evidence: routeSignals.slice(0, 2),
       recommendedChecks: ['find_route'],
-      recommendedActions: ['jump only to the next hop from the returned route'],
+      recommendedActions: ['jump'],
       whyNow: 'repeating the same jump will keep failing or stalling',
     })
   }
@@ -400,8 +467,73 @@ function buildAdviceSignals(
         ...(system ? [`system=${system}`] : []),
       ],
       recommendedChecks: ['get_status'],
-      recommendedActions: ['dock before retrying sell, refuel, repair, or upgrade actions'],
+      recommendedActions: ['dock'],
       whyNow: 'the current plan is using the wrong ship state',
+    })
+  }
+
+  if (recentSignals.includes('no_base error observed recently')) {
+    signals.push({
+      kind: 'dock_at_base_before_base_actions',
+      priority: 84,
+      summary: 'A base-only action was attempted away from a valid base; move to a base before retrying it.',
+      evidence: [
+        'recent no_base error observed',
+        ...(poi ? [`poi=${poi}`] : []),
+        ...(system ? [`system=${system}`] : []),
+      ],
+      recommendedChecks: ['get_status'],
+      recommendedActions: ['travel', 'dock'],
+      whyNow: 'the action cannot succeed from the current location',
+    })
+  }
+
+  if (recentSignals.includes('duplicate navigation was blocked recently')) {
+    signals.push({
+      kind: 'wait_for_pending_navigation',
+      priority: 83,
+      summary: 'A second navigation command was sent while a previous one was still pending; do not stack more movement.',
+      evidence: [
+        'duplicate navigation was blocked recently',
+        ...(status.mutation_state === 'navigation_pending' && status.mutation_state_detail ? [status.mutation_state_detail] : []),
+        ...(status.navigation_state === 'navigation_pending' && status.navigation_state_detail ? [status.navigation_state_detail] : []),
+      ],
+      recommendedChecks: ['get_status'],
+      recommendedActions: [],
+      whyNow: 'stacked navigation commands create local confusion without progress',
+    })
+  }
+
+  if (recentSignals.includes('not_enough_fuel error observed recently')) {
+    signals.push({
+      kind: 'fuel_blocked_replan',
+      priority: 82,
+      summary: 'The current movement plan is fuel-blocked; refuel or choose a shorter route before retrying.',
+      evidence: [
+        'recent not_enough_fuel error observed',
+        ...(ship?.fuel ? [`fuel=${ship.fuel}`] : []),
+        ...(system ? [`system=${system}`] : []),
+      ],
+      recommendedChecks: looksDocked(poi) ? ['get_status', 'market'] : ['get_status'],
+      recommendedActions: looksDocked(poi)
+        ? ['refuel', 'find_route']
+        : ['dock', 'find_route'],
+      whyNow: 'repeating the same movement will fail again until fuel constraints change',
+    })
+  }
+
+  if (recentSignals.includes('sell quantity zero error observed recently')) {
+    signals.push({
+      kind: 'recompute_sell_quantity',
+      priority: 81,
+      summary: 'The last sell used quantity 0 or stale cargo assumptions; recompute the amount first.',
+      evidence: [
+        'recent sell quantity zero error observed',
+        ...(cargoItems.length > 0 ? [`cargo_items=${cargoItems.slice(0, 4).join(', ')}`] : ['cargo_items=unknown']),
+      ],
+      recommendedChecks: ['get_cargo'],
+      recommendedActions: ['sell'],
+      whyNow: 'the sell plan is malformed, not just temporarily blocked',
     })
   }
 
@@ -416,7 +548,7 @@ function buildAdviceSignals(
         ...(poi ? [`poi=${poi}`] : []),
       ],
       recommendedChecks: ['get_status'],
-      recommendedActions: ['continue with the local post-arrival step instead of retrying travel'],
+      recommendedActions: [],
       whyNow: 'repeating the same travel adds no progress',
     })
   }
@@ -428,12 +560,15 @@ function buildAdviceSignals(
       summary: 'A materially better ship appears affordable with reserve left for fitting.',
       evidence: shipUpgradeSignals.slice(0, 1),
       recommendedChecks: ['shipyard_showroom', 'browse_ships'],
-      recommendedActions: ['consider upgrading the hull before further grinding'],
+      recommendedActions: ['shipyard_buy'],
       whyNow: credits !== null ? `current credits=${credits}` : 'an affordable upgrade window is available',
     })
   }
 
-  return signals.sort((a, b) => b.priority - a.priority)
+  return signals
+    .map((signal) => filterAdviceSignal(signal, verifiedCommands))
+    .filter((signal): signal is AdviceSignal => signal !== null)
+    .sort((a, b) => b.priority - a.priority)
 }
 
 function parseSupervisorOutput(text: string): { nudges: Array<{ profile: string; message: string }> } | null {
@@ -477,6 +612,52 @@ function getSupervisorIntervalSec(): number {
 }
 
 export const fleetSupervisor = new FleetSupervisor()
+
+function filterAdviceSignal(signal: AdviceSignal, verifiedCommands: VerifiedCommands | null): AdviceSignal | null {
+  if (!verifiedCommands) return signal
+
+  const recommendedChecks = signal.recommendedChecks.filter((command) => isVerifiedCommand(command, verifiedCommands))
+  const recommendedActions = signal.recommendedActions.filter((action) => isVerifiedAction(action, verifiedCommands))
+  if (signal.recommendedChecks.length > 0 && recommendedChecks.length === 0) return null
+  if (signal.recommendedActions.length > 0 && recommendedActions.length === 0) return null
+
+  return {
+    ...signal,
+    evidence: [
+      ...signal.evidence,
+      `command_validation=${verifiedCommands.loadedFrom}`,
+    ],
+    recommendedChecks,
+    recommendedActions,
+  }
+}
+
+function isVerifiedCommand(command: string, verifiedCommands: VerifiedCommands): boolean {
+  return verifiedCommands.names.has(command.trim())
+}
+
+function isVerifiedAction(action: string, verifiedCommands: VerifiedCommands): boolean {
+  const normalized = action.trim().toLowerCase()
+  if (!normalized) return false
+
+  const candidates = [
+    normalized,
+    normalized.split(/\s+/)[0],
+  ]
+
+  if (normalized.includes(' or ')) {
+    candidates.push(...normalized.split(/\s+or\s+/).map((part) => part.trim()))
+  }
+
+  if (normalized.includes(' before ')) {
+    candidates.push(...normalized.split(/\s+before\s+/).map((part) => part.trim()))
+  }
+
+  return candidates.some((candidate) => {
+    const command = candidate.split(/\s+/)[0]
+    return verifiedCommands.names.has(command)
+  })
+}
 
 function parseUsagePair(value: unknown): { used: number; capacity: number } | null {
   if (typeof value !== 'string') return null
