@@ -30,6 +30,9 @@ const MAX_LLM_LOG_DETAIL_CHARS = 16_000
 const ADAPTIVE_RSS_SOFT_BYTES = 2_200_000_000
 const ADAPTIVE_RSS_HIGH_BYTES = 2_800_000_000
 const ADAPTIVE_RSS_CRITICAL_BYTES = 3_500_000_000
+const REQUEST_OUTPUT_TOKEN_RESERVE = 4096
+const REQUEST_TOOL_TOKEN_RESERVE = 512
+const REQUEST_TOKEN_SAFETY_MARGIN = 512
 
 export interface LoopOptions {
   signal?: AbortSignal
@@ -98,7 +101,7 @@ export async function runAgentTurn(
 
     enforceContextMessageCap(context)
     if (options?.compactInputEnabled) {
-      await compactContext(activeModel, context, compaction, { ...options, apiKey: activeApiKey })
+      await compactContext(activeModel, context, compaction, { ...options, apiKey: activeApiKey }, log)
     }
 
     options?.onActivity?.('Waiting for LLM response...')
@@ -417,6 +420,14 @@ function totalMessageTokens(messages: Message[]): number {
   return total
 }
 
+function estimateRequestTokens(context: Context): number {
+  const systemPromptTokens = context.systemPrompt ? estimateTokens(context.systemPrompt) : 0
+  return systemPromptTokens
+    + totalMessageTokens(context.messages)
+    + REQUEST_TOOL_TOKEN_RESERVE
+    + REQUEST_OUTPUT_TOKEN_RESERVE
+}
+
 function findTurnBoundary(messages: Message[], idx: number): number {
   for (let i = idx; i < messages.length; i++) {
     if (messages[i].role === 'user') return i
@@ -462,16 +473,19 @@ async function compactContext(
   context: Context,
   compaction?: CompactionState,
   options?: LoopOptions,
+  log?: LogFn,
   force = false,
 ): Promise<void> {
   const baseRatio = options?.contextBudgetRatio ?? CONTEXT_BUDGET_RATIO
   const adaptive = getAdaptiveContextBudget(baseRatio)
   options?.onAdaptiveContext?.({ mode: adaptive.mode, effectiveRatio: adaptive.ratio, rssBytes: adaptive.rssBytes })
   const ratio = adaptive.ratio
-  const budget = Math.floor(model.contextWindow * ratio)
+  const effectiveLimit = getEffectiveContextLimit(model)
+  const budget = Math.floor(effectiveLimit * ratio)
   const currentTokens = totalMessageTokens(context.messages)
+  const estimatedRequestTokens = estimateRequestTokens(context)
 
-  if (!force && currentTokens < budget) return
+  if (!force && currentTokens < budget && estimatedRequestTokens < effectiveLimit - REQUEST_TOKEN_SAFETY_MARGIN) return
 
   const recentBudget = Math.floor(budget * 0.6)
   let recentTokens = 0
@@ -493,13 +507,37 @@ async function compactContext(
   const recentMessages = context.messages.slice(splitIdx)
 
   let summary: string
+  const summaryModel = options?.compactionModel || model
   try {
-    const summaryModel = options?.compactionModel || model
-    summary = await summarizeViaLLM(summaryModel, oldMessages, compaction?.summary, options)
-  } catch {
-    summary = compaction?.summary
-      ? compaction.summary + '\n\n(Additional context was lost due to summarization failure.)'
-      : '(Earlier session context was lost.)'
+    summary = await summarizeViaLLM(summaryModel, oldMessages, compaction?.summary, options, log)
+  } catch (err) {
+    const canFallbackToPrimary = summaryModel !== model
+    if (canFallbackToPrimary) {
+      try {
+        log?.(
+          'system',
+          'Primary model fallback for compaction activated after summarizer failure',
+          JSON.stringify({
+            phase: 'compaction_fallback',
+            failedModel: ((summaryModel as any).name as string | undefined) || ((summaryModel as any).id as string | undefined) || 'unknown',
+            fallbackModel: ((model as any).name as string | undefined) || ((model as any).id as string | undefined) || 'unknown',
+            error: err instanceof Error ? err.message : String(err),
+          }, null, 2),
+        )
+        summary = await summarizeViaLLM(model, oldMessages, compaction?.summary, {
+          ...options,
+          compactionApiKey: options?.apiKey || options?.failoverApiKey,
+        }, log)
+      } catch {
+        summary = compaction?.summary
+          ? compaction.summary + '\n\n(Additional context was lost due to summarization failure.)'
+          : '(Earlier session context was lost.)'
+      }
+    } else {
+      summary = compaction?.summary
+        ? compaction.summary + '\n\n(Additional context was lost due to summarization failure.)'
+        : '(Earlier session context was lost.)'
+    }
   }
 
   if (compaction) compaction.summary = summary
@@ -529,6 +567,7 @@ async function summarizeViaLLM(
   oldMessages: Message[],
   previousSummary: string | undefined,
   options?: LoopOptions,
+  log?: LogFn,
 ): Promise<string> {
   const transcript = formatMessagesForSummary(oldMessages)
 
@@ -554,6 +593,20 @@ async function summarizeViaLLM(
     : timeoutController.signal
 
   try {
+    const modelName = ((model as any).name as string | undefined) || ((model as any).id as string | undefined) || 'unknown'
+    log?.(
+      'system',
+      `Compacting context with summarizer model: ${modelName}`,
+      JSON.stringify({
+        phase: 'compaction_start',
+        model: modelName,
+        provider: resolveProviderName(model),
+        baseUrl: resolveBaseUrl(model),
+        oldMessageCount: oldMessages.length,
+        transcriptTokens: estimateTokens(transcript),
+        previousSummaryTokens: previousSummary ? estimateTokens(previousSummary) : 0,
+      }, null, 2),
+    )
     const resp = await complete(model, summaryCtx, {
       signal,
       apiKey: options?.compactionApiKey || options?.apiKey || (!options?.apiKey ? options?.failoverApiKey : undefined),
@@ -566,12 +619,86 @@ async function summarizeViaLLM(
       .map(b => b.text)
       .join('')
 
-    if (!text.trim()) throw new Error('Empty summary')
-    return text.trim()
+    const normalizedText = text.trim() || extractFallbackSummaryText(resp.content)
+    if (!normalizedText) throw new Error('Empty summary')
+    log?.(
+      'llm_call',
+      `compaction/${resp.model} | ${resp.usage.input}/${resp.usage.output} tokens | ${resp.stopReason}`,
+      JSON.stringify({
+        phase: 'compaction_result',
+        model: resp.model,
+        provider: resp.provider,
+        stopReason: resp.stopReason,
+        usage: resp.usage,
+        usedFallbackText: !text.trim(),
+      }, null, 2),
+    )
+    return normalizedText
   } catch (err) {
     clearTimeout(timeout)
+    log?.(
+      'error',
+      `Compaction LLM failed: ${err instanceof Error ? err.message : String(err)}`,
+      JSON.stringify({
+        phase: 'compaction_error',
+        model: ((model as any).name as string | undefined) || ((model as any).id as string | undefined) || 'unknown',
+        provider: resolveProviderName(model),
+        baseUrl: resolveBaseUrl(model),
+        error: err instanceof Error ? err.message : String(err),
+        responseDiagnostics: extractCompactionErrorDiagnostics(err),
+      }, null, 2),
+    )
     throw err
   }
+}
+
+function extractFallbackSummaryText(content: AssistantMessage['content']): string {
+  const parts: string[] = []
+  for (const block of content as any[]) {
+    if (typeof block?.thinking === 'string' && block.thinking.trim()) {
+      parts.push(block.thinking.trim())
+      continue
+    }
+    if (typeof block?.text === 'string' && block.text.trim()) {
+      parts.push(block.text.trim())
+      continue
+    }
+  }
+
+  if (parts.length === 0) return ''
+
+  return parts
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function extractCompactionErrorDiagnostics(err: unknown): Record<string, unknown> | null {
+  const anyErr = err as any
+  const resp = anyErr?.response || anyErr?.resp || anyErr?.result
+  const content = Array.isArray(resp?.content) ? resp.content : Array.isArray(anyErr?.content) ? anyErr.content : null
+  if (!content) return null
+
+  return {
+    blockCount: content.length,
+    blockTypes: content.map((block: any) => block?.type || inferBlockType(block)),
+    blocks: content.slice(0, 8).map((block: any) => ({
+      type: block?.type || inferBlockType(block),
+      hasText: typeof block?.text === 'string' && block.text.trim().length > 0,
+      textPreview: typeof block?.text === 'string' ? truncateForLog(block.text.trim(), 160) : undefined,
+      hasThinking: typeof block?.thinking === 'string' && block.thinking.trim().length > 0,
+      thinkingPreview: typeof block?.thinking === 'string' ? truncateForLog(block.thinking.trim(), 160) : undefined,
+      hasToolName: typeof block?.name === 'string' && block.name.trim().length > 0,
+    })),
+  }
+}
+
+function inferBlockType(block: any): string {
+  if (typeof block?.type === 'string' && block.type) return block.type
+  if (typeof block?.text === 'string') return 'text'
+  if (typeof block?.thinking === 'string') return 'thinking'
+  if (typeof block?.name === 'string') return 'toolCall'
+  return 'unknown'
 }
 
 // --- LLM call with retry ---
@@ -614,6 +741,35 @@ async function completeWithRetry(
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
+      if (options?.compactInputEnabled) {
+        const beforeEstimatedRequestTokens = estimateRequestTokens(context)
+        const effectiveLimit = getEffectiveContextLimit(model)
+        if (beforeEstimatedRequestTokens >= effectiveLimit - REQUEST_TOKEN_SAFETY_MARGIN) {
+          const beforeCount = context.messages.length
+          const beforeTokens = totalMessageTokens(context.messages)
+          await compactContext(model, context, compaction, options, log, true)
+          const afterCount = context.messages.length
+          const afterTokens = totalMessageTokens(context.messages)
+          const afterEstimatedRequestTokens = estimateRequestTokens(context)
+          log(
+            'system',
+            'Preflight context compaction applied before LLM request',
+            JSON.stringify({
+              before: {
+                messageCount: beforeCount,
+                estimatedTokens: beforeTokens,
+                estimatedRequestTokens: beforeEstimatedRequestTokens,
+              },
+              after: {
+                messageCount: afterCount,
+                estimatedTokens: afterTokens,
+                estimatedRequestTokens: afterEstimatedRequestTokens,
+              },
+              effectiveContextLimit: effectiveLimit,
+            }, null, 2),
+          )
+        }
+      }
       markLlmRequestProcessing(request.id, (existing?.attemptCount || 0) + attempt + 1)
       const timeoutController = new AbortController()
       const timeout = setTimeout(() => timeoutController.abort(), timeoutMs)
@@ -666,7 +822,7 @@ async function completeWithRetry(
         const beforeCount = context.messages.length
         const beforeTokens = totalMessageTokens(context.messages)
         try {
-          await compactContext(model, context, compaction, options, true)
+          await compactContext(model, context, compaction, options, log, true)
           const afterCount = context.messages.length
           const afterTokens = totalMessageTokens(context.messages)
           if (afterCount < beforeCount || afterTokens < beforeTokens) {
@@ -1068,4 +1224,18 @@ function resolveProviderName(model: Model<any>): string {
 function resolveBaseUrl(model: Model<any>): string | undefined {
   const baseUrl = (model as any).baseUrl
   return typeof baseUrl === 'string' && baseUrl.trim() ? baseUrl : undefined
+}
+
+function getEffectiveContextLimit(model: Model<any>): number {
+  const configured = typeof model.contextWindow === 'number' && Number.isFinite(model.contextWindow)
+    ? model.contextWindow
+    : 128_000
+  const provider = resolveProviderName(model).toLowerCase()
+  const modelName = (((model as any).name as string | undefined) || ((model as any).id as string | undefined) || '').toLowerCase()
+
+  if (provider === 'openrouter' && (modelName.includes('free models router') || modelName.includes('openrouter/free'))) {
+    return 40_960
+  }
+
+  return configured
 }

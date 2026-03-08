@@ -19,7 +19,6 @@ const QUICK_COMMANDS = [
   { label: 'Market', command: 'view_market' },
   { label: 'Skills', command: 'get_skills' },
   { label: 'Nearby', command: 'get_nearby' },
-  { label: 'Log', command: 'captains_log_list' },
 ]
 
 export function QuickCommands({ onSend, disabled, showSidePane, onToggleSidePane, onNudge, running }: Props) {

@@ -91,6 +91,15 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     try { return localStorage.getItem('admiral-sidebar-open') !== 'false' } catch { return true }
   })
+  const [liveRefreshMs, setLiveRefreshMs] = useState<number>(() => {
+    try {
+      const raw = localStorage.getItem('admiral-live-refresh-ms')
+      const parsed = raw ? parseInt(raw, 10) : 5000
+      return parsed === 0 || parsed === 2000 || parsed === 5000 ? parsed : 5000
+    } catch {
+      return 5000
+    }
+  })
   const pollSeqRef = useRef(0)
   const appliedPollSeqRef = useRef(0)
 
@@ -191,13 +200,19 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
       }
     }
     poll()
-    const interval = setInterval(poll, 5000)
+    if (liveRefreshMs <= 0) {
+      return () => {
+        disposed = true
+        if (inFlight) inFlight.abort()
+      }
+    }
+    const interval = setInterval(poll, liveRefreshMs)
     return () => {
       disposed = true
       if (inFlight) inFlight.abort()
       clearInterval(interval)
     }
-  }, [])
+  }, [liveRefreshMs])
 
   const fetchPlayerData = useCallback(async (profileId: string) => {
     try {
@@ -334,6 +349,11 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
     }
   }
 
+  async function handleOpenMap() {
+    await handleGetStatusAll()
+    setShowMap(true)
+  }
+
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -356,6 +376,11 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
   const mediumRiskCount = rateRiskProfiles.filter((item) => item.risk?.level === 'MEDIUM').length
 
   const hasValidProvider = providers.some(p => p.status === 'valid' || p.api_key)
+
+  function handleSetLiveRefresh(ms: number) {
+    setLiveRefreshMs(ms)
+    try { localStorage.setItem('admiral-live-refresh-ms', String(ms)) } catch { /* ignore */ }
+  }
 
   return (
     <div className="flex flex-col h-screen">
@@ -399,8 +424,29 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
             <BarChart3 size={13} />
             Stats
           </button>
+          <div className="flex items-center gap-1 border border-border px-1 py-1">
+            {([
+              { label: 'Live Off', value: 0 },
+              { label: 'Live 2s', value: 2000 },
+              { label: 'Live 5s', value: 5000 },
+            ] as const).map((option) => (
+              <button
+                key={option.value}
+                onClick={() => handleSetLiveRefresh(option.value)}
+                className={`px-2 py-1 text-[10px] uppercase tracking-wider transition-colors ${
+                  liveRefreshMs === option.value
+                    ? 'text-foreground bg-muted'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+                title={`Set live refresh to ${option.label.toLowerCase()}`}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
           <button
-            onClick={() => setShowMap(true)}
+            onClick={handleOpenMap}
+            disabled={statusAllLoading}
             className="flex items-center gap-1.5 text-xs text-muted-foreground uppercase tracking-wider px-2.5 py-1.5 hover:text-foreground transition-colors"
             title="Galaxy map"
           >

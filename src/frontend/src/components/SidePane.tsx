@@ -113,20 +113,6 @@ export function SidePane({ profileId, todo: initialTodo, connected, playerData, 
     } catch { /* ignore */ }
   }, [profileId, connected, onRefreshStatus])
 
-  // Fetch log when connected
-  useEffect(() => {
-    if (connected) fetchCaptainsLog()
-  }, [connected, fetchCaptainsLog])
-
-  // Keep captain's log fresh while connected.
-  useEffect(() => {
-    if (!connected) return
-    const interval = setInterval(() => {
-      fetchCaptainsLog()
-    }, 15 * 60 * 1000)
-    return () => clearInterval(interval)
-  }, [connected, fetchCaptainsLog])
-
   // Poll todo every 10s
   useEffect(() => {
     refreshTodo()
@@ -281,7 +267,7 @@ export function SidePane({ profileId, todo: initialTodo, connected, playerData, 
               </div>
             ) : logEntries.length === 0 ? (
               <div className="px-3 py-3 text-[11px] text-muted-foreground/50 italic">
-                {logLoading ? 'Loading...' : 'No log entries'}
+                {logLoading ? 'Loading...' : 'Captain\'s log is loaded on demand. Use refresh to fetch entries.'}
               </div>
             ) : (
               logEntries.map(entry => (

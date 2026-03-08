@@ -223,7 +223,7 @@ async function getAvailableCommandNames(profileId: string, connection: GameConne
   if (!profile) return []
 
   const serverUrl = profile.server_url.replace(/\/$/, '')
-  const apiVersion = connection.mode === 'http_v2' || connection.mode === 'mcp_v2' ? 'v2' : 'v1'
+  const apiVersion = connection.mode === 'http_v2' || connection.mode === 'websocket_v2' || connection.mode === 'mcp_v2' ? 'v2' : 'v1'
   const cacheKey = `${serverUrl}|${apiVersion}`
 
   const cached = commandSuggestCache.get(cacheKey)

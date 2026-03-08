@@ -23,6 +23,24 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' ? value as Record<string, unknown> : null
 }
 
+function getOpenApiSpecUrls(baseUrl: string): string[] {
+  const normalizedBaseUrl = baseUrl.replace(/\/$/, '')
+
+  if (/\/api\/v\d+$/.test(normalizedBaseUrl)) {
+    const versionedSpecUrl = `${normalizedBaseUrl}/openapi.json`
+    if (/\/api\/v1$/.test(normalizedBaseUrl)) {
+      return [versionedSpecUrl, normalizedBaseUrl.replace(/\/api\/v1$/, '/api/openapi.json')]
+    }
+    return [versionedSpecUrl]
+  }
+
+  if (/\/v\d+$/.test(normalizedBaseUrl)) {
+    return [`${normalizedBaseUrl}/openapi.json`]
+  }
+
+  return [`${normalizedBaseUrl}/openapi.json`]
+}
+
 /**
  * Fetch an OpenAPI spec by URL, with local SQLite caching and error surfacing.
  * Returns the parsed spec or null if both fetch and cache miss.
@@ -87,15 +105,10 @@ export async function fetchOpenApiSpec(
  * Fetch the OpenAPI spec from the gameserver and extract commands with params.
  */
 export async function fetchGameCommands(baseUrl: string, log?: SpecLogFn): Promise<GameCommandInfo[]> {
-  const specUrl = baseUrl.replace(/\/v\d+\/?$/, '/openapi.json')
-
-  let spec = await fetchOpenApiSpec(specUrl, log)
-  if (!spec) {
-    // Fall back to fetching from the API base directly
-    const apiUrl = baseUrl.replace(/\/api\/v\d+\/?$/, '/api/openapi.json')
-    if (apiUrl !== specUrl) {
-      spec = await fetchOpenApiSpec(apiUrl, log)
-    }
+  let spec: Record<string, unknown> | null = null
+  for (const specUrl of getOpenApiSpecUrls(baseUrl)) {
+    spec = await fetchOpenApiSpec(specUrl, log)
+    if (spec) break
   }
   if (!spec) return []
 
