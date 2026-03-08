@@ -232,7 +232,12 @@ function extractSkillsFromCommandResult(result: CommandResult): Record<string, n
     if (!candidate || typeof candidate !== 'object') continue
     const skills = Object.fromEntries(
       Object.entries(candidate as Record<string, unknown>)
-        .map(([skill, level]) => [skill, Number(level)] as const)
+        .map(([skill, level]) => {
+          const numericLevel = typeof level === 'object' && level && 'level' in level
+            ? Number((level as Record<string, unknown>).level)
+            : Number(level)
+          return [skill, numericLevel] as const
+        })
         .filter(([, level]) => Number.isFinite(level))
     )
     if (Object.keys(skills).length > 0) return skills

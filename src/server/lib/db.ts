@@ -663,7 +663,7 @@ export function getStatsDelta1h(profileId: string): StatsDelta1h | null {
   if (snapshots.length === 0) return null
   const newest = snapshots[0]
   const oneHourAgo = Date.now() - (60 * 60 * 1000)
-  const anchor = snapshots.find((s) => new Date(s.ts).getTime() <= oneHourAgo) || snapshots[snapshots.length - 1]
+  const anchor = snapshots.find((s) => parseSqliteUtcTimestamp(s.ts) <= oneHourAgo) || snapshots[snapshots.length - 1]
   return {
     latest_ts: newest?.ts ?? null,
     anchor_ts: anchor?.ts ?? null,
@@ -794,6 +794,14 @@ export function listSupervisorRuns(limit: number = 100): SupervisorRunRow[] {
   return getDb().query(
     'SELECT * FROM supervisor_runs ORDER BY id DESC LIMIT ?'
   ).all(limit) as SupervisorRunRow[]
+}
+
+function parseSqliteUtcTimestamp(ts: string | null | undefined): number {
+  if (!ts) return 0
+  const isoLike = ts.includes('T') ? ts : ts.replace(' ', 'T')
+  const withZone = /(?:Z|[+-]\d{2}:\d{2})$/.test(isoLike) ? isoLike : `${isoLike}Z`
+  const parsed = Date.parse(withZone)
+  return Number.isFinite(parsed) ? parsed : 0
 }
 
 // --- Preferences CRUD ---

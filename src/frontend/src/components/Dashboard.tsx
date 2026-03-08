@@ -615,7 +615,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
             <div className="bg-card px-3 py-2">
               <div className="text-[10px] uppercase tracking-[1.2px] text-muted-foreground">Last Snapshot</div>
               <div className="text-sm font-medium text-foreground">
-                {statsDbSummary?.lastSnapshotTs ? new Date(statsDbSummary.lastSnapshotTs).toLocaleTimeString() : 'n/a'}
+                {statsDbSummary?.lastSnapshotTs ? formatSqliteUtcLocalTime(statsDbSummary.lastSnapshotTs) : 'n/a'}
               </div>
             </div>
           </div>
@@ -706,14 +706,16 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
       )}
 
       {showStats && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowStats(false)}>
-          <div className="w-full max-w-5xl border border-border bg-card shadow-lg" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-black/60 backdrop-blur-sm p-3 sm:p-6" onClick={() => setShowStats(false)}>
+          <div className="flex min-h-full items-center justify-center">
+          <div className="w-full max-w-6xl max-h-[calc(100vh-1.5rem)] sm:max-h-[calc(100vh-3rem)] overflow-hidden border border-border bg-card shadow-lg" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
               <span className="font-jetbrains text-xs font-semibold tracking-[1.5px] text-primary uppercase">Runtime Stats</span>
               <button onClick={() => setShowStats(false)} className="text-muted-foreground hover:text-foreground transition-colors">
                 <X size={14} />
               </button>
             </div>
+            <div className="max-h-[calc(100vh-5rem)] overflow-y-auto sm:max-h-[calc(100vh-6.5rem)]">
             <div className="grid gap-0 lg:grid-cols-[320px_minmax(0,1fr)]">
               <div className="px-4 py-3 space-y-2 text-xs border-b border-border lg:border-b-0 lg:border-r">
                 <div className="flex items-center justify-between">
@@ -797,7 +799,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
                       <div className="flex items-center justify-between">
                         <span className="text-muted-foreground">Last Snapshot</span>
                         <span className="text-foreground">
-                          {statsDbSummary.lastSnapshotTs ? new Date(statsDbSummary.lastSnapshotTs).toLocaleString() : 'n/a'}
+                          {statsDbSummary.lastSnapshotTs ? formatSqliteUtcLocalDateTime(statsDbSummary.lastSnapshotTs) : 'n/a'}
                         </span>
                       </div>
                     </>
@@ -828,11 +830,11 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
                     <div className="text-[11px] text-muted-foreground">Loading skills...</div>
                   )}
                 </div>
-                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(280px,1fr))]">
                   {accountSkillOverview.map((account) => (
                     <div key={account.id} className="border border-border/80 bg-background/40 px-3 py-3 text-xs">
                       <div className="flex items-center justify-between gap-3 mb-2">
-                        <span className="font-medium text-foreground">{account.name}</span>
+                        <span className="min-w-0 break-words font-medium text-foreground">{account.name}</span>
                         <span className={account.connected ? 'text-[10px] uppercase text-[hsl(var(--smui-green))]' : 'text-[10px] uppercase text-muted-foreground'}>
                           {account.connected ? 'connected' : 'offline'}
                         </span>
@@ -855,6 +857,8 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
                 </div>
               </div>
             </div>
+          </div>
+          </div>
           </div>
         </div>
       )}
@@ -916,7 +920,12 @@ function extractSkills(data: unknown): Record<string, number> | null {
   if (!raw) return null
 
   const skills = Object.entries(raw as Record<string, unknown>)
-    .map(([skill, level]) => [skill, Number(level)] as const)
+    .map(([skill, level]) => {
+      const numericLevel = typeof level === 'object' && level && 'level' in level
+        ? Number((level as Record<string, unknown>).level)
+        : Number(level)
+      return [skill, numericLevel] as const
+    })
     .filter(([, level]) => Number.isFinite(level))
   if (skills.length === 0) return null
   return Object.fromEntries(skills)
@@ -941,4 +950,18 @@ function mergeSkillsIntoPlayerData(
       ...skills,
     },
   }
+}
+
+function parseSqliteUtcDate(ts: string): Date {
+  const isoLike = ts.includes('T') ? ts : ts.replace(' ', 'T')
+  const withZone = /(?:Z|[+-]\d{2}:\d{2})$/.test(isoLike) ? isoLike : `${isoLike}Z`
+  return new Date(withZone)
+}
+
+function formatSqliteUtcLocalTime(ts: string): string {
+  return parseSqliteUtcDate(ts).toLocaleTimeString()
+}
+
+function formatSqliteUtcLocalDateTime(ts: string): string {
+  return parseSqliteUtcDate(ts).toLocaleString()
 }

@@ -24,19 +24,19 @@ stats.get('/summary', (c) => {
     if (snapshots.length > 0) profilesWithData++
 
     const newest = snapshots[0]
-    if (newest?.ts && (!lastSnapshotTs || new Date(newest.ts).getTime() > new Date(lastSnapshotTs).getTime())) {
+    if (newest?.ts && (!lastSnapshotTs || parseSqliteUtcTimestamp(newest.ts) > parseSqliteUtcTimestamp(lastSnapshotTs))) {
       lastSnapshotTs = newest.ts
     }
 
     if (snapshots.length > 0) {
-      const anchor = snapshots.find((s) => new Date(s.ts).getTime() <= oneHourAgo) || snapshots[snapshots.length - 1]
+      const anchor = snapshots.find((s) => parseSqliteUtcTimestamp(s.ts) <= oneHourAgo) || snapshots[snapshots.length - 1]
       creditsDelta1h += num(newest?.credits) - num(anchor?.credits)
       oreDelta1h += num(newest?.ore_mined) - num(anchor?.ore_mined)
       tradesDelta1h += num(newest?.trades_completed) - num(anchor?.trades_completed)
       systemsDelta1h += num(newest?.systems_explored) - num(anchor?.systems_explored)
     }
 
-    events24h += events.filter((e) => new Date(e.ts).getTime() >= now - (24 * 60 * 60 * 1000)).length
+    events24h += events.filter((e) => parseSqliteUtcTimestamp(e.ts) >= now - (24 * 60 * 60 * 1000)).length
   }
 
   return c.json({
@@ -94,4 +94,12 @@ export default stats
 
 function num(v: number | null | undefined): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : 0
+}
+
+function parseSqliteUtcTimestamp(ts: string | null | undefined): number {
+  if (!ts) return 0
+  const isoLike = ts.includes('T') ? ts : ts.replace(' ', 'T')
+  const withZone = /(?:Z|[+-]\d{2}:\d{2})$/.test(isoLike) ? isoLike : `${isoLike}Z`
+  const parsed = Date.parse(withZone)
+  return Number.isFinite(parsed) ? parsed : 0
 }

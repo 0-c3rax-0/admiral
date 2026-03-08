@@ -233,11 +233,25 @@ export class Agent {
   }
 
   private async collectMarketTelemetry(): Promise<string | null> {
-    const marketResp = await this.executeSilentQuery('view_market', { category: 'ore' })
-    if (!marketResp || marketResp.error) return null
-    const data = ((marketResp.structuredContent ?? marketResp.result) as Record<string, unknown> | undefined) || {}
-    const summary = summarizeMarket(data)
-    return summary ? `Ore market snapshot:\n${summary}` : null
+    const [marketResp, personalOrdersResp] = await Promise.all([
+      this.executeSilentQuery('view_market', { category: 'ore' }),
+      this.executeSilentQuery('view_orders', { scope: 'personal', order_type: 'sell', sort_by: 'price_asc', page: 1, page_size: 20 }),
+    ])
+
+    const sections: string[] = []
+    if (marketResp && !marketResp.error) {
+      const data = ((marketResp.structuredContent ?? marketResp.result) as Record<string, unknown> | undefined) || {}
+      const summary = summarizeMarket(data)
+      if (summary) sections.push(`Ore market snapshot:\n${summary}`)
+    }
+
+    if (personalOrdersResp && !personalOrdersResp.error) {
+      const data = ((personalOrdersResp.structuredContent ?? personalOrdersResp.result) as Record<string, unknown> | undefined) || {}
+      const summary = summarizeSellOrders(data)
+      if (summary) sections.push(`Personal sell orders:\n${summary}`)
+    }
+
+    return sections.length > 0 ? sections.join('\n\n') : null
   }
 
   private async collectShipTelemetry(): Promise<string | null> {
@@ -1022,6 +1036,10 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - If you have verified a local stall for several cycles, do not stay in passive monitoring forever. After refreshing with \`get_status\`, test exactly one simple low-risk mutation that matches the verified state (typically a corrected \`dock\`, \`undock\`, \`sell\`, \`refuel\`, or other obvious local action).
 - When testing a recovery mutation, send only one probe action, wait for the result, and reassess from fresh \`get_status\`. Do not spam repeated retries of the same command.
 - If you hit errors like \`already_in_system\`, \`cargo_full\`, \`not_enough_fuel\`, \`invalid_payload\` for a zero-quantity sell, or a market/sell rejection, treat them as planning feedback. Verify state, change strategy, and avoid repeating the same blocked action.
+- Before every \`sell\` mutation, run a fresh \`get_status\` and verify that you are docked at a valid base/station and that the cargo quantity you plan to sell is still present. Do not rely on stale docked/cargo assumptions.
+- Use a strict selling workflow: \`get_status\` -> confirm docked -> inspect market/orderbook -> decide price/quantity -> \`sell\` once -> verify the result. If any step is ambiguous, refresh instead of submitting the sell.
+- If the market has no meaningful buy orders, do not dump cargo into a bad or empty instant market. Check existing sell orders and choose a reasonable ask based on the visible orderbook instead of forcing an immediate sale at a poor price.
+- If your sell attempt returns \`quantity_sold: 0\`, \`total_earned: 0\`, or leaves cargo unchanged, interpret that as no fill or a bad market fit. Re-check docked state, orders, and the local orderbook before attempting another sell.
 - Never use irreversible self-destruction, account reset, character wipe, or similarly destructive escape-hatch commands. Self-destruction is not a navigation shortcut: it can destroy the current ship, cargo, equipped modules, and expensive mining gear/badges tied to the loadout. If stranded or blocked, recover through travel, docking, refueling, repair, insurance, chat, or by waiting for better state information.
 - Never claim a stuck mutation queue, deadlock, or server freeze unless multiple fresh observations explicitly prove commands are neither executing nor changing state after verification with \`get_status\`.
 - Always check fuel before traveling and cargo space before mining.
@@ -1404,6 +1422,71 @@ function summarizeMarket(data: Record<string, unknown> | undefined): string {
   }
 
   return ''
+}
+
+function summarizeSellOrders(data: Record<string, unknown> | undefined): string {
+  if (!data) return ''
+  const orders = extractActiveOrders(data)
+    .filter((order) => order.side === 'sell')
+    .sort((a, b) => {
+      if (a.price !== null && b.price !== null) return a.price - b.price
+      if (a.price !== null) return -1
+      if (b.price !== null) return 1
+      return a.name.localeCompare(b.name)
+    })
+
+  if (orders.length === 0) return 'none'
+
+  return orders
+    .slice(0, 8)
+    .map((order) => {
+      const parts = [order.name]
+      if (order.price !== null) parts.push(`ask ${order.price}`)
+      if (order.quantity !== null) parts.push(`qty ${order.quantity}`)
+      if (order.station) parts.push(`at ${order.station}`)
+      return `- ${parts.join(', ')}`
+    })
+    .join('\n')
+}
+
+function extractActiveOrders(data: Record<string, unknown>): Array<{ name: string; side: 'buy' | 'sell' | 'unknown'; price: number | null; quantity: number | null; station: string | null }> {
+  const candidates = [
+    data.orders,
+    (data.result as Record<string, unknown> | undefined)?.orders,
+    data.items,
+    (data.result as Record<string, unknown> | undefined)?.items,
+  ]
+
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) continue
+    const orders = candidate
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null
+        const record = item as Record<string, unknown>
+        const name = String(record.item_name || record.name || record.item_id || '').trim()
+        if (!name) return null
+        const rawSide = String(record.side || record.order_type || '').trim().toLowerCase()
+        const side = rawSide === 'buy' || rawSide === 'sell' ? rawSide : 'unknown'
+        return {
+          name,
+          side,
+          price: toFiniteNumber(record.price_each ?? record.price ?? record.unit_price ?? record.ask_price ?? record.sell_price ?? record.buy_price),
+          quantity: toFiniteNumber(record.quantity ?? record.remaining_quantity ?? record.available ?? record.volume),
+          station: typeof record.station_name === 'string'
+            ? record.station_name
+            : typeof record.base === 'string'
+              ? record.base
+              : typeof record.station_id === 'string'
+                ? record.station_id
+                : null,
+        }
+      })
+      .filter((order): order is { name: string; side: 'buy' | 'sell' | 'unknown'; price: number | null; quantity: number | null; station: string | null } => Boolean(order))
+
+    if (orders.length > 0) return orders
+  }
+
+  return []
 }
 
 function extractShipOffers(data: Record<string, unknown> | undefined): Array<{ name: string; classId: string; price: number | null }> {

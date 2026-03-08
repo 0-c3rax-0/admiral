@@ -50,6 +50,14 @@ type AdviceSignal = {
   whyNow?: string
 }
 
+type LoopSignal = {
+  detected: boolean
+  summary: string
+  evidence: string[]
+  recommendedChecks: string[]
+  recommendedActions: string[]
+}
+
 type VerifiedCommands = {
   names: Set<string>
   loadedFrom: string
@@ -232,15 +240,17 @@ class FleetSupervisor {
       const status = agentManager.getStatus(profile.id)
       if (!status.running) continue
 
-      const logs = getLogEntries(profile.id, undefined, 14)
+      const logs = getLogEntries(profile.id, undefined, 18)
       const recentSignals = buildRecentSignals(logs.map((entry) => entry.summary))
+      const loopSignal = detectReplanningLoop(logs, status)
       const routeSignals = await this.buildRouteSignals(profile.server_url, status)
       const shipUpgradeSignals = await this.buildShipUpgradeSignals(profile, status)
       const verifiedCommands = await this.getVerifiedCommands(profile)
-      const adviceSignals = buildAdviceSignals(status, recentSignals, routeSignals, shipUpgradeSignals, verifiedCommands)
+      const adviceSignals = buildAdviceSignals(status, recentSignals, routeSignals, shipUpgradeSignals, verifiedCommands, loopSignal)
       const noisyState =
         status.mutation_state !== 'idle' ||
         recentSignals.length > 0 ||
+        loopSignal.detected ||
         routeSignals.length > 0 ||
         shipUpgradeSignals.length > 0 ||
         adviceSignals.length > 0
@@ -408,12 +418,115 @@ function buildRecentSignals(summaries: string[]): string[] {
   return signals.slice(0, 8)
 }
 
+function detectReplanningLoop(
+  logs: ReturnType<typeof getLogEntries>,
+  status: ReturnType<typeof agentManager.getStatus>,
+): LoopSignal {
+  if (logs.length < 8) {
+    return emptyLoopSignal()
+  }
+
+  const recent = [...logs].reverse()
+  const toolCalls = recent
+    .filter((entry) => entry.type === 'tool_call')
+    .map((entry) => extractCommandNameFromSummary(entry.summary))
+    .filter((command): command is string => Boolean(command))
+
+  if (toolCalls.length < 5) return emptyLoopSignal()
+
+  const repeatedQueryCalls = toolCalls.filter((command) => isLoopProneQuery(command))
+  const progressSignals = recent.filter((entry) => {
+    const lower = entry.summary.toLowerCase()
+    return lower.includes('[action_result]') || lower.includes('pending action accepted')
+  })
+  const dominantCommands = summarizeDominantCommands(toolCalls)
+
+  const stableButStuck =
+    status.connected &&
+    status.running &&
+    status.mutation_state !== 'mutation_pending' &&
+    status.mutation_state !== 'navigation_pending'
+
+  if (!stableButStuck || repeatedQueryCalls.length < 5 || progressSignals.length > 0 || dominantCommands.length === 0) {
+    return emptyLoopSignal()
+  }
+
+  const ship = status.gameState?.ship
+  const cargo = parseUsagePair(ship?.cargo)
+  const cargoFull = !!cargo && cargo.capacity > 0 && cargo.used >= cargo.capacity
+  const poi = typeof status.gameState?.poi === 'string' ? status.gameState.poi.trim() : ''
+  const system = typeof status.gameState?.system === 'string' ? status.gameState.system.trim() : ''
+  const recommendedChecks = ['get_status']
+  const recommendedActions: string[] = []
+
+  if (cargoFull) {
+    recommendedChecks.push('get_cargo')
+    if (looksDocked(poi) || status.navigation_state === 'docked') {
+      recommendedChecks.push('market')
+      recommendedActions.push('sell')
+    } else {
+      recommendedChecks.push('get_system')
+      recommendedActions.push('travel', 'dock')
+    }
+  }
+
+  return {
+    detected: true,
+    summary: 'The agent appears stuck in a re-planning loop: repeated query/recovery commands without state progress.',
+    evidence: [
+      `recent_commands=${dominantCommands.join(', ')}`,
+      ...(system ? [`system=${system}`] : []),
+      ...(poi ? [`poi=${poi}`] : []),
+      ...(cargoFull && cargo ? [`cargo=${cargo.used}/${cargo.capacity}`] : []),
+      `recent_progress_events=${progressSignals.length}`,
+    ],
+    recommendedChecks,
+    recommendedActions,
+  }
+}
+
+function emptyLoopSignal(): LoopSignal {
+  return {
+    detected: false,
+    summary: '',
+    evidence: [],
+    recommendedChecks: [],
+    recommendedActions: [],
+  }
+}
+
+function extractCommandNameFromSummary(summary: string): string | null {
+  const trimmed = summary.trim()
+  const gameMatch = trimmed.match(/^game\(([\w_]+)/)
+  if (gameMatch) return gameMatch[1]
+  const manualMatch = trimmed.match(/^manual:\s*([\w_]+)\(/)
+  if (manualMatch) return manualMatch[1]
+  return null
+}
+
+function summarizeDominantCommands(commands: string[]): string[] {
+  const counts = new Map<string, number>()
+  for (const command of commands) {
+    counts.set(command, (counts.get(command) || 0) + 1)
+  }
+  return [...counts.entries()]
+    .filter(([, count]) => count >= 3)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 3)
+    .map(([command, count]) => `${command}x${count}`)
+}
+
+function isLoopProneQuery(command: string): boolean {
+  return ['get_status', 'get_system', 'get_poi', 'get_location', 'view_orders', 'view_market', 'get_base'].includes(command)
+}
+
 function buildAdviceSignals(
   status: ReturnType<typeof agentManager.getStatus>,
   recentSignals: string[],
   routeSignals: string[],
   shipUpgradeSignals: string[],
   verifiedCommands: VerifiedCommands | null,
+  loopSignal: LoopSignal,
 ): AdviceSignal[] {
   const signals: AdviceSignal[] = []
   const ship = status.gameState?.ship
@@ -453,6 +566,18 @@ function buildAdviceSignals(
       recommendedChecks: ['find_route'],
       recommendedActions: ['jump'],
       whyNow: 'repeating the same jump will keep failing or stalling',
+    })
+  }
+
+  if (loopSignal.detected) {
+    signals.push({
+      kind: 'replanning_loop_detected',
+      priority: 91,
+      summary: loopSignal.summary,
+      evidence: loopSignal.evidence,
+      recommendedChecks: loopSignal.recommendedChecks,
+      recommendedActions: loopSignal.recommendedActions,
+      whyNow: 'recent turns are repeating checks or retries without producing state progress',
     })
   }
 
