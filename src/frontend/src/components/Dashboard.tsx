@@ -77,6 +77,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
   const [nudgingAll, setNudgingAll] = useState(false)
   const [statusAllLoading, setStatusAllLoading] = useState(false)
   const [statsLoading, setStatsLoading] = useState(false)
+  const [statsSkillsLoading, setStatsSkillsLoading] = useState(false)
   const [statsDbSummary, setStatsDbSummary] = useState<{
     snapshotCount: number
     profilesWithData: number
@@ -87,6 +88,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
     systemsDelta1h: number
     events24h: number
   } | null>(null)
+  const [statsSkillsByProfile, setStatsSkillsByProfile] = useState<Record<string, Record<string, number> | null>>({})
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     try { return localStorage.getItem('admiral-sidebar-open') !== 'false' } catch { return true }
   })
@@ -374,12 +376,42 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
   async function handleOpenStats() {
     setShowStats(true)
     setStatsLoading(true)
+    setStatsSkillsLoading(true)
     try {
-      const resp = await fetch('/api/stats/summary')
-      const summary = await resp.json()
-      setStatsDbSummary(summary)
+      const [summaryResp, skillsResults] = await Promise.all([
+        fetch('/api/stats/summary'),
+        Promise.allSettled(
+          profiles.map(async (profile) => {
+            const cachedSkills = extractSkills(playerDataMap[profile.id])
+            if (cachedSkills) return [profile.id, cachedSkills] as const
+            if (!statuses[profile.id]?.connected) return [profile.id, null] as const
+
+            const resp = await fetch(`/api/profiles/${profile.id}/command`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ command: 'get_skills' }),
+            })
+            if (!resp.ok) return [profile.id, null] as const
+            const result = await resp.json()
+            return [profile.id, extractSkills(result.structuredContent ?? result.result ?? result)] as const
+          })
+        ),
+      ])
+
+      if (summaryResp.ok) {
+        const summary = await summaryResp.json()
+        setStatsDbSummary(summary)
+      }
+
+      const nextSkillsByProfile: Record<string, Record<string, number> | null> = {}
+      for (const entry of skillsResults) {
+        if (entry.status !== 'fulfilled') continue
+        nextSkillsByProfile[entry.value[0]] = entry.value[1]
+      }
+      setStatsSkillsByProfile(nextSkillsByProfile)
     } finally {
       setStatsLoading(false)
+      setStatsSkillsLoading(false)
     }
   }
 
@@ -393,6 +425,20 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
     .filter((item) => item.risk && item.risk.level !== 'LOW')
   const highRiskCount = rateRiskProfiles.filter((item) => item.risk?.level === 'HIGH').length
   const mediumRiskCount = rateRiskProfiles.filter((item) => item.risk?.level === 'MEDIUM').length
+  const accountSkillOverview = profiles
+    .map((profile) => {
+      const skills = extractSkills(playerDataMap[profile.id]) || statsSkillsByProfile[profile.id] || null
+      const skillEntries = Object.entries(skills || {})
+        .filter(([, level]) => typeof level === 'number' && Number.isFinite(level) && level > 0)
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      return {
+        id: profile.id,
+        name: profile.name,
+        connected: !!statuses[profile.id]?.connected,
+        skillEntries,
+      }
+    })
+    .sort((a, b) => a.name.localeCompare(b.name))
 
   const hasValidProvider = providers.some(p => p.status === 'valid' || p.api_key)
 
@@ -435,14 +481,6 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
           >
             <CircleHelp size={13} />
           </button>
-          <button
-            onClick={handleOpenStats}
-            className="flex items-center gap-1.5 text-xs text-muted-foreground uppercase tracking-wider px-2.5 py-1.5 hover:text-foreground transition-colors"
-            title="Runtime stats"
-          >
-            <BarChart3 size={13} />
-            Stats
-          </button>
           <div className="flex items-center gap-1 border border-border px-1 py-1">
             {([
               { label: 'Live Off', value: 0 },
@@ -463,6 +501,14 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
               </button>
             ))}
           </div>
+          <button
+            onClick={handleOpenStats}
+            className="flex items-center gap-1.5 text-xs text-muted-foreground uppercase tracking-wider px-2.5 py-1.5 hover:text-foreground transition-colors"
+            title="Runtime stats"
+          >
+            <BarChart3 size={13} />
+            Stats
+          </button>
           <button
             onClick={handleOpenMap}
             disabled={statusAllLoading}
@@ -644,114 +690,152 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
 
       {showStats && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowStats(false)}>
-          <div className="w-full max-w-md border border-border bg-card shadow-lg" onClick={(e) => e.stopPropagation()}>
+          <div className="w-full max-w-5xl border border-border bg-card shadow-lg" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
               <span className="font-jetbrains text-xs font-semibold tracking-[1.5px] text-primary uppercase">Runtime Stats</span>
               <button onClick={() => setShowStats(false)} className="text-muted-foreground hover:text-foreground transition-colors">
                 <X size={14} />
               </button>
             </div>
-            <div className="px-4 py-3 space-y-2 text-xs">
-              <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Profiles</span>
-                <span className="text-foreground">{profiles.length}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Connected</span>
-                <span className="text-foreground">{connectedProfiles}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Running</span>
-                <span className="text-foreground">{runningProfiles}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Global Mem Mode</span>
-                <span className={`uppercase ${modeClass}`}>{globalMode}</span>
-              </div>
-              <div className="mt-2 border-t border-border/60 pt-2">
-                <div className="text-[10px] text-muted-foreground uppercase tracking-[1.2px] mb-1.5">Game Totals</div>
+            <div className="grid gap-0 lg:grid-cols-[320px_minmax(0,1fr)]">
+              <div className="px-4 py-3 space-y-2 text-xs border-b border-border lg:border-b-0 lg:border-r">
                 <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">Credits</span>
-                  <span className="text-foreground">{gameTotals.credits.toLocaleString()}</span>
+                  <span className="text-muted-foreground">Profiles</span>
+                  <span className="text-foreground">{profiles.length}</span>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">Ore Mined</span>
-                  <span className="text-foreground">{gameTotals.oreMined.toLocaleString()}</span>
+                  <span className="text-muted-foreground">Connected</span>
+                  <span className="text-foreground">{connectedProfiles}</span>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">Trades</span>
-                  <span className="text-foreground">{gameTotals.trades.toLocaleString()}</span>
+                  <span className="text-muted-foreground">Running</span>
+                  <span className="text-foreground">{runningProfiles}</span>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">Systems Explored</span>
-                  <span className="text-foreground">{gameTotals.systemsExplored.toLocaleString()}</span>
+                  <span className="text-muted-foreground">Global Mem Mode</span>
+                  <span className={`uppercase ${modeClass}`}>{globalMode}</span>
                 </div>
-              </div>
-              <div className="mt-2 border-t border-border/60 pt-2">
-                <div className="text-[10px] text-muted-foreground uppercase tracking-[1.2px] mb-1.5">DB Telemetry</div>
-                {statsLoading && (
-                  <div className="text-[11px] text-muted-foreground">Loading snapshot metrics...</div>
-                )}
-                {!statsLoading && statsDbSummary && (
-                  <>
-                    <div className="flex items-center justify-between">
-                      <span className="text-muted-foreground">Snapshots</span>
-                      <span className="text-foreground">{statsDbSummary.snapshotCount.toLocaleString()}</span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-muted-foreground">Profiles With Data</span>
-                      <span className="text-foreground">{statsDbSummary.profilesWithData}</span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-muted-foreground">Credits (1h)</span>
-                      <span className={statsDbSummary.creditsDelta1h >= 0 ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-red))]'}>
-                        {statsDbSummary.creditsDelta1h >= 0 ? '+' : ''}{Math.round(statsDbSummary.creditsDelta1h).toLocaleString()}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-muted-foreground">Ore Mined (1h)</span>
-                      <span className={statsDbSummary.oreDelta1h >= 0 ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-red))]'}>
-                        {statsDbSummary.oreDelta1h >= 0 ? '+' : ''}{Math.round(statsDbSummary.oreDelta1h).toLocaleString()}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-muted-foreground">Trades (1h)</span>
-                      <span className={statsDbSummary.tradesDelta1h >= 0 ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-red))]'}>
-                        {statsDbSummary.tradesDelta1h >= 0 ? '+' : ''}{Math.round(statsDbSummary.tradesDelta1h).toLocaleString()}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-muted-foreground">Systems (1h)</span>
-                      <span className={statsDbSummary.systemsDelta1h >= 0 ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-red))]'}>
-                        {statsDbSummary.systemsDelta1h >= 0 ? '+' : ''}{Math.round(statsDbSummary.systemsDelta1h).toLocaleString()}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-muted-foreground">Events (24h)</span>
-                      <span className="text-foreground">{statsDbSummary.events24h.toLocaleString()}</span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-muted-foreground">Last Snapshot</span>
-                      <span className="text-foreground">
-                        {statsDbSummary.lastSnapshotTs ? new Date(statsDbSummary.lastSnapshotTs).toLocaleString() : 'n/a'}
-                      </span>
-                    </div>
-                  </>
-                )}
-              </div>
-              <div className="mt-2 border-t border-border/60 pt-2">
-                <div className="text-[10px] text-muted-foreground uppercase tracking-[1.2px] mb-1.5">429 Risk</div>
-                {rateRiskProfiles.length === 0 && (
-                  <div className="text-[11px] text-[hsl(var(--smui-green))]">No current elevated risk.</div>
-                )}
-                {rateRiskProfiles.slice(0, 6).map((item) => (
-                  <div key={item.name} className="flex items-start justify-between gap-3 py-0.5">
-                    <span className="text-muted-foreground">{item.name}</span>
-                    <span className={item.risk?.level === 'HIGH' ? 'text-[hsl(var(--smui-red))]' : 'text-[hsl(var(--smui-orange))]'}>
-                      {item.risk?.level}
-                    </span>
+                <div className="mt-2 border-t border-border/60 pt-2">
+                  <div className="text-[10px] text-muted-foreground uppercase tracking-[1.2px] mb-1.5">Game Totals</div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Credits</span>
+                    <span className="text-foreground">{gameTotals.credits.toLocaleString()}</span>
                   </div>
-                ))}
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Ore Mined</span>
+                    <span className="text-foreground">{gameTotals.oreMined.toLocaleString()}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Trades</span>
+                    <span className="text-foreground">{gameTotals.trades.toLocaleString()}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Systems Explored</span>
+                    <span className="text-foreground">{gameTotals.systemsExplored.toLocaleString()}</span>
+                  </div>
+                </div>
+                <div className="mt-2 border-t border-border/60 pt-2">
+                  <div className="text-[10px] text-muted-foreground uppercase tracking-[1.2px] mb-1.5">DB Telemetry</div>
+                  {statsLoading && (
+                    <div className="text-[11px] text-muted-foreground">Loading snapshot metrics...</div>
+                  )}
+                  {!statsLoading && statsDbSummary && (
+                    <>
+                      <div className="flex items-center justify-between">
+                        <span className="text-muted-foreground">Snapshots</span>
+                        <span className="text-foreground">{statsDbSummary.snapshotCount.toLocaleString()}</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-muted-foreground">Profiles With Data</span>
+                        <span className="text-foreground">{statsDbSummary.profilesWithData}</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-muted-foreground">Credits (1h)</span>
+                        <span className={statsDbSummary.creditsDelta1h >= 0 ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-red))]'}>
+                          {statsDbSummary.creditsDelta1h >= 0 ? '+' : ''}{Math.round(statsDbSummary.creditsDelta1h).toLocaleString()}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-muted-foreground">Ore Mined (1h)</span>
+                        <span className={statsDbSummary.oreDelta1h >= 0 ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-red))]'}>
+                          {statsDbSummary.oreDelta1h >= 0 ? '+' : ''}{Math.round(statsDbSummary.oreDelta1h).toLocaleString()}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-muted-foreground">Trades (1h)</span>
+                        <span className={statsDbSummary.tradesDelta1h >= 0 ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-red))]'}>
+                          {statsDbSummary.tradesDelta1h >= 0 ? '+' : ''}{Math.round(statsDbSummary.tradesDelta1h).toLocaleString()}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-muted-foreground">Systems (1h)</span>
+                        <span className={statsDbSummary.systemsDelta1h >= 0 ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-red))]'}>
+                          {statsDbSummary.systemsDelta1h >= 0 ? '+' : ''}{Math.round(statsDbSummary.systemsDelta1h).toLocaleString()}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-muted-foreground">Events (24h)</span>
+                        <span className="text-foreground">{statsDbSummary.events24h.toLocaleString()}</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-muted-foreground">Last Snapshot</span>
+                        <span className="text-foreground">
+                          {statsDbSummary.lastSnapshotTs ? new Date(statsDbSummary.lastSnapshotTs).toLocaleString() : 'n/a'}
+                        </span>
+                      </div>
+                    </>
+                  )}
+                </div>
+                <div className="mt-2 border-t border-border/60 pt-2">
+                  <div className="text-[10px] text-muted-foreground uppercase tracking-[1.2px] mb-1.5">429 Risk</div>
+                  {rateRiskProfiles.length === 0 && (
+                    <div className="text-[11px] text-[hsl(var(--smui-green))]">No current elevated risk.</div>
+                  )}
+                  {rateRiskProfiles.slice(0, 6).map((item) => (
+                    <div key={item.name} className="flex items-start justify-between gap-3 py-0.5">
+                      <span className="text-muted-foreground">{item.name}</span>
+                      <span className={item.risk?.level === 'HIGH' ? 'text-[hsl(var(--smui-red))]' : 'text-[hsl(var(--smui-orange))]'}>
+                        {item.risk?.level}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="px-4 py-3">
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <div className="text-[10px] text-muted-foreground uppercase tracking-[1.2px]">Accounts</div>
+                    <div className="text-sm text-foreground">Skills Overview</div>
+                  </div>
+                  {statsSkillsLoading && (
+                    <div className="text-[11px] text-muted-foreground">Loading skills...</div>
+                  )}
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                  {accountSkillOverview.map((account) => (
+                    <div key={account.id} className="border border-border/80 bg-background/40 px-3 py-3 text-xs">
+                      <div className="flex items-center justify-between gap-3 mb-2">
+                        <span className="font-medium text-foreground">{account.name}</span>
+                        <span className={account.connected ? 'text-[10px] uppercase text-[hsl(var(--smui-green))]' : 'text-[10px] uppercase text-muted-foreground'}>
+                          {account.connected ? 'connected' : 'offline'}
+                        </span>
+                      </div>
+                      {account.skillEntries.length > 0 ? (
+                        <div className="flex flex-wrap gap-1.5">
+                          {account.skillEntries.map(([skill, level]) => (
+                            <span key={skill} className="border border-border bg-card px-2 py-1 text-[10px] uppercase tracking-[1px] text-foreground">
+                              {formatSkillLabel(skill)} {level}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="text-[11px] text-muted-foreground">
+                          {account.connected ? 'No skill data returned yet.' : 'Skill data only available for connected accounts.'}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
           </div>
@@ -802,4 +886,27 @@ function ThemeToggle() {
       {dark ? <Sun size={13} /> : <Moon size={13} />}
     </button>
   )
+}
+
+function extractSkills(data: unknown): Record<string, number> | null {
+  if (!data || typeof data !== 'object') return null
+  const record = data as Record<string, unknown>
+  const direct = record.skills
+  const nested = record.result && typeof record.result === 'object'
+    ? (record.result as Record<string, unknown>).skills
+    : null
+  const raw = direct && typeof direct === 'object' ? direct : nested && typeof nested === 'object' ? nested : null
+  if (!raw) return null
+
+  const skills = Object.entries(raw as Record<string, unknown>)
+    .map(([skill, level]) => [skill, Number(level)] as const)
+    .filter(([, level]) => Number.isFinite(level))
+  if (skills.length === 0) return null
+  return Object.fromEntries(skills)
+}
+
+function formatSkillLabel(skill: string): string {
+  return skill
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase())
 }

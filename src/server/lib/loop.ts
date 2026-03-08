@@ -265,6 +265,7 @@ export async function runAgentTurn(
       resultSignature: roundResultFingerprints.join(' || '),
       hasErrors: roundErrorCount > 0,
       allErrored: roundToolFingerprints.length > 0 && roundErrorCount === roundToolFingerprints.length,
+      isStatusOnly: isStatusOnlyRound(roundToolFingerprints),
     })
 
     rounds++
@@ -305,7 +306,7 @@ function describeAdvisorTrigger(state: AdvisorStallState): string {
 
 function updateAdvisorStallState(
   prev: AdvisorStallState,
-  round: { toolSignature: string; resultSignature: string; hasErrors: boolean; allErrored: boolean },
+  round: { toolSignature: string; resultSignature: string; hasErrors: boolean; allErrored: boolean; isStatusOnly: boolean },
 ): AdvisorStallState {
   const sameTools = Boolean(round.toolSignature) && round.toolSignature === prev.previousRoundSignature
   const sameResults = Boolean(round.resultSignature) && round.resultSignature === prev.previousResultSignature
@@ -313,10 +314,15 @@ function updateAdvisorStallState(
   return {
     previousRoundSignature: round.toolSignature || prev.previousRoundSignature,
     previousResultSignature: round.resultSignature || prev.previousResultSignature,
-    repeatedRoundSignatureCount: sameTools ? prev.repeatedRoundSignatureCount + 1 : 0,
+    repeatedRoundSignatureCount: !round.isStatusOnly && sameTools ? prev.repeatedRoundSignatureCount + 1 : 0,
     stalledErrorRounds: round.allErrored && sameTools ? prev.stalledErrorRounds + 1 : 0,
-    stagnantRounds: sameResults ? prev.stagnantRounds + 1 : 0,
+    stagnantRounds: !round.isStatusOnly && sameResults ? prev.stagnantRounds + 1 : 0,
   }
+}
+
+function isStatusOnlyRound(toolFingerprints: string[]): boolean {
+  if (toolFingerprints.length === 0) return false
+  return toolFingerprints.every(fp => fp === 'game:{"command":"get_status"}')
 }
 
 function fingerprintToolCall(name: string, args: Record<string, unknown>): string {
