@@ -64,6 +64,21 @@ Operational note:
 - pending travel/jump state is interpreted consistently across transports when the server exposes enough fields
 - pending navigation is cleared not only by `ACTION_RESULT`, but also by `OK jumped` and confirmed `get_status` destination evidence
 
+## Operator UI
+
+The web UI is part of the operating surface, not just a viewer.
+
+Useful dashboard controls:
+
+- live refresh modes: `Off`, `2s`, `5s`
+- `Get Status All` for a fast fleet-wide state refresh
+- `Nudge All` for a short operator hint to every running agent
+- per-profile `Nudge` actions with local input history in the profile view
+
+Operational note:
+
+- the onboarding tour is client-side and can be dismissed per browser via `localStorage`
+
 ## LLM Routing Model
 
 This fork has four separate routing layers.
@@ -162,6 +177,7 @@ Current dashboard summary includes:
 - `Trades 1h`
 - current `429 Risk`
 - last snapshot time
+- live refresh mode state
 
 The stats modal also includes:
 
@@ -230,6 +246,12 @@ sqlite3 -header -column data/admiral.db "SELECT * FROM pending_mutations;"
 
 ```bash
 sqlite3 -header -column data/admiral.db "SELECT id, timestamp, profile_id, type, summary FROM log_entries WHERE summary LIKE '%local-stall%' OR summary LIKE '%Mutation stall%' ORDER BY id DESC LIMIT 100;"
+```
+
+Manual nudge activity:
+
+```bash
+sqlite3 -header -column data/admiral.db "SELECT id, timestamp, profile_id, type, summary FROM log_entries WHERE summary LIKE '%nudge%' ORDER BY id DESC LIMIT 100;"
 ```
 
 ## Fleet Supervisor Operations

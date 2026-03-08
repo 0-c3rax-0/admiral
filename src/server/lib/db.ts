@@ -112,6 +112,15 @@ function migrate(db: Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_stats_events_profile_ts ON stats_events(profile_id, ts DESC);
 
+    CREATE TABLE IF NOT EXISTS profile_skills (
+      profile_id TEXT PRIMARY KEY,
+      ts TEXT DEFAULT (datetime('now')),
+      skills_json TEXT NOT NULL DEFAULT '{}',
+      FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_profile_skills_ts ON profile_skills(ts DESC);
+
     CREATE TABLE IF NOT EXISTS llm_requests (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       profile_id TEXT NOT NULL,
@@ -579,6 +588,12 @@ export interface StatsEventRow {
   value: string | null
 }
 
+export interface ProfileSkillsRow {
+  profile_id: string
+  ts: string
+  skills_json: string
+}
+
 export interface SupervisorRunRow {
   id: number
   status: string
@@ -670,6 +685,53 @@ export function listStatsEvents(profileId: string, limit: number = 100): StatsEv
   return getDb().query(
     'SELECT * FROM stats_events WHERE profile_id = ? ORDER BY id DESC LIMIT ?'
   ).all(profileId, limit) as StatsEventRow[]
+}
+
+export function upsertProfileSkills(profileId: string, skills: Record<string, number>): void {
+  getDb().query(
+    `INSERT INTO profile_skills (profile_id, ts, skills_json)
+     VALUES (?, datetime('now'), ?)
+     ON CONFLICT(profile_id) DO UPDATE SET
+       ts = excluded.ts,
+       skills_json = excluded.skills_json`
+  ).run(profileId, JSON.stringify(skills))
+}
+
+export function getProfileSkills(profileId: string): { ts: string; skills: Record<string, number> } | null {
+  const row = getDb().query(
+    'SELECT profile_id, ts, skills_json FROM profile_skills WHERE profile_id = ?'
+  ).get(profileId) as ProfileSkillsRow | undefined
+  if (!row) return null
+  try {
+    const parsed = JSON.parse(row.skills_json) as Record<string, unknown>
+    const skills = Object.fromEntries(
+      Object.entries(parsed)
+        .map(([skill, level]) => [skill, Number(level)] as const)
+        .filter(([, level]) => Number.isFinite(level))
+    )
+    return { ts: row.ts, skills }
+  } catch {
+    return { ts: row.ts, skills: {} }
+  }
+}
+
+export function listProfileSkills(): Array<{ profile_id: string; ts: string; skills: Record<string, number> }> {
+  const rows = getDb().query(
+    'SELECT profile_id, ts, skills_json FROM profile_skills ORDER BY ts DESC'
+  ).all() as ProfileSkillsRow[]
+  return rows.map((row) => {
+    try {
+      const parsed = JSON.parse(row.skills_json) as Record<string, unknown>
+      const skills = Object.fromEntries(
+        Object.entries(parsed)
+          .map(([skill, level]) => [skill, Number(level)] as const)
+          .filter(([, level]) => Number.isFinite(level))
+      )
+      return { profile_id: row.profile_id, ts: row.ts, skills }
+    } catch {
+      return { profile_id: row.profile_id, ts: row.ts, skills: {} }
+    }
+  })
 }
 
 function numOrZero(v: number | null | undefined): number {

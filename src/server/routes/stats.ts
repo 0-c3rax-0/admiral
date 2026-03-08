@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { listProfiles, getProfile, listStatsEvents, listStatsSnapshots } from '../lib/db'
+import { listProfiles, getProfile, getProfileSkills, listProfileSkills, listStatsEvents, listStatsSnapshots } from '../lib/db'
 
 const stats = new Hono()
 
@@ -69,6 +69,25 @@ stats.get('/:id/events', (c) => {
   const limit = Math.max(1, Math.min(1000, parseInt(limitRaw || '200', 10) || 200))
   const rows = listStatsEvents(id, limit)
   return c.json({ profile_id: id, events: rows })
+})
+
+stats.get('/skills/summary', (c) => {
+  const rows = listProfileSkills()
+  return c.json({
+    profiles: rows.map((row) => ({
+      profile_id: row.profile_id,
+      ts: row.ts,
+      skills: row.skills,
+    })),
+  })
+})
+
+stats.get('/:id/skills', (c) => {
+  const id = c.req.param('id')
+  const profile = getProfile(id)
+  if (!profile) return c.json({ error: 'Profile not found' }, 404)
+  const row = getProfileSkills(id)
+  return c.json({ profile_id: id, ts: row?.ts ?? null, skills: row?.skills ?? null })
 })
 
 export default stats

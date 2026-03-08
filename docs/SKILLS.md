@@ -18,6 +18,7 @@ This fork adds or changes:
 
 - profile-level primary and failover provider/model routing
 - alternative solver activation only on detected loops or stalled plans
+- manual per-profile and fleet-wide nudge delivery from the UI
 - Google Gemini OAuth via `google-gemini-cli`
 - persistent per-profile memory under `data/memory/`
 - startup autoconnect with jitter
@@ -102,6 +103,7 @@ Examples:
 
 - profile-level 429 risk in dashboard status data
 - dashboard 1-hour deltas for credits, ore, and trades
+- dashboard live refresh controls plus `Get Status All` / `Nudge All`
 - per-account status cards with kills, completed missions, and non-resource loot onboard
 
 Important distinction:
@@ -160,6 +162,14 @@ Preferred production control plane:
 - `journalctl -u admiral.service -n 50 --no-pager`
 
 Do not treat manual background starts as the normal production workflow when the systemd service exists.
+
+## UI Notes
+
+Current frontend behavior that matters when documenting or operating the repo:
+
+- the onboarding tour auto-opens only for browsers that have not set `admiral-tour-seen`
+- per-profile nudge inputs keep local history in browser storage
+- dashboard fleet actions and profile nudge actions both feed the same server-side nudge path
 
 ## Safe Guidance
 

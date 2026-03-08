@@ -378,12 +378,11 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
     setStatsLoading(true)
     setStatsSkillsLoading(true)
     try {
-      const [summaryResp, skillsResults] = await Promise.all([
+      const [summaryResp, skillsSummaryResp, skillsResults] = await Promise.all([
         fetch('/api/stats/summary'),
+        fetch('/api/stats/skills/summary'),
         Promise.allSettled(
           profiles.map(async (profile) => {
-            const cachedSkills = extractSkills(playerDataMap[profile.id])
-            if (cachedSkills) return [profile.id, cachedSkills] as const
             if (!statuses[profile.id]?.connected) return [profile.id, null] as const
 
             const resp = await fetch(`/api/profiles/${profile.id}/command`, {
@@ -404,11 +403,29 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
       }
 
       const nextSkillsByProfile: Record<string, Record<string, number> | null> = {}
+      if (skillsSummaryResp.ok) {
+        const skillsSummary = await skillsSummaryResp.json()
+        const rows = Array.isArray(skillsSummary?.profiles) ? skillsSummary.profiles : []
+        for (const row of rows) {
+          if (!row || typeof row !== 'object') continue
+          const profileId = typeof row.profile_id === 'string' ? row.profile_id : null
+          const skills = extractSkills(row)
+          if (profileId) nextSkillsByProfile[profileId] = skills
+        }
+      }
       for (const entry of skillsResults) {
         if (entry.status !== 'fulfilled') continue
         nextSkillsByProfile[entry.value[0]] = entry.value[1]
       }
       setStatsSkillsByProfile(nextSkillsByProfile)
+      setPlayerDataMap((prev) => {
+        const next = { ...prev }
+        for (const [profileId, skills] of Object.entries(nextSkillsByProfile)) {
+          if (!skills) continue
+          next[profileId] = mergeSkillsIntoPlayerData(next[profileId], skills)
+        }
+        return next
+      })
     } finally {
       setStatsLoading(false)
       setStatsSkillsLoading(false)
@@ -427,7 +444,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
   const mediumRiskCount = rateRiskProfiles.filter((item) => item.risk?.level === 'MEDIUM').length
   const accountSkillOverview = profiles
     .map((profile) => {
-      const skills = extractSkills(playerDataMap[profile.id]) || statsSkillsByProfile[profile.id] || null
+      const skills = statsSkillsByProfile[profile.id] || extractSkills(playerDataMap[profile.id]) || null
       const skillEntries = Object.entries(skills || {})
         .filter(([, level]) => typeof level === 'number' && Number.isFinite(level) && level > 0)
         .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
@@ -909,4 +926,19 @@ function formatSkillLabel(skill: string): string {
   return skill
     .replace(/[_-]+/g, ' ')
     .replace(/\b\w/g, (char) => char.toUpperCase())
+}
+
+function mergeSkillsIntoPlayerData(
+  existing: Record<string, unknown> | undefined,
+  skills: Record<string, number>
+): Record<string, unknown> {
+  return {
+    ...(existing || {}),
+    skills: {
+      ...((((existing || {}).skills) && typeof (existing || {}).skills === 'object')
+        ? ((existing || {}).skills as Record<string, unknown>)
+        : {}),
+      ...skills,
+    },
+  }
 }

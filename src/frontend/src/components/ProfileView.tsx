@@ -565,6 +565,10 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
           const parsed = parseStatusText(data.text as string)
           if (parsed) onPlayerData(parsed)
         }
+      } else if (command === 'get_skills') {
+        const data = result.structuredContent ?? result.result ?? result
+        const skills = extractCommandSkills(data)
+        if (skills) onPlayerData({ skills })
       }
     } catch {
       // Error logged by agent
@@ -1165,4 +1169,21 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
       )}
     </div>
   )
+}
+
+function extractCommandSkills(data: unknown): Record<string, number> | null {
+  if (!data || typeof data !== 'object') return null
+  const record = data as Record<string, unknown>
+  const candidates = [
+    record.skills,
+    record.result && typeof record.result === 'object' ? (record.result as Record<string, unknown>).skills : null,
+  ]
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== 'object') continue
+    const skills = Object.entries(candidate as Record<string, unknown>)
+      .map(([skill, level]) => [skill, Number(level)] as const)
+      .filter(([, level]) => Number.isFinite(level))
+    if (skills.length > 0) return Object.fromEntries(skills)
+  }
+  return null
 }

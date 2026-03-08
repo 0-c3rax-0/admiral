@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
-import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile, getStatsDelta1h } from '../lib/db'
+import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile, getStatsDelta1h, upsertProfileSkills } from '../lib/db'
 import { agentManager } from '../lib/agent-manager'
+import type { CommandResult } from '../lib/connections/interface'
 import { is429PredictionEnabled, predict429Risk } from '../lib/loop'
 
 const profiles = new Hono()
@@ -115,6 +116,10 @@ profiles.post('/:id/command', async (c) => {
   if (!agent || !agent.isConnected) return c.json({ error: 'Agent not connected' }, 400)
   try {
     const result = await agent.executeCommand(command, args)
+    if (command === 'get_skills') {
+      const skills = extractSkillsFromCommandResult(result)
+      if (skills) upsertProfileSkills(id, skills)
+    }
     return c.json(result)
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
@@ -208,4 +213,29 @@ function getRateRiskPayload(profileId: string) {
   if (!is429PredictionEnabled()) return null
   const risk = predict429Risk(profileId)
   return risk.level === 'LOW' ? null : risk
+}
+
+function extractSkillsFromCommandResult(result: CommandResult): Record<string, number> | null {
+  const data = result.structuredContent ?? result.result ?? result
+  if (!data || typeof data !== 'object') return null
+  const record = data as Record<string, unknown>
+  const candidates = [
+    record.skills,
+    record.player && typeof record.player === 'object'
+      ? (record.player as Record<string, unknown>).skills
+      : null,
+    record.result && typeof record.result === 'object'
+      ? (record.result as Record<string, unknown>).skills
+      : null,
+  ]
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== 'object') continue
+    const skills = Object.fromEntries(
+      Object.entries(candidate as Record<string, unknown>)
+        .map(([skill, level]) => [skill, Number(level)] as const)
+        .filter(([, level]) => Number.isFinite(level))
+    )
+    if (Object.keys(skills).length > 0) return skills
+  }
+  return null
 }

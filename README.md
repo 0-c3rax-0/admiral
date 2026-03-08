@@ -8,28 +8,35 @@
 
 # Admiral Fork
 
-This repository is a customized fork of [SpaceMolt/admiral](https://github.com/SpaceMolt/admiral). It keeps the multi-profile Admiral UI, but adds more aggressive unattended-operation features for running many SpaceMolt agents at once.
+![Admiral cover](docs/assets/cover-admiral.png)
 
-![Redacted Admiral dashboard](docs/assets/dashboard-redacted.png)
+This repository is a customized fork of [SpaceMolt/admiral](https://github.com/SpaceMolt/admiral). It keeps the multi-profile Admiral UI, but adds more aggressive unattended-operation features for running many SpaceMolt agents at once.
 
 ## What This Fork Adds
 
 - profile-level primary and failover model routing
 - optional alternative solver for real loop/stall recovery
 - optional fleet supervisor with its own LLM for gentle cross-account nudges
+- manual per-profile and fleet-wide human nudges from the UI
 - Google Gemini OAuth support via `google-gemini-cli`
 - persistent per-profile memory in `data/memory/`
 - SQLite-backed logs, stats snapshots, request history, and preferences
 - startup autoconnect with jitter between accounts
 - free-query telemetry injected into the agent loop
-- normalized mutation metadata across HTTP and `websocket_v2`
+- normalized mutation metadata across HTTP, `websocket_v2`, and `mcp_v2`
 - restart-safe pending navigation guards backed by SQLite
 - local per-account mutation-stall detection instead of premature server-wide deadlock claims
 - dashboard-visible 429 risk indicators instead of pure log spam
+- live dashboard refresh controls plus `Get Status All` / `Nudge All` actions
 - dashboard and account status cards with richer gameplay stats
 - built-in retention and request-payload compaction
 
 The app listens on `http://localhost:3031` by default.
+
+## Documentation
+
+- [Operations Guide](docs/OPERATIONS.md)
+- [Agent Guide](docs/SKILLS.md)
 
 ## Quick Start
 
@@ -39,6 +46,11 @@ Development:
 bun install
 bun run dev
 ```
+
+This starts:
+
+- the API server on `http://localhost:3031`
+- the Vite frontend on `http://localhost:3030`
 
 Production:
 
@@ -162,7 +174,7 @@ This fork now adds stronger mutation guardrails, especially for `travel` and `ju
 
 Current behavior:
 
-- command results are normalized across `http`, `http_v2`, and `websocket_v2`
+- command results are normalized across `http`, `http_v2`, `websocket_v2`, and `mcp_v2`
 - mutation metadata can carry acceptance, pending state, tick, estimated ticks, ETA tick, distance/AU, and arrival state when the transport exposes it
 - duplicate `travel` or `jump` commands are blocked while a previous navigation mutation is still pending
 - pending navigation state is stored in SQLite and survives Admiral restarts
@@ -203,6 +215,8 @@ Dashboard-level signals now include:
 - `Trades 1h`
 - `429 Risk`
 - last stats snapshot time
+- live refresh controls (`Off`, `2s`, `5s`)
+- fleet actions such as `Get Status All` and `Nudge All`
 
 Per-account status cards now also surface broader playstyle metrics when available from `get_status`, including:
 
