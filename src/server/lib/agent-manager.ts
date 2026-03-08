@@ -11,11 +11,14 @@ type SlimGameState = {
   system?: unknown
   poi?: unknown
   ship?: {
+    name?: unknown
     class?: unknown
     hull: string
     shield: string
     fuel: string
     cargo: string
+    cpu?: string
+    power?: string
     cargoItems?: string[]
   }
   modules?: { name?: unknown; wear?: unknown; ammo?: string }[]
@@ -38,11 +41,14 @@ function slimGameState(raw: Record<string, unknown> | null): SlimGameState {
     system: player?.current_system,
     poi: player?.current_poi,
     ship: ship ? {
+      name: ship.name ?? ship.ship_name ?? ship.class_name ?? ship.class_id,
       class: ship.class_id,
       hull: `${ship.hull ?? 0}/${ship.max_hull ?? 0}`,
       shield: `${ship.shield ?? 0}/${ship.max_shield ?? 0}`,
       fuel: `${ship.fuel ?? 0}/${ship.max_fuel ?? 0}`,
       cargo: `${ship.cargo_used ?? 0}/${ship.cargo_capacity ?? 0}`,
+      cpu: `${ship.cpu_used ?? 0}/${ship.cpu_capacity ?? 0}`,
+      power: `${ship.power_used ?? 0}/${ship.power_capacity ?? 0}`,
       cargoItems,
     } : undefined,
     modules: modules?.map(m => ({

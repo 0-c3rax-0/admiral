@@ -148,9 +148,12 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
       inFlight = controller
 
       try {
-        const resp = await fetch('/api/profiles', { signal: controller.signal })
-        if (!resp.ok) return
-        const data: Array<Record<string, unknown>> = await resp.json()
+        const [profilesResp, statsResp] = await Promise.all([
+          fetch('/api/profiles', { signal: controller.signal }),
+          fetch('/api/stats/summary', { signal: controller.signal }),
+        ])
+        if (!profilesResp.ok) return
+        const data: Array<Record<string, unknown>> = await profilesResp.json()
         if (disposed) return
         // Ignore out-of-order poll responses to prevent UI status flicker.
         if (seq < appliedPollSeqRef.current) return
@@ -179,6 +182,12 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
         }
         setProfiles(data as unknown as Profile[])
         setStatuses(newStatuses)
+        if (statsResp.ok) {
+          const summary = await statsResp.json()
+          if (!disposed && seq >= appliedPollSeqRef.current) {
+            setStatsDbSummary(summary)
+          }
+        }
         setPlayerDataMap(prev => {
           const next = { ...prev }
           for (const [id, incoming] of Object.entries(newPlayerData)) {
@@ -378,21 +387,6 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
     await handleGetStatusAll()
     setShowMap(true)
   }
-
-  useEffect(() => {
-    let cancelled = false
-    ;(async () => {
-      try {
-        const resp = await fetch('/api/stats/summary')
-        if (!resp.ok) return
-        const summary = await resp.json()
-        if (!cancelled) setStatsDbSummary(summary)
-      } catch {
-        // ignore
-      }
-    })()
-    return () => { cancelled = true }
-  }, [])
 
   const rateRiskProfiles = profiles
     .map((p) => ({ name: p.name, risk: statuses[p.id]?.rate_risk || null }))

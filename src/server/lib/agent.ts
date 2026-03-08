@@ -9,7 +9,7 @@ import { WebSocketV2Connection } from './connections/websocket_v2'
 import { McpConnection } from './connections/mcp'
 import { McpV2Connection } from './connections/mcp_v2'
 import { resolveModel } from './model'
-import { fetchGameCommands, formatCommandList } from './schema'
+import { fetchGameCommands, formatCommandList, parseRuntimeCommandResult } from './schema'
 import { allTools } from './tools'
 import { runAgentTurn, type CompactionState } from './loop'
 import { addLogEntry, getLatestPendingLlmRequest, getProfile, updateProfile, getPreference } from './db'
@@ -18,6 +18,7 @@ import fs from 'fs'
 import path from 'path'
 import { reconcilePendingNavigationWithStatus, updatePendingNavigationFromNotification } from './navigation-guard'
 import { getPendingNavigation } from './navigation-guard'
+import { createGameConnection } from './game-connection'
 
 const TURN_INTERVAL = 2000
 const PROMPT_PATH = path.join(process.cwd(), 'prompt.md')
@@ -327,6 +328,15 @@ export class Agent {
       const statusResp = await this.connection.execute('get_status')
       this.cacheGameState(statusResp)
     } catch { /* ignore */ }
+
+    // For modern websocket/v2 setups, immediately reconcile stale local pending
+    // navigation flags against the server's actual queue state.
+    if (profile.connection_mode === 'websocket_v2' || profile.connection_mode === 'http_v2' || profile.connection_mode === 'mcp_v2') {
+      try {
+        const queueResp = await this.connection.execute('v2_get_queue')
+        reconcilePendingNavigationWithStatus(this.profileId, queueResp)
+      } catch { /* ignore */ }
+    }
   }
 
   async startLLMLoop(): Promise<void> {
@@ -361,6 +371,19 @@ export class Agent {
     if (profile.connection_mode === 'mcp_v2' && this.connection instanceof McpV2Connection) {
       commandList = this.connection.getCommandList()
       this.log('system', `Discovered ${this.connection.toolCount} v2 commands`)
+    } else if ((profile.connection_mode === 'websocket' || profile.connection_mode === 'websocket_v2') && this.connection) {
+      const resp = await this.connection.execute('get_commands').catch(() => null)
+      const commands = resp && !resp.error ? parseRuntimeCommandResult(resp.result) : []
+      if (commands.length > 0) {
+        commandList = formatCommandList(commands)
+        this.log('system', `Loaded ${commands.length} runtime game commands`)
+      } else {
+        const serverUrl = profile.server_url.replace(/\/$/, '')
+        const apiVersion = profile.connection_mode === 'websocket_v2' ? 'v2' : 'v1'
+        const fallbackCommands = await fetchGameCommands(`${serverUrl}/api/${apiVersion}`, specLog)
+        commandList = formatCommandList(fallbackCommands)
+        this.log('system', `Loaded ${fallbackCommands.length} game commands`)
+      }
     } else {
       const serverUrl = profile.server_url.replace(/\/$/, '')
       const apiVersion = profile.connection_mode === 'http_v2' || profile.connection_mode === 'websocket_v2' ? 'v2' : 'v1'
@@ -930,21 +953,7 @@ function buildMemoryIntegrityWarning(memory: string): string | null {
 }
 
 function createConnection(profile: Profile): GameConnection {
-  switch (profile.connection_mode) {
-    case 'websocket':
-      return new WebSocketConnection(profile.server_url)
-    case 'websocket_v2':
-      return new WebSocketV2Connection(profile.server_url)
-    case 'mcp':
-      return new McpConnection(profile.server_url)
-    case 'mcp_v2':
-      return new McpV2Connection(profile.server_url)
-    case 'http_v2':
-      return new HttpV2Connection(profile.server_url)
-    case 'http':
-    default:
-      return new HttpConnection(profile.server_url)
-  }
+  return createGameConnection(profile)
 }
 
 function buildSystemPrompt(profile: Profile, commandList: string): string {
@@ -1000,10 +1009,15 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - Query commands are free and unlimited, but Admiral also injects automatic telemetry snapshots from free queries. Prefer those snapshots for routine status/cargo/market checks so you do not waste turns re-querying the same information.
 - Action commands cost 1 tick (10 seconds).
 - If an action returns \`pending: true\`, the command was accepted and queued for the next tick. Treat that as progress. Do not call it a deadlock just because the world state has not updated yet.
+- Jump and travel can legitimately take multiple ticks. Travel time now depends on distance and ship speed; jump time depends on ship speed. A long \`navigation_pending\` period is not by itself evidence of a stall.
+- Travel and jump fuel costs now scale with ship mass, speed, distance, and cargo load. Heavy or fast ships, especially with afterburners fitted, can burn much more fuel than before.
+- Before major travel or jumps, prefer checking route and fuel feasibility. Use \`find_route\` when planning multi-system movement, and re-check fuel after cargo or module changes. Its fuel estimates now reflect cargo load correctly.
+- For any destination outside the current system, use a strict routing workflow: if the system name is uncertain, resolve it with \`search_systems\`; then call \`find_route(target_system=...)\`; then jump only to the immediate next hop from the returned route. After each jump or in-system travel step, refresh with \`get_status\` or \`get_location\` before issuing the next navigation mutation. Do not skip directly to a far-away system name when a route has multiple hops.
 - Never describe the situation as a deadlock, stuck mutation queue, or server freeze unless you have strong evidence: at least 4 consecutive fresh verification cycles after a pending mutation, no \`ACTION_RESULT\` notification, and no meaningful state change despite repeated \`get_status\` checks.
 - If one specific account appears blocked for several verification cycles, describe it as a local mutation stall for that account/session only. Do not generalize that to the whole server unless multiple independent accounts show the same evidence.
 - If Admiral provides a \`Mutation State\` block, use it as a strong operational hint. Prefer those exact labels (\`idle\`, \`mutation_pending\`, \`navigation_pending\`, \`local_stall\`) instead of inventing stronger terms like deadlock or server-wide freeze, but still verify important decisions against fresh \`get_status\` evidence.
 - If Admiral provides a \`Navigation State\` block, treat it as a derived hint from recent \`get_status\` data, not as perfect ground truth. Before committing to important travel/dock/mine decisions, verify the current state yourself with fresh \`get_status\` if there is any ambiguity.
+- If \`navigation_pending\` follows a recent \`jump\` or \`travel\`, first assume the ship may still be in transit. Prefer \`get_location\` to inspect active transit destination and arrival tick, then refresh with \`get_status\` and compare fuel, position, and notifications before declaring a navigation stall.
 - If you see a state error like \`not_docked\` after \`undock\`, or \`already_docked\` after \`dock\`, interpret it as evidence that the desired state may already be true. Refresh with \`get_status\` before retrying or claiming the server is frozen.
 - If you have verified a local stall for several cycles, do not stay in passive monitoring forever. After refreshing with \`get_status\`, test exactly one simple low-risk mutation that matches the verified state (typically a corrected \`dock\`, \`undock\`, \`sell\`, \`refuel\`, or other obvious local action).
 - When testing a recovery mutation, send only one probe action, wait for the result, and reassess from fresh \`get_status\`. Do not spam repeated retries of the same command.
@@ -1011,6 +1025,9 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - Never use irreversible self-destruction, account reset, character wipe, or similarly destructive escape-hatch commands. Self-destruction is not a navigation shortcut: it can destroy the current ship, cargo, equipped modules, and expensive mining gear/badges tied to the loadout. If stranded or blocked, recover through travel, docking, refueling, repair, insurance, chat, or by waiting for better state information.
 - Never claim a stuck mutation queue, deadlock, or server freeze unless multiple fresh observations explicitly prove commands are neither executing nor changing state after verification with \`get_status\`.
 - Always check fuel before traveling and cargo space before mining.
+- Route planning matters more now: use \`find_route\` for non-trivial jumps, and do not assume older fixed-time or fixed-fuel navigation behavior.
+- Existing ships may have new speed values after a server restart. Do not rely on stale assumptions about jump duration, travel duration, or fuel burn from earlier runs.
+- If attacked by NPC pirates and escape is legal, \`jump\` or \`travel\` can be a valid recovery option. Treat navigation as a possible escape tool when combat pressure is non-player and leaving is feasible.
 - Mining loops should be practical: mine until cargo is near full (roughly 80-90%), but stop early if yields fail, the location lacks resources, cargo is full, or a better unload/travel opportunity appears.
 - Do not hoard ore blindly. When docked with valuable raw materials, inspect the market before selling. Avoid dumping into obviously bad instant bids; prefer corrected pricing or listing behavior when needed.
 - Periodically check for practical ship upgrades when docked at a shipyard or base. Favor upgrades that materially improve cargo, mining throughput, survivability, or travel efficiency and are affordable without stalling progress.
@@ -1063,15 +1080,18 @@ function buildMutationStallNudge(
     `A previous mutation has remained unresolved for ${loopsSincePendingMutation} verification cycles without an ACTION_RESULT notification.`,
     'Do not label this a global deadlock or server freeze.',
     'Assume the evidence is still local and incomplete unless multiple independent observations prove otherwise.',
+    'Remember that jump and travel now legitimately take multiple ticks based on ship speed and distance. Navigation delay alone is not enough to diagnose a stall.',
     'Stop passive monitoring loops. Try an active recovery plan based on the verified state below.',
     'Recovery priority order:',
     '1. Refresh with get_status if you need a newer snapshot.',
-    '2. Check whether the intended effect already happened.',
-    '3. If docked/undocked state is unclear, use get_status and then a single corrected dock or undock.',
-    '4. If the state looks stable but still seems stuck, test exactly one simple low-risk mutation that matches the verified state before declaring continued stall.',
-    `5. Recommended probe from current state: ${describeRecoveryProbe(gameState)}`,
-    '6. If travel is blocked, verify fuel, current POI, and system before choosing a different reachable action.',
-    '7. Prefer productive local actions or information gathering over repeating the same mutation or declaring a freeze.',
+    '2. If the unresolved action was jump or travel, first consider whether the ship may still be in transit under the new multi-tick navigation rules.',
+    '3. Prefer get_location to inspect transit destination and arrival tick while moving.',
+    '4. Check whether the intended effect already happened.',
+    '5. If docked/undocked state is unclear, use get_status and then a single corrected dock or undock.',
+    '6. If the state looks stable but still seems stuck, test exactly one simple low-risk mutation that matches the verified state before declaring continued stall.',
+    `7. Recommended probe from current state: ${describeRecoveryProbe(gameState)}`,
+    '8. If travel is blocked, verify fuel, current POI, system, route feasibility, and current ship speed before choosing a different reachable action.',
+    '9. Prefer productive local actions or information gathering over repeating the same mutation or declaring a freeze.',
     `Current unresolved-action evidence age: ${loopsSinceActionResult} cycles since last ACTION_RESULT.`,
     'Verified current state:',
     formatVerifiedGameState(gameState),
@@ -1106,7 +1126,7 @@ function buildNavigationStateNudge(
     detail ? `Detail: ${detail}` : '',
     'This is a derived planning hint from recent state, not a perfect guarantee.',
     'Use it to form a hypothesis, then verify with fresh get_status before major navigation, docking, or mining choices if the situation is unclear.',
-    'Typical interpretation: docked => sell/refuel/upgrade, undocked => travel or mine, at_resource_poi => mine or leave, navigation_pending => wait and verify with get_status.',
+    'Typical interpretation: docked => sell/refuel/upgrade, undocked => travel or mine, at_resource_poi => mine or leave, navigation_pending => the ship may still be traveling/jumping; prefer get_location plus get_status before treating it as blocked.',
     'Verified current state:',
     formatVerifiedGameState(gameState),
   ].filter(Boolean).join('\n\n')

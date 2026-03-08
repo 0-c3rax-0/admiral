@@ -150,6 +150,9 @@ function migrate(db: Database): void {
       provider_name TEXT,
       model_name TEXT,
       candidate_count INTEGER NOT NULL DEFAULT 0,
+      candidates_json TEXT,
+      response_text TEXT,
+      nudges_json TEXT,
       nudges_sent INTEGER NOT NULL DEFAULT 0,
       last_error TEXT,
       created_at TEXT DEFAULT (datetime('now')),
@@ -187,6 +190,19 @@ function migrate(db: Database): void {
     }
     if (!llmRequestCols.some(c => c.name === 'messages_json')) {
       db.exec("ALTER TABLE llm_requests ADD COLUMN messages_json TEXT")
+    }
+  }
+
+  const supervisorRunCols = db.query("PRAGMA table_info(supervisor_runs)").all() as Array<{ name: string }>
+  if (supervisorRunCols.length > 0) {
+    if (!supervisorRunCols.some(c => c.name === 'candidates_json')) {
+      db.exec("ALTER TABLE supervisor_runs ADD COLUMN candidates_json TEXT")
+    }
+    if (!supervisorRunCols.some(c => c.name === 'response_text')) {
+      db.exec("ALTER TABLE supervisor_runs ADD COLUMN response_text TEXT")
+    }
+    if (!supervisorRunCols.some(c => c.name === 'nudges_json')) {
+      db.exec("ALTER TABLE supervisor_runs ADD COLUMN nudges_json TEXT")
     }
   }
 
@@ -546,6 +562,15 @@ export interface StatsSnapshotRow {
   source: string | null
 }
 
+export interface StatsDelta1h {
+  latest_ts: string | null
+  anchor_ts: string | null
+  credits: number
+  ore_mined: number
+  trades_completed: number
+  systems_explored: number
+}
+
 export interface StatsEventRow {
   id: number
   profile_id: string
@@ -560,6 +585,9 @@ export interface SupervisorRunRow {
   provider_name: string | null
   model_name: string | null
   candidate_count: number
+  candidates_json: string | null
+  response_text: string | null
+  nudges_json: string | null
   nudges_sent: number
   last_error: string | null
   created_at: string
@@ -615,6 +643,22 @@ export function listStatsSnapshots(profileId: string, limit: number = 120): Stat
   ).all(profileId, limit) as StatsSnapshotRow[]
 }
 
+export function getStatsDelta1h(profileId: string): StatsDelta1h | null {
+  const snapshots = listStatsSnapshots(profileId, 240)
+  if (snapshots.length === 0) return null
+  const newest = snapshots[0]
+  const oneHourAgo = Date.now() - (60 * 60 * 1000)
+  const anchor = snapshots.find((s) => new Date(s.ts).getTime() <= oneHourAgo) || snapshots[snapshots.length - 1]
+  return {
+    latest_ts: newest?.ts ?? null,
+    anchor_ts: anchor?.ts ?? null,
+    credits: numOrZero(newest?.credits) - numOrZero(anchor?.credits),
+    ore_mined: numOrZero(newest?.ore_mined) - numOrZero(anchor?.ore_mined),
+    trades_completed: numOrZero(newest?.trades_completed) - numOrZero(anchor?.trades_completed),
+    systems_explored: numOrZero(newest?.systems_explored) - numOrZero(anchor?.systems_explored),
+  }
+}
+
 export function addStatsEvent(profileId: string, type: string, value?: string): number {
   const result = getDb().query(
     'INSERT INTO stats_events (profile_id, type, value) VALUES (?, ?, ?)'
@@ -628,43 +672,60 @@ export function listStatsEvents(profileId: string, limit: number = 100): StatsEv
   ).all(profileId, limit) as StatsEventRow[]
 }
 
+function numOrZero(v: number | null | undefined): number {
+  return typeof v === 'number' && Number.isFinite(v) ? v : 0
+}
+
 export function createSupervisorRun(input: {
   providerName?: string
   modelName?: string
   candidateCount: number
+  candidatesJson?: string | null
 }): number {
   const result = getDb().query(
     `INSERT INTO supervisor_runs (
-      status, provider_name, model_name, candidate_count, nudges_sent
-    ) VALUES ('processing', ?, ?, ?, 0)`
+      status, provider_name, model_name, candidate_count, candidates_json, nudges_sent
+    ) VALUES ('processing', ?, ?, ?, ?, 0)`
   ).run(
     input.providerName ?? null,
     input.modelName ?? null,
     input.candidateCount,
+    input.candidatesJson ?? null,
   )
   return Number(result.lastInsertRowid)
 }
 
-export function markSupervisorRunSucceeded(id: number, nudgesSent: number): void {
+export function recordSupervisorRunResponse(id: number, responseText: string): void {
+  getDb().query(
+    `UPDATE supervisor_runs
+     SET response_text = ?,
+         updated_at = datetime('now')
+     WHERE id = ?`
+  ).run(responseText, id)
+}
+
+export function markSupervisorRunSucceeded(id: number, nudgesSent: number, nudgesJson?: string | null): void {
   getDb().query(
     `UPDATE supervisor_runs
      SET status = 'succeeded',
+         nudges_json = ?,
          nudges_sent = ?,
          completed_at = datetime('now'),
          updated_at = datetime('now')
      WHERE id = ?`
-  ).run(nudgesSent, id)
+  ).run(nudgesJson ?? null, nudgesSent, id)
 }
 
-export function markSupervisorRunFailed(id: number, error: string): void {
+export function markSupervisorRunFailed(id: number, error: string, nudgesJson?: string | null): void {
   getDb().query(
     `UPDATE supervisor_runs
      SET status = 'failed',
+         nudges_json = ?,
          last_error = ?,
          completed_at = datetime('now'),
          updated_at = datetime('now')
      WHERE id = ?`
-  ).run(error, id)
+  ).run(nudgesJson ?? null, error, id)
 }
 
 export function listSupervisorRuns(limit: number = 100): SupervisorRunRow[] {

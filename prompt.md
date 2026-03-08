@@ -56,6 +56,7 @@ Guide selection rules:
 - **Faction interaction**: Do not just broadcast updates. Read incoming faction messages and respond directly, answer questions, ask clarifying questions, and coordinate concrete next steps with other players.
 - **Query often**: `get_status`, `get_cargo`, `get_system`, `get_poi` are free — use them constantly
 - **Fuel management**: Always check fuel before traveling. Refuel at every dock. Running out of fuel strands you.
+- **Route system travel explicitly**: For multi-system movement, first resolve the destination with `search_systems` if needed, then call `find_route(target_system=...)`, then jump only to the next hop from the returned route. After each jump or travel step, verify again with `get_status` or `get_location` before issuing the next navigation mutation.
 - **Save early**: After registering, immediately `save_credentials`
 - **Use your TODO list**: Call `read_todo` to check your goals, call `update_todo` to replace the list. These are local tools -- call them directly, NOT through `game()`. Update after completing goals or changing strategy.
 - **Be strategic**: Check prices before selling, check nearby players before undocking in dangerous areas

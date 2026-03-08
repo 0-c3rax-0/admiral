@@ -45,10 +45,11 @@ const TYPE_LABELS: Record<string, string> = {
 
 interface Props {
   profileId: string
+  profileName?: string
   connected?: boolean
 }
 
-export function LogPane({ profileId, connected }: Props) {
+export function LogPane({ profileId, profileName, connected }: Props) {
   const [entries, setEntries] = useState<LogEntry[]>(() => logCache.get(profileId) || [])
   const [enabledFilters, setEnabledFilters] = useState<Set<string>>(() => new Set(ALL_FILTER_KEYS))
   const [searchParams, setSearchParams] = useSearchParams()
@@ -60,9 +61,17 @@ export function LogPane({ profileId, connected }: Props) {
   }
   const [autoScroll, setAutoScroll] = useState(true)
   const [activity, setActivity] = useState('idle')
+  const [loading, setLoading] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
   const [sseKey, setSseKey] = useState(0)
+
+  useEffect(() => {
+    setEntries([])
+    setActivity('idle')
+    setLoading(true)
+    setSelectedLogId(null)
+  }, [profileId])
 
   useEffect(() => {
     setSseKey(k => k + 1)
@@ -74,9 +83,26 @@ export function LogPane({ profileId, connected }: Props) {
   }, [profileId])
 
   useEffect(() => {
+    let cancelled = false
+
     if (eventSourceRef.current) {
       eventSourceRef.current.close()
     }
+
+    ;(async () => {
+      try {
+        const resp = await fetch(`/api/profiles/${profileId}/logs`)
+        if (!resp.ok) return
+        const history = await resp.json() as LogEntry[]
+        if (!cancelled) {
+          setEntries(history)
+          setLoading(false)
+        }
+      } catch {
+        // ignore initial history fetch failures
+        if (!cancelled) setLoading(false)
+      }
+    })()
 
     const es = new EventSource(`/api/profiles/${profileId}/logs?stream=true`)
     eventSourceRef.current = es
@@ -84,6 +110,7 @@ export function LogPane({ profileId, connected }: Props) {
     es.onmessage = (event) => {
       try {
         const entry = JSON.parse(event.data) as LogEntry
+        if (entry.profile_id !== profileId) return
         setEntries(prev => {
           if (prev.some(e => e.id === entry.id)) return prev
           const next = [...prev, entry].sort((a, b) => a.id - b.id)
@@ -106,6 +133,7 @@ export function LogPane({ profileId, connected }: Props) {
     })
 
     return () => {
+      cancelled = true
       es.close()
       eventSourceRef.current = null
     }
@@ -203,6 +231,16 @@ export function LogPane({ profileId, connected }: Props) {
     <div className="flex flex-col h-full relative">
       {/* Filter checkboxes */}
       <div className="flex items-center gap-0.5 bg-card border-b border-border px-2 py-1.5">
+        <div className="flex items-center gap-2 pr-2 mr-2 border-r border-border">
+          <span className="text-[10px] uppercase tracking-[1.2px] text-muted-foreground">Log</span>
+          <span className="text-[11px] text-foreground">{profileName || profileId}</span>
+          {loading && (
+            <span className="inline-flex items-center gap-1 text-[10px] text-muted-foreground">
+              <Loader2 size={10} className="animate-spin" />
+              loading
+            </span>
+          )}
+        </div>
         <FilterCheckbox
           label="All"
           checked={allChecked}
@@ -236,7 +274,7 @@ export function LogPane({ profileId, connected }: Props) {
       <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto text-xs">
         {filtered.length === 0 ? (
           <div className="flex items-center justify-center h-full text-muted-foreground text-xs">
-            No log entries yet. Connect a profile to see activity.
+            {loading ? 'Loading log history...' : 'No log entries yet. Connect a profile to see activity.'}
           </div>
         ) : (
           <div style={{ height: virtualizer.getTotalSize(), width: '100%', position: 'relative' }}>

@@ -26,6 +26,14 @@ export interface Profile {
   enabled: boolean
   created_at: string
   updated_at: string
+  stats_delta_1h?: {
+    latest_ts: string | null
+    anchor_ts: string | null
+    credits: number
+    ore_mined: number
+    trades_completed: number
+    systems_explored: number
+  } | null
 }
 
 export interface LogEntry {

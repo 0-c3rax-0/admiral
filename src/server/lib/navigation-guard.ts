@@ -119,6 +119,12 @@ export function reconcilePendingNavigationWithStatus(profileId: string, result: 
   const data = asRecord(result.structuredContent ?? result.result)
   if (!data) return
 
+  const queue = asRecord(data.queue)
+  if (queue?.has_pending === false) {
+    clearPendingNavigation(profileId)
+    return
+  }
+
   const player = asRecord(data.player)
   const location = asRecord(data.location)
   const systemId = pickFirstString(location?.system_id, player?.current_system_id)

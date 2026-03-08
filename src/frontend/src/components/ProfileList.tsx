@@ -54,6 +54,7 @@ export function ProfileList({ profiles, activeId, statuses, playerDataMap, onSel
           const status = statuses[p.id] || { connected: false, running: false }
           const isActive = p.id === activeId
           const isManual = !p.provider || p.provider === 'manual'
+          const delta = p.stats_delta_1h
 
           const pd = playerDataMap[p.id]
           const player = pd?.player as Record<string, unknown> | undefined
@@ -102,6 +103,17 @@ export function ProfileList({ profiles, activeId, statuses, playerDataMap, onSel
                       <span className="text-muted-foreground/40">{String(player.empire)}</span>
                     </>
                   ) : null}
+                </div>
+              )}
+              {delta && (
+                <div className="mt-1 ml-4 text-[9px] leading-relaxed">
+                  <span className={delta.credits >= 0 ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-red))]'}>
+                    1h {delta.credits >= 0 ? '+' : ''}{Math.round(delta.credits).toLocaleString()}c
+                  </span>
+                  {' '}
+                  <span className={delta.ore_mined >= 0 ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-red))]'}>
+                    ore {delta.ore_mined >= 0 ? '+' : ''}{Math.round(delta.ore_mined).toLocaleString()}
+                  </span>
                 </div>
               )}
             </button>

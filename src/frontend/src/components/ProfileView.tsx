@@ -688,6 +688,16 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
             </div>
           )}
         </div>
+        {profile.stats_delta_1h && (
+          <div className="flex items-center gap-3 text-[10px] tracking-[1.2px] uppercase">
+            <span className={profile.stats_delta_1h.credits >= 0 ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-red))]'}>
+              1h credits {profile.stats_delta_1h.credits >= 0 ? '+' : ''}{Math.round(profile.stats_delta_1h.credits).toLocaleString()}
+            </span>
+            <span className={profile.stats_delta_1h.ore_mined >= 0 ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-red))]'}>
+              ore {profile.stats_delta_1h.ore_mined >= 0 ? '+' : ''}{Math.round(profile.stats_delta_1h.ore_mined).toLocaleString()}
+            </span>
+          </div>
+        )}
 
         {/* Editable connection mode */}
         <div className="relative" data-tour="connection-mode">
@@ -1026,7 +1036,7 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
       {/* Log pane + side pane */}
       <div ref={containerRef} className="flex flex-1 min-h-0">
         <div data-tour="log-pane" className="flex-1 min-w-0">
-          <LogPane profileId={profile.id} connected={status.connected} />
+          <LogPane profileId={profile.id} profileName={profile.name} connected={status.connected} />
         </div>
         {showSidePane && (
           <>

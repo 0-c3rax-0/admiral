@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile } from '../lib/db'
+import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile, getStatsDelta1h } from '../lib/db'
 import { agentManager } from '../lib/agent-manager'
 import { is429PredictionEnabled, predict429Risk } from '../lib/loop'
 
@@ -8,7 +8,12 @@ const profiles = new Hono()
 // GET /api/profiles
 profiles.get('/', (c) => {
   const all = listProfiles()
-  return c.json(all.map(p => ({ ...p, ...agentManager.getStatus(p.id), rate_risk: getRateRiskPayload(p.id) })))
+  return c.json(all.map(p => ({
+    ...p,
+    ...agentManager.getStatus(p.id),
+    stats_delta_1h: getStatsDelta1h(p.id),
+    rate_risk: getRateRiskPayload(p.id),
+  })))
 })
 
 // POST /api/profiles
@@ -49,7 +54,12 @@ profiles.get('/:id', (c) => {
   const profile = getProfile(c.req.param('id'))
   if (!profile) return c.json({ error: 'Not found' }, 404)
   const status = agentManager.getStatus(c.req.param('id'))
-  return c.json({ ...profile, ...status, rate_risk: getRateRiskPayload(c.req.param('id')) })
+  return c.json({
+    ...profile,
+    ...status,
+    stats_delta_1h: getStatsDelta1h(c.req.param('id')),
+    rate_risk: getRateRiskPayload(c.req.param('id')),
+  })
 })
 
 // PUT /api/profiles/:id

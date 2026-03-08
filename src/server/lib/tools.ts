@@ -1,9 +1,9 @@
 import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
-import type { GameConnection } from './connections/interface'
+import type { GameConnection, CommandResult } from './connections/interface'
 import { getProfile, updateProfile } from './db'
-import { fetchGameCommands } from './schema'
-import { getPendingNavigation, updatePendingNavigationFromResult } from './navigation-guard'
+import { fetchGameCommands, parseRuntimeCommandResult } from './schema'
+import { getPendingNavigation, reconcilePendingNavigationWithStatus, updatePendingNavigationFromResult } from './navigation-guard'
 
 // --- Tool Definitions ---
 
@@ -144,6 +144,7 @@ export async function executeTool(
     }
 
     updatePendingNavigationFromResult(ctx.profileId, command, commandArgs || {}, resp)
+    reconcilePendingNavigationWithStatus(ctx.profileId, resp)
 
     const result = formatToolResult(command, resp.result, resp.notifications)
     ctx.log('tool_result', truncate(result, 200), truncateResultForLog(result))
@@ -202,6 +203,9 @@ async function resolveCommandName(profileId: string, attempted: string, connecti
   if (names.length === 0) return attempted
   if (names.includes(attempted)) return attempted
 
+  const canonicalAlias = findCanonicalAlias(attempted, names)
+  if (canonicalAlias) return canonicalAlias
+
   const attemptedNorm = normalizeCommand(attempted)
   const normalizedMatches = names.filter(name => normalizeCommand(name) === attemptedNorm)
   if (normalizedMatches.length === 1) return normalizedMatches[0]
@@ -231,13 +235,29 @@ async function getAvailableCommandNames(profileId: string, connection: GameConne
     return cached.names
   }
 
-  const commands = await fetchGameCommands(`${serverUrl}/api/${apiVersion}`)
+  const commands = await fetchAvailableCommands(connection, serverUrl, apiVersion)
   const names = commands.map(c => c.name)
   commandSuggestCache.set(cacheKey, {
     expiresAt: Date.now() + COMMAND_SUGGEST_CACHE_TTL_MS,
     names,
   })
   return names
+}
+
+async function fetchAvailableCommands(connection: GameConnection, serverUrl: string, apiVersion: 'v1' | 'v2'): Promise<Array<{ name: string }>> {
+  if (connection.mode === 'websocket' || connection.mode === 'websocket_v2') {
+    try {
+      const resp: CommandResult = await connection.execute('get_commands')
+      if (!resp.error) {
+        const runtimeCommands = parseRuntimeCommandResult(resp.result)
+        if (runtimeCommands.length > 0) return runtimeCommands
+      }
+    } catch {
+      // Fall back to OpenAPI when runtime discovery is unavailable.
+    }
+  }
+
+  return fetchGameCommands(`${serverUrl}/api/${apiVersion}`)
 }
 
 function semanticCommandHints(inputRaw: string): string[] {
@@ -275,6 +295,46 @@ function rankCommandSuggestions(inputRaw: string, candidates: string[]): string[
 
 function normalizeCommand(value: string): string {
   return value.trim().toLowerCase().replace(/[\s-]+/g, '_')
+}
+
+function findCanonicalAlias(inputRaw: string, names: string[]): string | null {
+  const input = normalizeCommand(inputRaw)
+  if (!input) return null
+  if (names.includes(inputRaw)) return inputRaw
+  if (names.includes(input)) return input
+
+  const variants = new Set<string>()
+  const addVariant = (value: string) => {
+    const normalized = normalizeCommand(value)
+    if (normalized) variants.add(normalized)
+  }
+
+  addVariant(input)
+
+  const segments = input.split('_').filter(Boolean)
+  for (let i = 1; i < segments.length - 1; i++) {
+    addVariant(segments.slice(i).join('_'))
+  }
+
+  if (input.startsWith('v2_')) addVariant(input.slice(3))
+
+  let namespaceStripped = input
+  while (namespaceStripped.startsWith('spacemolt_')) {
+    namespaceStripped = namespaceStripped.slice('spacemolt_'.length)
+    addVariant(namespaceStripped)
+  }
+
+  for (const variant of variants) {
+    if (names.includes(variant)) return variant
+  }
+
+  const normalizedNameMap = new Map(names.map((name) => [normalizeCommand(name), name]))
+  for (const variant of variants) {
+    const mapped = normalizedNameMap.get(variant)
+    if (mapped) return mapped
+  }
+
+  return null
 }
 
 function sanitizeCommandName(value: string): string {
