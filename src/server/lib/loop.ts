@@ -1,6 +1,6 @@
 import { complete } from '@mariozechner/pi-ai'
 import type { Model, Context, AssistantMessage, ToolCall, Message } from '@mariozechner/pi-ai'
-import type { GameConnection } from './connections/interface'
+import type { GameConnection, CommandResult } from './connections/interface'
 import type { LogFn } from './tools'
 import { detectImmediateRecoveryHint, executeTool } from './tools'
 import {
@@ -52,8 +52,10 @@ export interface LoopOptions {
   advisorEnabled?: boolean
   advisorModel?: Model<any>
   advisorApiKey?: string
+  gameState?: Record<string, unknown> | null
   onActivity?: (activity: string) => void
   onAdaptiveContext?: (info: { mode: 'normal' | 'soft' | 'high' | 'critical'; effectiveRatio: number; rssBytes: number }) => void
+  onGameCommandResult?: (command: string, args: Record<string, unknown> | undefined, result: CommandResult) => void
 }
 
 export interface CompactionState {
@@ -208,7 +210,14 @@ export async function runAgentTurn(
 
     if (reasoning) log('llm_thought', reasoning)
 
-    const toolCtx = { connection, profileId, log, todo: todo.value }
+    const toolCtx = {
+      connection,
+      profileId,
+      log,
+      todo: todo.value,
+      gameState: options?.gameState ?? null,
+      onGameCommandResult: options?.onGameCommandResult,
+    }
     const roundToolFingerprints: string[] = []
     const roundResultFingerprints: string[] = []
     let roundErrorCount = 0
@@ -641,7 +650,21 @@ async function summarizeViaLLM(
       .join('')
 
     const normalizedText = text.trim() || extractFallbackSummaryText(resp.content)
-    if (!normalizedText) throw new Error('Empty summary')
+    if (!normalizedText) {
+      const heuristic = buildHeuristicSummary(oldMessages, previousSummary)
+      log?.(
+        'system',
+        'Compaction summarizer returned empty output; reusing heuristic summary',
+        JSON.stringify({
+          phase: 'compaction_empty_summary',
+          model: resp.model,
+          provider: resp.provider,
+          previousSummaryAvailable: Boolean(previousSummary?.trim()),
+          heuristicLength: heuristic.length,
+        }, null, 2),
+      )
+      return heuristic
+    }
     log?.(
       'llm_call',
       `compaction/${resp.model} | ${resp.usage.input}/${resp.usage.output} tokens | ${resp.stopReason}`,
@@ -692,6 +715,30 @@ function extractFallbackSummaryText(content: AssistantMessage['content']): strin
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
+}
+
+function buildHeuristicSummary(oldMessages: Message[], previousSummary?: string): string {
+  if (previousSummary?.trim()) return previousSummary.trim()
+
+  const lines: string[] = []
+  const recent = oldMessages.slice(-12)
+  for (const msg of recent) {
+    if (msg.role === 'user' && typeof msg.content === 'string' && msg.content.trim()) {
+      const compact = truncateForLog(msg.content.trim().replace(/\s+/g, ' '), 220)
+      lines.push(`Context: ${compact}`)
+      continue
+    }
+    if (msg.role === 'toolResult') {
+      const text = Array.isArray(msg.content)
+        ? msg.content.map((block: any) => block.text || '').join(' ').trim()
+        : ''
+      if (!text) continue
+      lines.push(`${msg.toolName}: ${truncateForLog(text.replace(/\s+/g, ' '), 220)}`)
+    }
+  }
+
+  if (lines.length === 0) return 'Recent session context unavailable; resume from fresh verified state.'
+  return lines.slice(-6).join('\n')
 }
 
 function extractCompactionErrorDiagnostics(err: unknown): Record<string, unknown> | null {

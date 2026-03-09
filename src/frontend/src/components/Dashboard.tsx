@@ -1,12 +1,13 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { lazy, Suspense, useState, useEffect, useCallback, useRef } from 'react'
 import { Settings, Sun, Moon, Github, AlertTriangle, CircleHelp, BarChart3, MessageSquare, X } from 'lucide-react'
 import { useSearchParams } from 'react-router'
 import type { Profile, Provider } from '@/types'
 import { ProfileList } from './ProfileList'
 import { ProfileView } from './ProfileView'
-import { NewProfileWizard } from './NewProfileWizard'
-import { AdmiralTour } from './AdmiralTour'
-import { GalaxyMapModal } from './GalaxyMapModal'
+const NewProfileWizard = lazy(() => import('./NewProfileWizard').then((mod) => ({ default: mod.NewProfileWizard })))
+const AdmiralTour = lazy(() => import('./AdmiralTour').then((mod) => ({ default: mod.AdmiralTour })))
+const GalaxyMapModal = lazy(() => import('./GalaxyMapModal').then((mod) => ({ default: mod.GalaxyMapModal })))
+const EconomyOverviewModal = lazy(() => import('./EconomyOverviewModal').then((mod) => ({ default: mod.EconomyOverviewModal })))
 
 interface Props {
   profiles: Profile[]
@@ -73,6 +74,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
   const [showTour, setShowTour] = useState(false)
   const [showStats, setShowStats] = useState(false)
   const [showMap, setShowMap] = useState(false)
+  const [showMarkets, setShowMarkets] = useState(false)
   const [connectingAll, setConnectingAll] = useState(false)
   const [nudgingAll, setNudgingAll] = useState(false)
   const [statusAllLoading, setStatusAllLoading] = useState(false)
@@ -527,6 +529,14 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
             Stats
           </button>
           <button
+            onClick={() => setShowMarkets(true)}
+            disabled={profiles.length === 0}
+            className="flex items-center gap-1.5 text-xs text-muted-foreground uppercase tracking-wider px-2.5 py-1.5 hover:text-foreground transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            title="Trades, items, and profitability"
+          >
+            Markets
+          </button>
+          <button
             onClick={handleOpenMap}
             disabled={statusAllLoading}
             className="flex items-center gap-1.5 text-xs text-muted-foreground uppercase tracking-wider px-2.5 py-1.5 hover:text-foreground transition-colors"
@@ -692,17 +702,19 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
 
       {/* Wizard modal */}
       {showWizard && (
-        <NewProfileWizard
-          providers={providers}
-          registrationCode={registrationCode}
-          gameserverUrl={gameserverUrl}
-          onClose={() => setShowWizard(false)}
-          onCreate={handleWizardCreate}
-          onShowSettings={() => {
-            setShowWizard(false)
-            onShowProviders()
-          }}
-        />
+        <Suspense fallback={<ModalLoading label="Loading wizard..." />}>
+          <NewProfileWizard
+            providers={providers}
+            registrationCode={registrationCode}
+            gameserverUrl={gameserverUrl}
+            onClose={() => setShowWizard(false)}
+            onCreate={handleWizardCreate}
+            onShowSettings={() => {
+              setShowWizard(false)
+              onShowProviders()
+            }}
+          />
+        </Suspense>
       )}
 
       {showStats && (
@@ -863,23 +875,48 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
         </div>
       )}
 
-      <GalaxyMapModal
-        open={showMap}
-        onClose={() => setShowMap(false)}
-        gameserverUrl={gameserverUrl}
-        profiles={profiles}
-        playerDataMap={playerDataMap}
-      />
+      {showMap && (
+        <Suspense fallback={<ModalLoading label="Loading map..." />}>
+          <GalaxyMapModal
+            open={showMap}
+            onClose={() => setShowMap(false)}
+            gameserverUrl={gameserverUrl}
+            profiles={profiles}
+            playerDataMap={playerDataMap}
+          />
+        </Suspense>
+      )}
+
+      {showMarkets && (
+        <Suspense fallback={<ModalLoading label="Loading economy..." />}>
+          <EconomyOverviewModal
+            open={showMarkets}
+            onClose={() => setShowMarkets(false)}
+            profiles={profiles}
+            activeProfileId={activeProfile?.id || null}
+          />
+        </Suspense>
+      )}
 
       {/* Tour */}
       {showTour && activeProfile && (
-        <AdmiralTour
-          onComplete={() => {
-            setShowTour(false)
-            try { localStorage.setItem('admiral-tour-seen', '1') } catch {}
-          }}
-        />
+        <Suspense fallback={<ModalLoading label="Loading tour..." />}>
+          <AdmiralTour
+            onComplete={() => {
+              setShowTour(false)
+              try { localStorage.setItem('admiral-tour-seen', '1') } catch {}
+            }}
+          />
+        </Suspense>
       )}
+    </div>
+  )
+}
+
+function ModalLoading({ label }: { label: string }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+      <div className="border border-border bg-card px-4 py-3 text-xs text-muted-foreground">{label}</div>
     </div>
   )
 }

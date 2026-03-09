@@ -1,8 +1,11 @@
 import { Hono } from 'hono'
 import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile, getStatsDelta1h, upsertProfileSkills } from '../lib/db'
+import { overwriteProfileAgentsFromDirective } from '../lib/agent'
 import { agentManager } from '../lib/agent-manager'
 import type { CommandResult } from '../lib/connections/interface'
 import { is429PredictionEnabled, predict429Risk } from '../lib/loop'
+import { addMarketSnapshot, addTradeEvent } from '../lib/economy-db'
+import { getAgentRole, setAgentRole } from '../lib/agent-learning'
 
 const profiles = new Hono()
 
@@ -11,6 +14,7 @@ profiles.get('/', (c) => {
   const all = listProfiles()
   return c.json(all.map(p => ({
     ...p,
+    agent_role: getAgentRole(p.id),
     ...agentManager.getStatus(p.id),
     stats_delta_1h: getStatsDelta1h(p.id),
     rate_risk: getRateRiskPayload(p.id),
@@ -57,6 +61,7 @@ profiles.get('/:id', (c) => {
   const status = agentManager.getStatus(c.req.param('id'))
   return c.json({
     ...profile,
+    agent_role: getAgentRole(c.req.param('id')),
     ...status,
     stats_delta_1h: getStatsDelta1h(c.req.param('id')),
     rate_risk: getRateRiskPayload(c.req.param('id')),
@@ -67,9 +72,17 @@ profiles.get('/:id', (c) => {
 profiles.put('/:id', async (c) => {
   const id = c.req.param('id')
   const body = await c.req.json()
+  if (body.agent_role !== undefined) {
+    setAgentRole(id, String(body.agent_role))
+  }
   const profile = updateProfile(id, body)
   if (!profile) return c.json({ error: 'Not found' }, 404)
-  if (body.directive !== undefined) agentManager.restartTurn(id)
+  if (body.directive !== undefined) {
+    overwriteProfileAgentsFromDirective(profile)
+    const tsUtc = new Date().toISOString()
+    console.log(`[profiles] Directive updated for "${profile.name}" (${id}) at ${tsUtc}; length=${(profile.directive || '').length}`)
+    agentManager.restartTurn(id)
+  }
   return c.json(profile)
 })
 
@@ -116,6 +129,7 @@ profiles.post('/:id/command', async (c) => {
   if (!agent || !agent.isConnected) return c.json({ error: 'Agent not connected' }, 400)
   try {
     const result = await agent.executeCommand(command, args)
+    ingestEconomyData(id, command, args, result)
     if (command === 'get_skills') {
       const skills = extractSkillsFromCommandResult(result)
       if (skills) upsertProfileSkills(id, skills)
@@ -243,4 +257,137 @@ function extractSkillsFromCommandResult(result: CommandResult): Record<string, n
     if (Object.keys(skills).length > 0) return skills
   }
   return null
+}
+
+function ingestEconomyData(profileId: string, command: string, args: Record<string, unknown> | undefined, result: CommandResult): void {
+  try {
+    if (command === 'view_market') {
+      const category = typeof args?.category === 'string' && args.category.trim() ? args.category.trim().toLowerCase() : 'unknown'
+      const data = result.structuredContent ?? result.result ?? result
+      const entries = extractMarketEntries(data)
+      if (entries.length > 0) {
+        addMarketSnapshot({
+          profile_id: profileId,
+          category,
+          system_name: extractLocationName(data, 'system'),
+          poi_name: extractLocationName(data, 'poi'),
+          source: command,
+          entries,
+        })
+      }
+      return
+    }
+
+    if (command === 'buy' || command === 'sell') {
+      const trade = extractTradeEvent(profileId, command, result)
+      if (trade) addTradeEvent(trade)
+    }
+  } catch {
+    // Economy ingest is best-effort and must not break gameplay commands.
+  }
+}
+
+function extractTradeEvent(profileId: string, command: string, result: CommandResult) {
+  const data = result.structuredContent ?? result.result ?? result
+  if (!data || typeof data !== 'object') return null
+  const record = data as Record<string, unknown>
+  const quantity = toFiniteNumber(
+    record.quantity_sold ?? record.quantity_bought ?? record.quantity ?? record.filled_quantity ?? record.amount
+  )
+  if (quantity === null || quantity <= 0) return null
+
+  const itemName = String(
+    record.item_name ?? record.name ?? record.item_id ?? ((record.item as Record<string, unknown> | undefined)?.name) ?? ''
+  ).trim()
+  if (!itemName) return null
+
+  const unitPrice = toFiniteNumber(record.price_each ?? record.unit_price ?? record.price ?? record.executed_price)
+  const totalPrice = toFiniteNumber(record.total_earned ?? record.total_spent ?? record.total_price)
+
+  return {
+    profile_id: profileId,
+    trade_type: command as 'buy' | 'sell',
+    item_id: stringOrNull(record.item_id),
+    item_name: itemName,
+    quantity,
+    unit_price: unitPrice,
+    total_price: totalPrice ?? (unitPrice !== null ? unitPrice * quantity : null),
+    system_name: extractLocationName(data, 'system'),
+    poi_name: extractLocationName(data, 'poi'),
+    source_command: command,
+    raw_json: JSON.stringify(data),
+  }
+}
+
+function extractMarketEntries(data: unknown): Array<{
+  item_id: string | null
+  item_name: string
+  best_bid: number | null
+  best_ask: number | null
+  bid_volume: number | null
+  ask_volume: number | null
+}> {
+  if (!data || typeof data !== 'object') return []
+  const record = data as Record<string, unknown>
+  const candidates = [
+    record.items,
+    record.orders,
+    record.market,
+    record.result && typeof record.result === 'object' ? (record.result as Record<string, unknown>).items : null,
+    record.result && typeof record.result === 'object' ? (record.result as Record<string, unknown>).orders : null,
+  ]
+
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) continue
+    const entries = candidate
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null
+        const row = item as Record<string, unknown>
+        const itemName = String(row.name ?? row.item_name ?? row.item_id ?? '').trim()
+        if (!itemName) return null
+        return {
+          item_id: stringOrNull(row.item_id),
+          item_name: itemName,
+          best_bid: toFiniteNumber(row.best_bid ?? row.bid_price ?? row.buy_price ?? row.highest_buy ?? row.bid),
+          best_ask: toFiniteNumber(row.best_ask ?? row.ask_price ?? row.sell_price ?? row.lowest_sell ?? row.ask),
+          bid_volume: toFiniteNumber(row.bid_volume ?? row.buy_volume ?? row.demand ?? row.quantity_buy),
+          ask_volume: toFiniteNumber(row.ask_volume ?? row.sell_volume ?? row.supply ?? row.quantity_sell ?? row.quantity),
+        }
+      })
+      .filter((entry): entry is {
+        item_id: string | null
+        item_name: string
+        best_bid: number | null
+        best_ask: number | null
+        bid_volume: number | null
+        ask_volume: number | null
+      } => Boolean(entry))
+    if (entries.length > 0) return entries
+  }
+
+  return []
+}
+
+function extractLocationName(data: unknown, type: 'system' | 'poi'): string | null {
+  if (!data || typeof data !== 'object') return null
+  const record = data as Record<string, unknown>
+  const player = record.player && typeof record.player === 'object' ? record.player as Record<string, unknown> : null
+  const location = record.location && typeof record.location === 'object' ? record.location as Record<string, unknown> : null
+  if (type === 'system') {
+    return stringOrNull(player?.current_system) ?? stringOrNull(location?.system_name)
+  }
+  return stringOrNull(player?.current_poi) ?? stringOrNull(location?.poi_name)
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null
 }

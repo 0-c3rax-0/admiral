@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button'
 
 interface Props {
   onSend: (command: string, args?: Record<string, unknown>) => void
+  onOpenMarkets: () => void
   disabled: boolean
   showSidePane: boolean
   onToggleSidePane: () => void
@@ -21,7 +22,7 @@ const QUICK_COMMANDS = [
   { label: 'Nearby', command: 'get_nearby' },
 ]
 
-export function QuickCommands({ onSend, disabled, showSidePane, onToggleSidePane, onNudge, running }: Props) {
+export function QuickCommands({ onSend, onOpenMarkets, disabled, showSidePane, onToggleSidePane, onNudge, running }: Props) {
   return (
     <div data-tour="quick-commands" className="flex items-center gap-1.5 px-3.5 py-2.5 bg-card border-b border-border overflow-x-auto">
       <span className="text-[11px] text-muted-foreground uppercase tracking-[1.5px] shrink-0 mr-1">Quick</span>
@@ -30,11 +31,11 @@ export function QuickCommands({ onSend, disabled, showSidePane, onToggleSidePane
           key={q.command}
           variant="outline"
           size="sm"
-          onClick={() => onSend(q.command)}
+          onClick={() => q.command === 'analyze_market' ? onOpenMarkets() : onSend(q.command)}
           disabled={disabled}
           className="text-[10px] text-muted-foreground hover:text-primary shrink-0 px-3"
         >
-          {q.label}
+          {q.command === 'analyze_market' ? 'Markets' : q.label}
         </Button>
       ))}
       <div className="w-px h-5 bg-border/50 shrink-0 mx-1" />

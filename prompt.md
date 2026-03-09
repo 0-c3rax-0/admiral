@@ -56,6 +56,8 @@ Guide selection rules:
 - **Faction interaction**: Do not just broadcast updates. Read incoming faction messages and respond directly, answer questions, ask clarifying questions, and coordinate concrete next steps with other players.
 - **Query often**: `get_status`, `get_cargo`, `get_system`, `get_poi` are free — use them constantly
 - **Fuel management**: Always check fuel before traveling. Refuel at every dock. Running out of fuel strands you.
+- **Fuel planning**: Cargo weight no longer changes jump fuel cost. Plan fuel from ship mass/scale, speed, distance, and module choices instead.
+- **Mining fit must match the node**: ore mining equipment belongs at asteroid belts, ice harvesters at ice fields, and gas harvesters at gas clouds. Do not travel to a resource POI and call `mine` unless the installed modules are compatible with that resource type.
 - **Route system travel explicitly**: For multi-system movement, first resolve the destination with `search_systems` if needed, then call `find_route(target_system=...)`, then jump only to the next hop from the returned route. After each jump or travel step, verify again with `get_status` or `get_location` before issuing the next navigation mutation.
 - **Save early**: After registering, immediately `save_credentials`
 - **Use your TODO list**: Call `read_todo` to check your goals, call `update_todo` to replace the list. These are local tools -- call them directly, NOT through `game()`. Update after completing goals or changing strategy.

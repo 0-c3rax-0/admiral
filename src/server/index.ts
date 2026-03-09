@@ -12,7 +12,9 @@ import preferences from './routes/preferences'
 import stats from './routes/stats'
 import map from './routes/map'
 import oauth from './routes/oauth'
+import economy from './routes/economy'
 import { addStatsEvent, addStatsSnapshot, getPreference, listProfiles, pruneOldRows } from './lib/db'
+import { pruneEconomyRows } from './lib/economy-db'
 import { agentManager } from './lib/agent-manager'
 import { fleetSupervisor } from './lib/supervisor'
 
@@ -32,6 +34,7 @@ app.route('/api/preferences', preferences)
 app.route('/api/stats', stats)
 app.route('/api/map', map)
 app.route('/api/oauth', oauth)
+app.route('/api/economy', economy)
 
 // Health check
 app.get('/api/health', (c) => c.json({ ok: true }))
@@ -178,6 +181,7 @@ function scheduleRetentionPrune(): void {
   const run = () => {
     try {
       pruneOldRows()
+      pruneEconomyRows()
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       console.error(`[retention] prune failed: ${msg}`)

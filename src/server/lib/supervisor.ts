@@ -409,6 +409,8 @@ function buildRecentSignals(summaries: string[]): string[] {
     if (lower.includes('error: [no_base]')) add('no_base error observed recently')
     if (lower.includes('error: [already_in_system]')) add('already_in_system error observed recently')
     if (lower.includes('error: [not_enough_fuel]')) add('not_enough_fuel error observed recently')
+    if (lower.includes('error: [no_resources]') && lower.includes('nothing to mine here')) add('mine location mismatch observed recently')
+    if (lower.includes('error: [no_equipment]') && lower.includes('ice harvester')) add('mine equipment mismatch observed recently')
     if (lower.includes('error: [invalid_payload]') && lower.includes('quantity must be greater than 0')) add('sell quantity zero error observed recently')
     if (lower.includes('[action_result]')) add('recent action_result observed')
     if (lower.includes('"action":"jumped"')) add('recent jumped confirmation observed')
@@ -452,6 +454,9 @@ function detectReplanningLoop(
   }
 
   const ship = status.gameState?.ship
+  const modules = Array.isArray((status.gameState as Record<string, unknown> | undefined)?.modules)
+    ? ((status.gameState as Record<string, unknown>).modules as unknown[])
+    : []
   const cargo = parseUsagePair(ship?.cargo)
   const cargoFull = !!cargo && cargo.capacity > 0 && cargo.used >= cargo.capacity
   const poi = typeof status.gameState?.poi === 'string' ? status.gameState.poi.trim() : ''
@@ -530,6 +535,9 @@ function buildAdviceSignals(
 ): AdviceSignal[] {
   const signals: AdviceSignal[] = []
   const ship = status.gameState?.ship
+  const modules = Array.isArray((status.gameState as Record<string, unknown> | undefined)?.modules)
+    ? (((status.gameState as Record<string, unknown> | undefined)?.modules) as unknown[])
+    : []
   const cargo = parseUsagePair(ship?.cargo)
   const credits = toFiniteNumber(status.gameState?.credits)
   const poi = typeof status.gameState?.poi === 'string' ? status.gameState.poi.trim() : ''
@@ -659,6 +667,25 @@ function buildAdviceSignals(
       recommendedChecks: ['get_cargo'],
       recommendedActions: ['sell'],
       whyNow: 'the sell plan is malformed, not just temporarily blocked',
+    })
+  }
+
+  if (recentSignals.includes('mine equipment mismatch observed recently')) {
+    signals.push({
+      kind: 'mine_with_current_fit',
+      priority: 79,
+      summary: 'The current ship fit is better used at a non-empty belt compatible with the installed mining gear than at an ice node requiring a refit.',
+      evidence: [
+        'recent mine equipment mismatch observed',
+        ...(poi ? [`poi=${poi}`] : []),
+        ...(system ? [`system=${system}`] : []),
+        ...(modules.length > 0
+          ? [`modules=${modules.slice(0, 3).map((entry: unknown) => String((entry as Record<string, unknown>).name ?? '?')).join(', ')}`]
+          : []),
+      ],
+      recommendedChecks: ['get_status', 'get_poi'],
+      recommendedActions: ['travel'],
+      whyNow: 'the ice node mismatches the current fit, but a one-off ice attempt does not justify an immediate or long-term switch to ice equipment',
     })
   }
 

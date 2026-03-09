@@ -11,6 +11,7 @@ import { CommandPanel } from './CommandPanel'
 import { QuickCommands } from './QuickCommands'
 import { LogPane } from './LogPane'
 import { SidePane } from './SidePane'
+import { MarketBrowserModal } from './MarketBrowserModal'
 
 /**
  * Parse the rendered text from MCP v2 get_status into structured player data.
@@ -85,7 +86,16 @@ const CONNECTION_MODES: { value: string; label: string }[] = [
   { value: 'mcp_v2', label: 'MCP v2' },
 ]
 
-type EditingField = 'name' | 'mode' | 'provider' | 'credentials' | null
+type EditingField = 'name' | 'role' | 'mode' | 'provider' | 'credentials' | null
+
+const AGENT_ROLE_OPTIONS = [
+  { value: 'miner', label: 'Miner' },
+  { value: 'trader', label: 'Trader' },
+  { value: 'scout', label: 'Scout' },
+  { value: 'pirate', label: 'Pirate' },
+  { value: 'industrialist', label: 'Industrialist' },
+  { value: 'generalist', label: 'Generalist' },
+]
 
 interface Props {
   profile: Profile
@@ -120,7 +130,10 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
   const [memoryBusy, setMemoryBusy] = useState(false)
   const [showDirectiveModal, setShowDirectiveModal] = useState(false)
   const [directiveValue, setDirectiveValue] = useState(profile.directive || '')
+  const [directiveError, setDirectiveError] = useState<string | null>(null)
+  const [directiveSaving, setDirectiveSaving] = useState(false)
   const [showNudgeModal, setShowNudgeModal] = useState(false)
+  const [showMarketModal, setShowMarketModal] = useState(false)
   const [nudgeValue, setNudgeValue] = useState('')
   const [nudgeHistoryIndex, setNudgeHistoryIndex] = useState(-1)
   const [nudgePending, setNudgePending] = useState('')
@@ -132,6 +145,7 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
   // Inline edit state
   const [editing, setEditing] = useState<EditingField>(null)
   const [editName, setEditName] = useState('')
+  const [editRole, setEditRole] = useState(profile.agent_role || 'miner')
   const [editProvider, setEditProvider] = useState('')
   const [editModel, setEditModel] = useState('')
   const [editFailoverProvider, setEditFailoverProvider] = useState('')
@@ -204,6 +218,7 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
       }
     } catch { /* ignore */ }
     setDirectiveValue(profile.directive || '')
+    setDirectiveError(null)
   }, [profile.id, profile.directive])
 
   function clearDirectiveDraft() {
@@ -215,19 +230,34 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
   }
 
   async function saveDirective() {
-    setShowDirectiveModal(false)
-    clearDirectiveDraft()
     const trimmed = directiveValue.trim()
-    if (trimmed === (profile.directive || '')) return
+    if (trimmed === (profile.directive || '')) {
+      clearDirectiveDraft()
+      setDirectiveError(null)
+      setShowDirectiveModal(false)
+      return
+    }
+    setDirectiveSaving(true)
+    setDirectiveError(null)
     try {
-      await fetch(`/api/profiles/${profile.id}`, {
+      const resp = await fetch(`/api/profiles/${profile.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ directive: trimmed }),
       })
+      const data = await resp.json().catch(() => ({}))
+      if (!resp.ok) {
+        const message = typeof data?.error === 'string' ? data.error : `Failed to save directive (${resp.status})`
+        throw new Error(message)
+      }
+      setShowDirectiveModal(false)
+      clearDirectiveDraft()
       onRefresh()
-    } catch {
-      setDirectiveValue(profile.directive || '')
+    } catch (err) {
+      setDirectiveError(err instanceof Error ? err.message : String(err))
+      setShowDirectiveModal(true)
+    } finally {
+      setDirectiveSaving(false)
     }
   }
 
@@ -355,6 +385,12 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
     }
     setEditing(null)
     await saveProfileField({ name: trimmed })
+  }
+
+  async function handleSaveRole() {
+    const nextRole = editRole || 'miner'
+    setEditing(null)
+    await saveProfileField({ agent_role: nextRole })
   }
 
   async function handleSelectMode(mode: string) {
@@ -621,6 +657,36 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
                 </Button>
                 <Button variant="ghost" size="icon" onClick={() => setEditing(null)} className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground">
                   <X size={13} />
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="relative">
+          <span
+            className="text-[10px] text-[hsl(var(--smui-green))] uppercase tracking-[1.5px] px-2 py-0.5 border border-[hsl(var(--smui-green)/0.35)] cursor-pointer hover:bg-[hsl(var(--smui-green)/0.08)] transition-colors"
+            onClick={() => {
+              setEditing('role')
+              setEditRole(profile.agent_role || 'miner')
+            }}
+          >
+            role:{profile.agent_role || 'miner'}
+          </span>
+          {editing === 'role' && (
+            <div ref={popoverRef} className="absolute z-50 top-full left-0 mt-1.5 bg-card border border-border shadow-lg p-2.5 min-w-[180px]">
+              <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1.5">Agent Role</span>
+              <Select value={editRole} onChange={e => setEditRole(e.target.value)} className="h-7 text-xs">
+                {AGENT_ROLE_OPTIONS.map(option => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </Select>
+              <div className="flex justify-end gap-1.5 pt-2">
+                <Button variant="ghost" size="sm" onClick={() => setEditing(null)} className="h-6 text-[10px] px-2">
+                  Cancel
+                </Button>
+                <Button size="sm" onClick={handleSaveRole} className="h-6 text-[10px] px-2 bg-primary text-primary-foreground hover:bg-primary/90">
+                  Save
                 </Button>
               </div>
             </div>
@@ -1030,6 +1096,7 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
       {/* Quick commands + side pane toggle */}
       <QuickCommands
         onSend={handleSendCommand}
+        onOpenMarkets={() => setShowMarketModal(true)}
         disabled={!status.connected}
         showSidePane={showSidePane}
         onToggleSidePane={() => setShowSidePane(v => { const next = !v; try { localStorage.setItem('admiral-sidepane-open', String(next)) } catch {}; return next })}
@@ -1059,13 +1126,20 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
       {/* Manual command input */}
       <CommandPanel profileId={profile.id} onSend={handleSendCommand} disabled={!status.connected} commandInputRef={commandInputRef} serverUrl={profile.server_url} connectionMode={profile.connection_mode} />
 
+      <MarketBrowserModal
+        open={showMarketModal}
+        connected={status.connected}
+        profileId={profile.id}
+        onClose={() => setShowMarketModal(false)}
+      />
+
       {/* Directive modal */}
       {showDirectiveModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80" onClick={() => { clearDirectiveDraft(); setDirectiveValue(profile.directive || ''); setShowDirectiveModal(false) }}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80" onClick={() => { clearDirectiveDraft(); setDirectiveValue(profile.directive || ''); setDirectiveError(null); setShowDirectiveModal(false) }}>
           <div className="bg-card border border-border shadow-lg w-full max-w-lg mx-4" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-4 py-3 border-b border-border">
               <span className="font-jetbrains text-xs font-semibold tracking-[1.5px] text-primary uppercase">Agent Directive</span>
-              <button onClick={() => { clearDirectiveDraft(); setDirectiveValue(profile.directive || ''); setShowDirectiveModal(false) }} className="text-muted-foreground hover:text-foreground transition-colors">
+              <button onClick={() => { clearDirectiveDraft(); setDirectiveValue(profile.directive || ''); setDirectiveError(null); setShowDirectiveModal(false) }} className="text-muted-foreground hover:text-foreground transition-colors">
                 <X size={14} />
               </button>
             </div>
@@ -1073,6 +1147,11 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
               <p className="text-[11px] text-muted-foreground">
                 Tell your AI agent what to do. This directive is sent every turn to guide autonomous behavior.
               </p>
+              {directiveError && (
+                <div className="border border-[hsl(var(--smui-red))]/40 bg-[hsl(var(--smui-red))]/10 px-3 py-2 text-[11px] text-[hsl(var(--smui-red))]">
+                  {directiveError}
+                </div>
+              )}
               <textarea
                 ref={el => {
                   if (el) {
@@ -1097,11 +1176,11 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
                 className="w-full bg-background border border-border px-3 py-2 text-xs text-foreground outline-none focus:border-primary/40 resize-y min-h-[80px] max-h-[70vh] placeholder:text-muted-foreground/40 overflow-auto"
               />
               <div className="flex justify-end gap-2">
-                <Button variant="ghost" size="sm" onClick={() => { clearDirectiveDraft(); setDirectiveValue(profile.directive || ''); setShowDirectiveModal(false) }} className="h-7 text-[11px] px-3">
+                <Button variant="ghost" size="sm" onClick={() => { clearDirectiveDraft(); setDirectiveValue(profile.directive || ''); setDirectiveError(null); setShowDirectiveModal(false) }} className="h-7 text-[11px] px-3">
                   Cancel
                 </Button>
-                <Button size="sm" onClick={saveDirective} className="h-7 text-[11px] px-3 bg-primary text-primary-foreground hover:bg-primary/90">
-                  Save
+                <Button size="sm" onClick={saveDirective} disabled={directiveSaving} className="h-7 text-[11px] px-3 bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-60">
+                  {directiveSaving ? 'Saving...' : 'Save'}
                 </Button>
               </div>
             </div>

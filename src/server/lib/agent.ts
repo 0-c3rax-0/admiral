@@ -11,7 +11,7 @@ import { McpV2Connection } from './connections/mcp_v2'
 import { resolveModel } from './model'
 import { fetchGameCommands, formatCommandList, parseRuntimeCommandResult } from './schema'
 import { allTools } from './tools'
-import { runAgentTurn, type CompactionState } from './loop'
+import { is429PredictionEnabled, predict429Risk, runAgentTurn, type CompactionState } from './loop'
 import { addLogEntry, getLatestPendingLlmRequest, getProfile, updateProfile, getPreference } from './db'
 import { EventEmitter } from 'events'
 import fs from 'fs'
@@ -19,12 +19,16 @@ import path from 'path'
 import { reconcilePendingNavigationWithStatus, updatePendingNavigationFromNotification } from './navigation-guard'
 import { getPendingNavigation } from './navigation-guard'
 import { createGameConnection } from './game-connection'
+import { buildLearningContext, observeGameState, recordCommandOutcome } from './agent-learning'
+import { addTradeEvent } from './economy-db'
+import { isDockedPoi, isResourcePoi } from './poi'
 
-const TURN_INTERVAL = 2000
+const TURN_INTERVAL = 5000
 const PROMPT_PATH = path.join(process.cwd(), 'prompt.md')
 const MEMORY_DIR = path.join(process.cwd(), 'data', 'memory')
 const AGENTS_DIR = path.join(process.cwd(), 'data', 'agents')
 const CONTINUE_NUDGE_INTERVAL = 6
+const LEARNING_CONTEXT_REFRESH_INTERVAL_MS = 5 * 60_000
 const MARKET_TELEMETRY_INTERVAL = 3
 const SHIP_TELEMETRY_INTERVAL = 8
 const MUTATION_STALL_NUDGE_THRESHOLD = 4
@@ -66,6 +70,10 @@ export class Agent {
   private loopsSinceActionResult = 0
   private localMutationStuckReported = false
   private telemetryCycle = 0
+  private learningContext: string = ''
+  private learningContextDirty = false
+  private lastLearningContextInjectedAt = 0
+  private lastRateRiskLevel: 'LOW' | 'MEDIUM' | 'HIGH' | null = null
   constructor(profileId: string) {
     this.profileId = profileId
   }
@@ -140,7 +148,25 @@ export class Agent {
     if (data && typeof data === 'object' && ('player' in data || 'ship' in data || 'location' in data)) {
       this._gameState = data as Record<string, unknown>
       reconcilePendingNavigationWithStatus(this.profileId, result)
+      observeGameState(this.profileId, this._gameState)
     }
+  }
+
+  private refreshLearningContext(): boolean {
+    const next = buildLearningContext(this.profileId)
+    if (!next || next === this.learningContext) return false
+    this.learningContext = next
+    this.learningContextDirty = true
+    return true
+  }
+
+  private consumeLearningContextUpdate(force = false): string | null {
+    if (!this.learningContextDirty || !this.learningContext) return null
+    const now = Date.now()
+    if (!force && now - this.lastLearningContextInjectedAt < LEARNING_CONTEXT_REFRESH_INTERVAL_MS) return null
+    this.learningContextDirty = false
+    this.lastLearningContextInjectedAt = now
+    return this.learningContext
   }
 
   private async executeSilentQuery(command: string, args?: Record<string, unknown>): Promise<CommandResult | null> {
@@ -163,9 +189,7 @@ export class Agent {
   private isLikelyDocked(): boolean {
     const location = (this._gameState?.location as Record<string, unknown> | undefined) || {}
     const player = (this._gameState?.player as Record<string, unknown> | undefined) || {}
-    const poiType = String(location.poi_type || player.current_poi_type || '').toLowerCase()
-    const poiName = String(location.poi_name || player.current_poi || '').toLowerCase()
-    return poiType.includes('station') || poiType.includes('base') || poiType.includes('shipyard') || poiName.includes('station') || poiName.includes('base')
+    return isDockedPoi(location.poi_type || player.current_poi_type, location.poi_name || player.current_poi)
   }
 
   private async collectFreeTelemetry(): Promise<string | null> {
@@ -323,6 +347,7 @@ export class Agent {
     // Set up notification handler
     this.connection.onNotification((n) => {
       updatePendingNavigationFromNotification(this.profileId, n)
+      ingestTradeNotification(this.profileId, n, this._gameState)
       this.log('notification', formatNotificationSummary(n), JSON.stringify(n, null, 2))
     })
 
@@ -441,6 +466,8 @@ export class Agent {
 
     this.memorySummary = loadProfileMemory(this.profileId)
     this.lastSavedMemory = this.memorySummary
+    this.learningContext = buildLearningContext(this.profileId)
+    this.learningContextDirty = false
     if (this.memorySummary) {
       context.messages.push({
         role: 'user' as const,
@@ -457,6 +484,15 @@ export class Agent {
         })
         this.log('system', 'Persistent memory flagged as potentially stale or poisoned')
       }
+    }
+    if (this.learningContext) {
+      this.lastLearningContextInjectedAt = Date.now()
+      context.messages.push({
+        role: 'user' as const,
+        content: `${this.learningContext}\n\nUse this structured profile as persistent development context. Prefer measured strengths/weaknesses and learned rules over improvising a new personality each turn.`,
+        timestamp: Date.now(),
+      })
+      this.log('system', 'Loaded structured agent learning context')
     }
 
     const compaction: CompactionState = { summary: this.memorySummary }
@@ -488,6 +524,25 @@ export class Agent {
       }
 
       try {
+        if (is429PredictionEnabled()) {
+          const rateRisk = predict429Risk(this.profileId)
+          if (rateRisk.level !== this.lastRateRiskLevel) {
+            this.lastRateRiskLevel = rateRisk.level
+            if (rateRisk.level === 'HIGH' || rateRisk.level === 'MEDIUM') {
+              this.log('system', `Rate-limit backoff active: ${rateRisk.reason}`)
+            }
+          }
+          if (rateRisk.level === 'HIGH') {
+            this.setActivity('Backing off for rate limit pressure...')
+            await abortableSleep(15_000, this.abortController.signal)
+            if (!this.running || this.restartRequested) continue
+          } else if (rateRisk.level === 'MEDIUM') {
+            this.setActivity('Backing off for rate limit pressure...')
+            await abortableSleep(5_000, this.abortController.signal)
+            if (!this.running || this.restartRequested) continue
+          }
+        }
+
         const maxTurnsStr = getPreference('max_turns')
         const maxToolRounds = maxTurnsStr ? parseInt(maxTurnsStr, 10) || undefined : undefined
         const llmTimeoutStr = getPreference('llm_timeout')
@@ -565,10 +620,17 @@ export class Agent {
             advisorEnabled: altSolverEnabled,
             advisorModel,
             advisorApiKey,
+            gameState: this._gameState,
             onActivity: (a) => this.setActivity(a),
             onAdaptiveContext: (info) => {
               this._adaptiveMode = info.mode
               this._effectiveContextBudgetRatio = info.effectiveRatio
+            },
+            onGameCommandResult: (command, args, result) => {
+              const changed = recordCommandOutcome(this.profileId, command, args, result, this._gameState)
+              if (changed) {
+                this.refreshLearningContext()
+              }
             },
           },
           compaction,
@@ -647,6 +709,13 @@ export class Agent {
 
       const navigationStateNudge = buildNavigationStateNudge(this.navigationState, this.navigationStateDetail, this._gameState)
       if (navigationStateNudge) nudgeParts.push(navigationStateNudge)
+
+      this.refreshLearningContext()
+      const updatedLearningContext = this.consumeLearningContextUpdate()
+      if (updatedLearningContext) {
+        nudgeParts.push(`## Learned Model Update\n\n${updatedLearningContext}`)
+        this.log('system', 'Structured agent learning context updated')
+      }
 
       const stallNudge = buildMutationStallNudge(
         this.pendingMutationObserved,
@@ -752,6 +821,7 @@ export class Agent {
     const result = await this.connection.execute(command, args)
 
     if (command === 'get_status') this.cacheGameState(result)
+    recordCommandOutcome(this.profileId, command, args, result, this._gameState)
 
     if (result.error) {
       this.log('tool_result', `Error: ${result.error.message}`, JSON.stringify(result, null, 2))
@@ -861,12 +931,16 @@ function writeProfileAgents(profileId: string, profileName: string, content: str
   fs.writeFileSync(file, body, 'utf-8')
 }
 
-function ensureProfileAgentsFromDirective(profile: Profile): void {
-  const existing = readProfileAgents(profile.id)
-  if (existing) return
+export function overwriteProfileAgentsFromDirective(profile: Profile): void {
   const directive = (profile.directive || '').trim()
   if (!directive) return
   writeProfileAgents(profile.id, profile.name, directive)
+}
+
+function ensureProfileAgentsFromDirective(profile: Profile): void {
+  const existing = readProfileAgents(profile.id)
+  if (existing) return
+  overwriteProfileAgentsFromDirective(profile)
 }
 
 function resolveMissionDirective(profile: Profile): string {
@@ -1024,8 +1098,8 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - Action commands cost 1 tick (10 seconds).
 - If an action returns \`pending: true\`, the command was accepted and queued for the next tick. Treat that as progress. Do not call it a deadlock just because the world state has not updated yet.
 - Jump and travel can legitimately take multiple ticks. Travel time now depends on distance and ship speed; jump time depends on ship speed. A long \`navigation_pending\` period is not by itself evidence of a stall.
-- Travel and jump fuel costs now scale with ship mass, speed, distance, and cargo load. Heavy or fast ships, especially with afterburners fitted, can burn much more fuel than before.
-- Before major travel or jumps, prefer checking route and fuel feasibility. Use \`find_route\` when planning multi-system movement, and re-check fuel after cargo or module changes. Its fuel estimates now reflect cargo load correctly.
+- Travel and jump fuel costs now scale with ship mass, speed, and distance. Cargo weight no longer increases fuel burn. Heavy or fast ships, especially with afterburners fitted, can still burn much more fuel than before.
+- Before major travel or jumps, prefer checking route and fuel feasibility. Use \`find_route\` when planning multi-system movement, and re-check fuel after ship or module changes. Do not assume a fuller cargo hold will increase fuel cost.
 - For any destination outside the current system, use a strict routing workflow: if the system name is uncertain, resolve it with \`search_systems\`; then call \`find_route(target_system=...)\`; then jump only to the immediate next hop from the returned route. After each jump or in-system travel step, refresh with \`get_status\` or \`get_location\` before issuing the next navigation mutation. Do not skip directly to a far-away system name when a route has multiple hops.
 - Never describe the situation as a deadlock, stuck mutation queue, or server freeze unless you have strong evidence: at least 4 consecutive fresh verification cycles after a pending mutation, no \`ACTION_RESULT\` notification, and no meaningful state change despite repeated \`get_status\` checks.
 - If one specific account appears blocked for several verification cycles, describe it as a local mutation stall for that account/session only. Do not generalize that to the whole server unless multiple independent accounts show the same evidence.
@@ -1043,10 +1117,11 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - Never use irreversible self-destruction, account reset, character wipe, or similarly destructive escape-hatch commands. Self-destruction is not a navigation shortcut: it can destroy the current ship, cargo, equipped modules, and expensive mining gear/badges tied to the loadout. If stranded or blocked, recover through travel, docking, refueling, repair, insurance, chat, or by waiting for better state information.
 - Never claim a stuck mutation queue, deadlock, or server freeze unless multiple fresh observations explicitly prove commands are neither executing nor changing state after verification with \`get_status\`.
 - Always check fuel before traveling and cargo space before mining.
+- Match mining targets to the installed modules before traveling or mining: ore equipment should target asteroid belts, ice harvesters should target ice fields, and gas harvesters should target gas clouds. Do not fly to an incompatible resource node just to try mine().
 - Route planning matters more now: use \`find_route\` for non-trivial jumps, and do not assume older fixed-time or fixed-fuel navigation behavior.
 - Existing ships may have new speed values after a server restart. Do not rely on stale assumptions about jump duration, travel duration, or fuel burn from earlier runs.
 - If attacked by NPC pirates and escape is legal, \`jump\` or \`travel\` can be a valid recovery option. Treat navigation as a possible escape tool when combat pressure is non-player and leaving is feasible.
-- Mining loops should be practical: mine until cargo is near full (roughly 80-90%), but stop early if yields fail, the location lacks resources, cargo is full, or a better unload/travel opportunity appears.
+- Mining loops should be practical: mine until cargo is near full (roughly 80-90%), but stop early if yields fail, the location lacks resources, the node mismatches the current mining fit, cargo is full, or a better unload/travel opportunity appears.
 - Do not hoard ore blindly. When docked with valuable raw materials, inspect the market before selling. Avoid dumping into obviously bad instant bids; prefer corrected pricing or listing behavior when needed.
 - Periodically check for practical ship upgrades when docked at a shipyard or base. Favor upgrades that materially improve cargo, mining throughput, survivability, or travel efficiency and are affordable without stalling progress.
 - Be social -- chat with players you meet.
@@ -1195,6 +1270,8 @@ function isRecoveryRelevantNotification(parsed: { type: string; message: string 
       message.includes('already_docked') ||
       message.includes('already_in_system') ||
       message.includes('cargo_full') ||
+      message.includes('no_resources') ||
+      message.includes('no_equipment') ||
       message.includes('not_enough_fuel') ||
       (message.includes('invalid_payload') && message.includes('quantity must be greater than 0')) ||
       message.includes('market') ||
@@ -1278,25 +1355,16 @@ function deriveNavigationState(gameState: Record<string, unknown> | null): Navig
   if (!gameState) return 'unknown'
   const player = (gameState.player as Record<string, unknown> | undefined) || {}
   const location = (gameState.location as Record<string, unknown> | undefined) || {}
-  const poiType = String(location.poi_type || player.current_poi_type || '').toLowerCase()
-  const poiName = String(location.poi_name || player.current_poi || '').toLowerCase()
+  const poiType = location.poi_type || player.current_poi_type
+  const poiName = location.poi_name || player.current_poi
 
-  if (poiType.includes('station') || poiType.includes('base') || poiType.includes('shipyard') || poiName.includes('station') || poiName.includes('base')) {
+  if (isDockedPoi(poiType, poiName)) {
     return 'docked'
   }
-  if (
-    poiType.includes('belt') ||
-    poiType.includes('field') ||
-    poiType.includes('ring') ||
-    poiType.includes('cloud') ||
-    poiType.includes('asteroid') ||
-    poiType.includes('ice') ||
-    poiName.includes('belt') ||
-    poiName.includes('ring')
-  ) {
+  if (isResourcePoi(poiType, poiName)) {
     return 'at_resource_poi'
   }
-  if (poiName || poiType) return 'undocked'
+  if (String(poiName || '').trim() || String(poiType || '').trim()) return 'undocked'
   return 'unknown'
 }
 
@@ -1666,6 +1734,54 @@ function parseNotificationMeta(n: unknown): { type: string; message: string } | 
   if (typeof data === 'string') return { type, message: data }
   if (typeof notif.message === 'string') return { type, message: notif.message }
   return { type, message: JSON.stringify(n) }
+}
+
+function ingestTradeNotification(profileId: string, notification: unknown, gameState: Record<string, unknown> | null): void {
+  if (!notification || typeof notification !== 'object') return
+  const record = notification as Record<string, unknown>
+  const type = String(record.type || record.msg_type || '').toLowerCase()
+  if (type !== 'action_result') return
+
+  const payload = record.payload && typeof record.payload === 'object' ? record.payload as Record<string, unknown> : null
+  const command = String(payload?.command || '').toLowerCase()
+  if (command !== 'buy' && command !== 'sell') return
+
+  const result = payload?.result && typeof payload.result === 'object' ? payload.result as Record<string, unknown> : null
+  if (!result) return
+
+  const quantity = toFiniteNumber(result.quantity_sold ?? result.quantity_bought ?? result.quantity ?? result.filled_quantity ?? result.amount)
+  if (quantity === null || quantity <= 0) return
+
+  const itemName = String(result.item ?? result.item_name ?? result.name ?? result.item_id ?? '').trim()
+  if (!itemName) return
+
+  const unitPrice = toFiniteNumber(result.price_each ?? result.unit_price ?? result.price ?? result.executed_price)
+  const totalPrice = toFiniteNumber(result.total_earned ?? result.total_spent ?? result.total_price)
+
+  addTradeEvent({
+    profile_id: profileId,
+    trade_type: command as 'buy' | 'sell',
+    item_id: typeof result.item_id === 'string' ? result.item_id : null,
+    item_name: itemName,
+    quantity,
+    unit_price: unitPrice,
+    total_price: totalPrice ?? (unitPrice !== null ? unitPrice * quantity : null),
+    system_name: extractGameStateLocation(gameState, 'system'),
+    poi_name: extractGameStateLocation(gameState, 'poi'),
+    source_command: command,
+    raw_json: JSON.stringify(notification),
+  })
+}
+
+function extractGameStateLocation(gameState: Record<string, unknown> | null, type: 'system' | 'poi'): string | null {
+  const player = gameState?.player && typeof gameState.player === 'object' ? gameState.player as Record<string, unknown> : null
+  const location = gameState?.location && typeof gameState.location === 'object' ? gameState.location as Record<string, unknown> : null
+  if (type === 'system') {
+    const value = player?.current_system ?? location?.system_name
+    return typeof value === 'string' && value.trim() ? value.trim() : null
+  }
+  const value = player?.current_poi ?? location?.poi_name
+  return typeof value === 'string' && value.trim() ? value.trim() : null
 }
 
 function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {

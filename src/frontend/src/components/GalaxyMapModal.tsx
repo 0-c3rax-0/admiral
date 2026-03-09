@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { X, MapPin, Users, Building2, Pickaxe, ExternalLink } from 'lucide-react'
 import type { Profile } from '@/types'
-import { SYSTEM_KB_SLUG_BY_ID } from '@/lib/systemKbMap'
+import { buildSystemKbUrl } from '@/lib/systemKbMap'
 
 type GalaxySystem = {
   id: string
@@ -64,12 +64,6 @@ function extractOreHints(poi: SystemPoi): string[] {
     }
   }
   return Array.from(out)
-}
-
-function buildSystemKbUrl(systemId: string | undefined): string {
-  if (!systemId) return ''
-  const kbSlug = SYSTEM_KB_SLUG_BY_ID[systemId] || systemId
-  return `https://rsned.github.io/spacemolt-kb/systems/${encodeURIComponent(kbSlug)}.html`
 }
 
 export function GalaxyMapModal({ open, onClose, gameserverUrl, profiles, playerDataMap }: Props) {

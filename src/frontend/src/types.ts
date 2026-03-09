@@ -9,6 +9,7 @@ export interface Provider {
 export interface Profile {
   id: string
   name: string
+  agent_role?: string
   username: string | null
   password: string | null
   empire: string

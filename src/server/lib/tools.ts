@@ -4,6 +4,9 @@ import type { GameConnection, CommandResult } from './connections/interface'
 import { getProfile, updateProfile } from './db'
 import { fetchGameCommands, parseRuntimeCommandResult } from './schema'
 import { getPendingNavigation, reconcilePendingNavigationWithStatus, updatePendingNavigationFromResult } from './navigation-guard'
+import { classifyMiningFit } from './mining-fit'
+import { classifyPoi } from './poi'
+import { lookupKbPoiKind } from './system-kb'
 
 // --- Tool Definitions ---
 
@@ -76,6 +79,8 @@ interface ToolContext {
   profileId: string
   log: LogFn
   todo: string
+  gameState?: Record<string, unknown> | null
+  onGameCommandResult?: (command: string, args: Record<string, unknown> | undefined, result: CommandResult) => void
 }
 
 export async function executeTool(
@@ -130,6 +135,13 @@ export async function executeTool(
         return errMsg
       }
     }
+
+    const localValidationError = await validateLocalGameCommand(ctx.profileId, command, commandArgs, ctx.gameState)
+    if (localValidationError) {
+      ctx.log('system', localValidationError.systemMessage)
+      ctx.log('tool_result', localValidationError.errorMessage)
+      return localValidationError.errorMessage
+    }
   } else {
     command = name
     commandArgs = Object.keys(args).length > 0 ? args : undefined
@@ -149,12 +161,14 @@ export async function executeTool(
           errMsg += `\nDid you mean: ${suggestions.join(', ')}`
         }
       }
+      ctx.onGameCommandResult?.(command, commandArgs, resp)
       ctx.log('tool_result', errMsg)
       return errMsg
     }
 
     updatePendingNavigationFromResult(ctx.profileId, command, commandArgs || {}, resp)
     reconcilePendingNavigationWithStatus(ctx.profileId, resp)
+    ctx.onGameCommandResult?.(command, commandArgs, resp)
 
     const result = formatToolResult(command, resp.result, resp.notifications)
     ctx.log('tool_result', truncate(result, 200), truncateResultForLog(result))
@@ -187,6 +201,12 @@ export function detectImmediateRecoveryHint(toolName: string, toolArgs: Record<s
   if (lower.includes('error: [cargo_full]')) {
     return { reason: 'cargo capacity is exhausted and the current gather plan is blocked', suggestedStateCheck: 'get_status' }
   }
+  if (effectiveCommand === 'mine' && lower.includes('error: [no_resources]') && lower.includes('nothing to mine here')) {
+    return { reason: 'mining is blocked because the current location is not a valid resource node for the expected material', suggestedStateCheck: 'get_status' }
+  }
+  if (effectiveCommand === 'mine' && lower.includes('error: [no_equipment]') && lower.includes('ice harvester')) {
+    return { reason: 'mining is blocked because the current ship/loadout cannot mine this ice node; replan locally instead of forcing this target', suggestedStateCheck: 'get_status' }
+  }
   if (lower.includes('error: [not_enough_fuel]')) {
     return { reason: 'movement plan is blocked by insufficient fuel', suggestedStateCheck: 'get_status' }
   }
@@ -195,6 +215,115 @@ export function detectImmediateRecoveryHint(toolName: string, toolArgs: Record<s
   }
   if (effectiveCommand === 'sell' && (lower.includes('error: [market') || lower.includes('error: [sell'))) {
     return { reason: 'sell action failed due to market constraints', suggestedStateCheck: 'get_status' }
+  }
+
+  return null
+}
+
+async function validateLocalGameCommand(
+  profileId: string,
+  command: string,
+  args: Record<string, unknown> | undefined,
+  gameState: Record<string, unknown> | null | undefined,
+): Promise<{ systemMessage: string; errorMessage: string } | null> {
+  if (command === 'travel') {
+    const travelGuard = await validateTravelAgainstMiningFit(args, gameState)
+    if (travelGuard) return travelGuard
+  }
+
+  if (command === 'mine') {
+    const mineGuard = validateMineAgainstLiveState(profileId, gameState)
+    if (mineGuard) return mineGuard
+  }
+
+  if (command !== 'sell' || !args) return null
+
+  const quantity = toFiniteNumber(args.quantity ?? args.qty ?? args.amount ?? args.quantity_sold)
+  if (quantity === null || quantity > 0) return null
+
+  return {
+    systemMessage: 'Blocked sell locally: requested quantity is 0 or negative. Refresh cargo/state before trying to sell again.',
+    errorMessage: formatCommandError('sell', 'invalid_payload', 'invalid_payload: Quantity must be greater than 0.'),
+  }
+}
+
+async function validateTravelAgainstMiningFit(
+  args: Record<string, unknown> | undefined,
+  gameState: Record<string, unknown> | null | undefined,
+): Promise<{ systemMessage: string; errorMessage: string } | null> {
+  if (!args) return null
+
+  const targetPoi = pickFirstStringArg(args.target_poi, args.poi_id, args.poi, args.poi_name, args.destination, args.target)
+  if (!targetPoi) return null
+
+  let targetKind = classifyPoi(targetPoi, targetPoi)
+  if (!['ore', 'ice', 'gas'].includes(targetKind)) {
+    try {
+      targetKind = (await lookupKbPoiKind(targetPoi)) || targetKind
+    } catch {
+      // Ignore KB lookup failure and fall back to direct string heuristics only.
+    }
+  }
+  if (!['ore', 'ice', 'gas'].includes(targetKind)) return null
+
+  const modules = Array.isArray(gameState?.modules) ? gameState?.modules : []
+  const fitKind = classifyMiningFit(modules)
+  if (fitKind === 'none' || fitKind === 'mixed') return null
+  if (fitKind === targetKind) return null
+
+  return {
+    systemMessage: `Blocked travel locally: target POI (${targetPoi}) looks like ${targetKind}, but the current mining fit is ${fitKind}.`,
+    errorMessage: `Error: [fit_location_mismatch] Refusing travel to ${targetPoi} because it looks like a ${targetKind} node and the current mining fit is ${fitKind}. Choose a compatible resource node instead.`,
+  }
+}
+
+function validateMineAgainstLiveState(
+  profileId: string,
+  gameState: Record<string, unknown> | null | undefined,
+): { systemMessage: string; errorMessage: string } | null {
+  const pendingNavigation = getPendingNavigation(profileId)
+  if (pendingNavigation) {
+    const destination = pendingNavigation.destination ? ` to ${pendingNavigation.destination}` : ''
+    return {
+      systemMessage: 'Blocked mine locally: navigation is still pending, so the ship may be in transit and not yet at a mineable node.',
+      errorMessage: `Error: [navigation_pending] Cannot mine while ${pendingNavigation.command}${destination} is still pending. Refresh with get_location or get_status after arrival before mining.`,
+    }
+  }
+
+  const player = (gameState?.player as Record<string, unknown> | undefined) || {}
+  const location = (gameState?.location as Record<string, unknown> | undefined) || {}
+  const modules = Array.isArray(gameState?.modules) ? gameState?.modules : []
+  const poiType = location.poi_type ?? player.current_poi_type
+  const poiName = location.poi_name ?? player.current_poi
+  const poiKind = classifyPoi(poiType, poiName)
+  const fitKind = classifyMiningFit(modules)
+
+  if (poiKind === 'unknown') {
+    return {
+      systemMessage: 'Blocked mine locally: the current POI is not verified from live state. This often happens during transit or when only a stale name is available.',
+      errorMessage: 'Error: [unverified_location] Cannot mine without a verified live POI type. Refresh with get_location first, then mine only at a confirmed compatible resource node.',
+    }
+  }
+
+  if (poiKind === 'station') {
+    return {
+      systemMessage: 'Blocked mine locally: the ship is at a station/base, not a mining node.',
+      errorMessage: 'Error: [invalid_location] Cannot mine while docked or at a station/base. Travel or undock to a compatible mining POI first.',
+    }
+  }
+
+  if (fitKind === 'none') {
+    return {
+      systemMessage: 'Blocked mine locally: no mining equipment is visible in the current verified ship modules.',
+      errorMessage: 'Error: [no_equipment] Cannot mine because no compatible mining equipment is installed on the current ship.',
+    }
+  }
+
+  if (fitKind !== 'mixed' && poiKind !== 'resource' && fitKind !== poiKind) {
+    return {
+      systemMessage: `Blocked mine locally: mining fit (${fitKind}) does not match the current live POI (${poiKind}).`,
+      errorMessage: `Error: [fit_location_mismatch] Cannot mine at this ${poiKind} node with a ${fitKind} mining fit. Refresh with get_location if needed and move to a compatible resource node.`,
+    }
   }
 
   return null
@@ -567,6 +696,14 @@ function formatCommandError(command: string, code: string, message: string): str
     return `${prefix}\nInterpretation: the ship lacks fuel for this plan. Stop repeating the same movement action, refresh with get_status, and re-plan around refueling or a shorter route.`
   }
 
+  if (normalized === 'no_resources' && command === 'mine') {
+    return `${prefix}\nInterpretation: mining is not available at this exact in-game location right now. This can mean the spot has no mineable resource, the current POI supports different resources than the one you expect, or you are not at the correct ore/ice/resource node. Refresh with get_status or get_location, confirm the POI/resource type, and move to a valid mining location instead of repeating mine blindly.`
+  }
+
+  if (normalized === 'no_equipment' && command === 'mine' && /ice harvester/i.test(message)) {
+    return `${prefix}\nInterpretation: this mining spot requires ice-harvesting equipment that the current ship/loadout does not have. With the current equipment, the better short-term plan is usually a compatible non-empty belt or another activity that fits the installed modules. Treat this as a local mismatch between ship and node, not as an instruction to immediately or permanently switch ships/equipment just to get a small amount of ice.`
+  }
+
   if (normalized === 'invalid_payload' && command === 'sell' && /quantity must be greater than 0/i.test(message)) {
     return `${prefix}\nInterpretation: sell was called with quantity 0 or with no matching inventory available. Refresh with get_status or get_cargo, recompute the available amount, and only sell a positive quantity.`
   }
@@ -591,6 +728,12 @@ function annotateNotification(tag: string, message: string): string {
   }
   if (upperTag === 'ACTION_ERROR' && /\bnot_enough_fuel\b/i.test(message)) {
     return `${message} Interpretation: the current route or action is blocked by fuel. Re-plan around refueling or a nearer destination instead of retrying the same move.`
+  }
+  if (upperTag === 'ACTION_ERROR' && /\bno_resources\b/i.test(message) && /nothing to mine here/i.test(message)) {
+    return `${message} Interpretation: this exact location is not a valid mining spot for the expected resource right now. The account may be at the wrong ore/ice/resource POI, or this POI may not support mining. Verify the current location and move to a confirmed mining node instead of repeating mine here.`
+  }
+  if (upperTag === 'ACTION_ERROR' && /\bno_equipment\b/i.test(message) && /ice harvester/i.test(message)) {
+    return `${message} Interpretation: this ice location needs equipment the current ship does not have. With the current fit, a compatible non-empty belt is usually a better short-term target than switching equipment just to collect a little ice. Treat it as a short-term location/loadout mismatch, not an immediate long-term refit order.`
   }
   if (upperTag === 'ACTION_ERROR' && /\binvalid_payload\b/i.test(message) && /quantity must be greater than 0/i.test(message)) {
     return `${message} Interpretation: the sell plan used quantity 0 or stale cargo information. Re-check inventory and only sell a positive available amount.`
