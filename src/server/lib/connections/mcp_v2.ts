@@ -1,5 +1,6 @@
 import type { GameConnection, LoginResult, RegisterResult, CommandResult, NotificationHandler } from './interface'
 import { USER_AGENT } from './interface'
+import { buildNamespacedActionAlias } from '../schema'
 
 function asRpcResponse(value: unknown): { result?: unknown; error?: { code?: number; message: string } } {
   if (value && typeof value === 'object') {
@@ -84,6 +85,8 @@ export class McpV2Connection implements GameConnection {
       // Build reverse map: action name -> tool name
       for (const action of actions) {
         this.addActionTool(action, name)
+        const alias = buildNamespacedActionAlias(name, action)
+        if (alias) this.addActionTool(alias, name)
       }
 
       // For tools without action param (like catalog), map tool name itself
@@ -127,12 +130,13 @@ export class McpV2Connection implements GameConnection {
   async execute(command: string, args?: Record<string, unknown>): Promise<CommandResult> {
     let toolName = this.resolveToolForAction(command)
     let toolArgs: Record<string, unknown>
+    const resolvedAction = toolName ? this.resolveActionName(command, toolName) : command
 
     if (toolName) {
       // Known command -- route to correct tool
       const hasAction = this.v2Tools.find(t => t.name === toolName)?.actions.length ?? 0
       toolArgs = hasAction > 0
-        ? { action: command, ...(args || {}) }
+        ? { action: resolvedAction, ...(args || {}) }
         : { ...(args || {}) }
     } else if (this.v2Tools.some(t => t.name === command)) {
       // Command matches a tool name directly (e.g. "spacemolt_catalog")
@@ -221,6 +225,15 @@ export class McpV2Connection implements GameConnection {
     this.actionToTools.set(action, list)
   }
 
+  private resolveActionName(command: string, tool: string): string {
+    const aliasPrefixBase = tool === 'spacemolt' ? '' : tool.replace(/^spacemolt_?/, '')
+    const aliasPrefix = aliasPrefixBase ? `${aliasPrefixBase}_` : ''
+    if (aliasPrefix && command.startsWith(aliasPrefix)) {
+      return command.slice(aliasPrefix.length)
+    }
+    return command
+  }
+
   private resolveToolForAction(action: string): string | undefined {
     const tools = this.actionToTools.get(action)
     if (!tools || tools.length === 0) return undefined
@@ -248,7 +261,7 @@ export class McpV2Connection implements GameConnection {
   }
 
   isConnected(): boolean {
-    return this.connected
+    return this.connected && !!this.sessionId
   }
 
   private async callTool(name: string, args: Record<string, unknown>): Promise<{

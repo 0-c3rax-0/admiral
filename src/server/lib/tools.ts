@@ -7,6 +7,17 @@ import { getPendingNavigation, reconcilePendingNavigationWithStatus, updatePendi
 import { classifyMiningFit } from './mining-fit'
 import { classifyPoi } from './poi'
 import { lookupKbPoiKind } from './system-kb'
+import {
+  clearPendingMutationSeen,
+  getMarketSnapshot,
+  isCommandTemporarilyBlocked,
+  markPendingMutationSeen,
+  notePendingVerification,
+  rememberMarketSnapshot,
+  rememberUnknownCommand,
+  shouldBlockZeroFillSell,
+  shouldThrottlePendingVerification,
+} from './runtime-guards'
 
 // --- Tool Definitions ---
 
@@ -106,6 +117,11 @@ export async function executeTool(
       ctx.log('error', errMsg)
       return errMsg
     }
+    if (isCommandTemporarilyBlocked(ctx.profileId, command)) {
+      const errMsg = `Error: temporarily blocked repeated unknown or invalid command '${command}'. Use a verified command instead of retrying the same unsupported action.`
+      ctx.log('error', errMsg)
+      return errMsg
+    }
     const resolved = await resolveCommandName(ctx.profileId, command, ctx.connection)
     if (resolved !== command) {
       ctx.log('system', `Adjusted command: ${command} -> ${resolved}`)
@@ -125,6 +141,17 @@ export async function executeTool(
     if (normalizedNavigation.changed) {
       commandArgs = normalizedNavigation.args
       ctx.log('system', normalizedNavigation.message)
+    }
+    const normalizedSellOrder = normalizeSellOrderArgs(ctx.profileId, command, commandArgs, ctx.gameState)
+    if (normalizedSellOrder.changed) {
+      commandArgs = normalizedSellOrder.args
+      ctx.log('system', normalizedSellOrder.message)
+    }
+    const reroutedSell = rerouteSellToOrder(ctx.profileId, command, commandArgs, ctx.gameState)
+    if (reroutedSell.changed) {
+      command = reroutedSell.command
+      commandArgs = reroutedSell.args
+      ctx.log('system', reroutedSell.message)
     }
     if ((command === 'travel' || command === 'jump')) {
       const pendingNavigation = getPendingNavigation(ctx.profileId)
@@ -156,6 +183,7 @@ export async function executeTool(
     if (resp.error) {
       let errMsg = formatCommandError(command, resp.error.code, resp.error.message)
       if (resp.error.code === 'unknown_command' || resp.error.code === 'invalid_command') {
+        rememberUnknownCommand(ctx.profileId, command)
         const suggestions = await suggestCommands(ctx.profileId, command, ctx.connection)
         if (suggestions.length > 0) {
           errMsg += `\nDid you mean: ${suggestions.join(', ')}`
@@ -168,6 +196,15 @@ export async function executeTool(
 
     updatePendingNavigationFromResult(ctx.profileId, command, commandArgs || {}, resp)
     reconcilePendingNavigationWithStatus(ctx.profileId, resp)
+    if (resp.meta?.pending || (resp.result && typeof resp.result === 'object' && (resp.result as Record<string, unknown>).pending === true)) {
+      markPendingMutationSeen(ctx.profileId)
+    } else if (command !== 'get_status' && command !== 'get_location') {
+      clearPendingMutationSeen(ctx.profileId)
+    }
+    const refreshedGameState = mergeGameStateSnapshot(ctx.gameState, resp)
+    if (refreshedGameState) ctx.gameState = refreshedGameState
+    ingestMarketSnapshot(ctx.profileId, command, resp)
+    notePendingVerification(ctx.profileId, command)
     ctx.onGameCommandResult?.(command, commandArgs, resp)
 
     const result = formatToolResult(command, resp.result, resp.notifications)
@@ -226,9 +263,28 @@ async function validateLocalGameCommand(
   args: Record<string, unknown> | undefined,
   gameState: Record<string, unknown> | null | undefined,
 ): Promise<{ systemMessage: string; errorMessage: string } | null> {
+  if (shouldThrottlePendingVerification(profileId, command)) {
+    return {
+      systemMessage: 'Blocked repeated pending verification locally: a pending action already consumed its allowed verification poll. Wait for the next tick or notification before polling state again.',
+      errorMessage: `Error: [verification_cooldown] ${command} was requested again while a pending action is still being monitored. Wait for the next tick, ACTION_RESULT, or another notification before polling again.`,
+    }
+  }
+
   if (command === 'travel') {
     const travelGuard = await validateTravelAgainstMiningFit(args, gameState)
     if (travelGuard) return travelGuard
+  }
+
+  if (command === 'search_systems') {
+    return await validateSearchSystemsCommand(args)
+  }
+
+  if (command === 'create_sell_order') {
+    return validateCreateSellOrderCommand(profileId, args, gameState)
+  }
+
+  if (command === 'cancel_order') {
+    return validateCancelOrderCommand(args)
   }
 
   if (command === 'mine') {
@@ -236,7 +292,40 @@ async function validateLocalGameCommand(
     if (mineGuard) return mineGuard
   }
 
-  if (command !== 'sell' || !args) return null
+  if (command !== 'sell') return null
+
+  if (!args || Object.keys(args).length === 0) {
+    return {
+      systemMessage: 'Blocked sell locally: sell was attempted without item_id and quantity. Recompute the sale from fresh cargo first.',
+      errorMessage: formatCommandError('sell', 'invalid_payload', 'invalid_payload: Sell requires item_id and a quantity greater than 0.'),
+    }
+  }
+
+  const itemId = pickFirstStringArg(args.item_id, args.item, args.item_name)
+  if (!itemId) {
+    return {
+      systemMessage: 'Blocked sell locally: sell is missing item_id/item. Refresh cargo and choose the exact inventory item before selling.',
+      errorMessage: formatCommandError('sell', 'invalid_payload', 'invalid_payload: Sell requires item_id and a quantity greater than 0.'),
+    }
+  }
+
+  const locationKey = extractSellLocationKey(gameState)
+  if (locationKey && shouldBlockZeroFillSell(profileId, itemId, locationKey)) {
+    return {
+      systemMessage: `Blocked sell locally: ${itemId} recently had zero fill at ${locationKey}. Change market strategy before retrying instant sell here.`,
+      errorMessage: `Error: [market_cooldown] Recent sell attempts for ${itemId} at ${locationKey} produced zero fill. Use create_sell_order, choose a different item, or move to a better market instead of repeating sell immediately.`,
+    }
+  }
+
+  if (locationKey) {
+    const market = getMarketSnapshot(profileId, locationKey, itemId)
+    if (market && ((market.bidVolume ?? 0) <= 0 || (market.bestBid ?? 0) <= 0)) {
+      return {
+        systemMessage: `Blocked sell locally: no recent buy-side liquidity seen for ${itemId} at ${locationKey}.`,
+        errorMessage: `Error: [market_cooldown] Recent market data at ${locationKey} shows no meaningful instant-buy liquidity for ${itemId}. Check whether a realistic sell order is better, or move to a stronger market.`,
+      }
+    }
+  }
 
   const quantity = toFiniteNumber(args.quantity ?? args.qty ?? args.amount ?? args.quantity_sold)
   if (quantity === null || quantity > 0) return null
@@ -244,6 +333,208 @@ async function validateLocalGameCommand(
   return {
     systemMessage: 'Blocked sell locally: requested quantity is 0 or negative. Refresh cargo/state before trying to sell again.',
     errorMessage: formatCommandError('sell', 'invalid_payload', 'invalid_payload: Quantity must be greater than 0.'),
+  }
+}
+
+function extractSellLocationKey(gameState: Record<string, unknown> | null | undefined): string | null {
+  const location = (gameState?.location as Record<string, unknown> | undefined) || {}
+  return pickFirstStringArg(location.docked_at, location.poi_name, location.poi_id)
+}
+
+async function validateSearchSystemsCommand(
+  args: Record<string, unknown> | undefined,
+): Promise<{ systemMessage: string; errorMessage: string } | null> {
+  if (!args) return null
+
+  const query = pickFirstStringArg(args.query, args.system_name, args.system, args.target)
+  if (!query) return null
+
+  const normalized = query.trim().toLowerCase()
+  let classifiedPoi = classifyPoi(query, query)
+  if (classifiedPoi === 'unknown') {
+    try {
+      classifiedPoi = (await lookupKbPoiKind(query)) || classifiedPoi
+    } catch {
+      // Ignore KB lookup failure.
+    }
+  }
+  const looksLikeBaseId =
+    normalized.includes('command') ||
+    normalized.includes('station') ||
+    normalized.includes('shipyard') ||
+    normalized.includes('base')
+
+  if (classifiedPoi !== 'unknown' || looksLikeBaseId) {
+    return {
+      systemMessage: `Blocked search_systems locally: '${query}' looks like a POI/base identifier, not a star system name.`,
+      errorMessage: `Error: [invalid_payload] search_systems expects a system name query. '${query}' looks like a POI or base identifier; use get_location/get_poi/get_system for the current place, or route using the actual system name instead.`,
+    }
+  }
+
+  return null
+}
+
+function validateCreateSellOrderCommand(
+  profileId: string,
+  args: Record<string, unknown> | undefined,
+  gameState: Record<string, unknown> | null | undefined,
+): { systemMessage: string; errorMessage: string } | null {
+  if (!args || Object.keys(args).length === 0) {
+    return {
+      systemMessage: 'Blocked create_sell_order locally: missing item_id, quantity, and price_each.',
+      errorMessage: formatCommandError('create_sell_order', 'invalid_payload', 'invalid_payload: create_sell_order requires item_id, quantity greater than 0, and price_each greater than 0.'),
+    }
+  }
+
+  const itemId = pickFirstStringArg(args.item_id, args.item, args.item_name)
+  if (!itemId) {
+    return {
+      systemMessage: 'Blocked create_sell_order locally: missing item_id/item. Refresh cargo and choose the exact inventory item first.',
+      errorMessage: formatCommandError('create_sell_order', 'invalid_payload', 'invalid_payload: create_sell_order requires item_id, quantity greater than 0, and price_each greater than 0.'),
+    }
+  }
+
+  const quantity = toFiniteNumber(args.quantity ?? args.qty ?? args.amount)
+  if (quantity === null || quantity <= 0) {
+    return {
+      systemMessage: 'Blocked create_sell_order locally: quantity is missing, zero, or negative.',
+      errorMessage: formatCommandError('create_sell_order', 'invalid_payload', 'invalid_payload: Quantity must be greater than 0.'),
+    }
+  }
+
+  const priceEach = toFiniteNumber(args.price_each ?? args.price ?? args.unit_price)
+  if (priceEach === null || priceEach <= 0) {
+    return {
+      systemMessage: 'Blocked create_sell_order locally: price_each is missing, zero, or negative.',
+      errorMessage: formatCommandError('create_sell_order', 'invalid_payload', 'invalid_payload: Price must be greater than 0.'),
+    }
+  }
+
+  const locationKey = extractSellLocationKey(gameState)
+  if (locationKey) {
+    const market = getMarketSnapshot(profileId, locationKey, itemId)
+    if (market) {
+      const bestBid = market.bestBid
+      const bestAsk = market.bestAsk
+      if (bestAsk !== null && priceEach > bestAsk * 1.5) {
+        return {
+          systemMessage: `Blocked create_sell_order locally: price ${priceEach} is far above the recent best ask ${bestAsk} for ${itemId} at ${locationKey}.`,
+          errorMessage: `Error: [price_out_of_range] Proposed sell price ${priceEach} is unrealistically above the recent market ask ${bestAsk} for ${itemId} at ${locationKey}. Choose a more realistic ask.`,
+        }
+      }
+      if (bestBid !== null && priceEach < bestBid * 0.8) {
+        return {
+          systemMessage: `Blocked create_sell_order locally: price ${priceEach} is too far below the recent best bid ${bestBid} for ${itemId} at ${locationKey}.`,
+          errorMessage: `Error: [price_out_of_range] Proposed sell price ${priceEach} is unrealistically below the recent market bid ${bestBid} for ${itemId} at ${locationKey}. Choose a more realistic ask.`,
+        }
+      }
+    }
+  }
+
+  return null
+}
+
+function validateCancelOrderCommand(
+  args: Record<string, unknown> | undefined,
+): { systemMessage: string; errorMessage: string } | null {
+  if (!args || Object.keys(args).length === 0) {
+    return {
+      systemMessage: 'Blocked cancel_order locally: missing order_id. Inspect live orders first and cancel by exact order_id only.',
+      errorMessage: formatCommandError('cancel_order', 'invalid_payload', 'invalid_payload: cancel_order requires order_id. Use view_orders to inspect your orders and then cancel the exact order_id.'),
+    }
+  }
+
+  const orderId = pickFirstStringArg(args.order_id, args.id)
+  if (!orderId) {
+    return {
+      systemMessage: 'Blocked cancel_order locally: order fields were provided, but no order_id was included. Do not cancel by item_id, quantity, or price.',
+      errorMessage: formatCommandError('cancel_order', 'invalid_payload', 'invalid_payload: cancel_order requires order_id. Use view_orders to inspect your orders and then cancel the exact order_id.'),
+    }
+  }
+
+  return null
+}
+
+function normalizeSellOrderArgs(
+  profileId: string,
+  command: string,
+  args: Record<string, unknown> | undefined,
+  gameState: Record<string, unknown> | null | undefined,
+): { changed: boolean; args: Record<string, unknown> | undefined; message: string } {
+  if (command !== 'create_sell_order' || !args) return { changed: false, args, message: '' }
+
+  const itemId = pickFirstStringArg(args.item_id, args.item, args.item_name)
+  const locationKey = extractSellLocationKey(gameState)
+  if (!itemId || !locationKey) return { changed: false, args, message: '' }
+
+  const market = getMarketSnapshot(profileId, locationKey, itemId)
+  if (!market) return { changed: false, args, message: '' }
+
+  const next = { ...args }
+  const currentPrice = toFiniteNumber(next.price_each ?? next.price ?? next.unit_price)
+  const suggested = suggestSellOrderPrice(market.bestBid, market.bestAsk)
+  if (suggested === null) return { changed: false, args, message: '' }
+
+  const tooLow = currentPrice === null || currentPrice <= 0 || (market.bestBid !== null && currentPrice < market.bestBid * 0.8)
+  const tooHigh = currentPrice !== null && market.bestAsk !== null && currentPrice > market.bestAsk * 1.5
+  if (!tooLow && !tooHigh) return { changed: false, args, message: '' }
+
+  next.price_each = suggested
+  delete next.price
+  delete next.unit_price
+  return {
+    changed: true,
+    args: next,
+    message: `Normalized create_sell_order price for ${itemId} at ${locationKey}: price_each=${suggested}`,
+  }
+}
+
+function suggestSellOrderPrice(bestBid: number | null, bestAsk: number | null): number | null {
+  if (bestAsk !== null && bestAsk > 0) {
+    if (bestBid !== null && bestBid > 0 && bestAsk - bestBid <= 2) {
+      return Math.max(1, bestBid + 1)
+    }
+    return Math.max(1, bestAsk)
+  }
+  if (bestBid !== null && bestBid > 0) {
+    return Math.max(1, bestBid + 1)
+  }
+  return null
+}
+
+function rerouteSellToOrder(
+  profileId: string,
+  command: string,
+  args: Record<string, unknown> | undefined,
+  gameState: Record<string, unknown> | null | undefined,
+): { changed: boolean; command: string; args: Record<string, unknown> | undefined; message: string } {
+  if (command !== 'sell' || !args) return { changed: false, command, args, message: '' }
+
+  const itemId = pickFirstStringArg(args.item_id, args.item, args.item_name)
+  const quantity = toFiniteNumber(args.quantity ?? args.qty ?? args.amount ?? args.quantity_sold)
+  const locationKey = extractSellLocationKey(gameState)
+  if (!itemId || quantity === null || quantity <= 0 || !locationKey) {
+    return { changed: false, command, args, message: '' }
+  }
+
+  const market = getMarketSnapshot(profileId, locationKey, itemId)
+  if (!market) return { changed: false, command, args, message: '' }
+  if ((market.bidVolume ?? 0) > 0 && (market.bestBid ?? 0) > 0) {
+    return { changed: false, command, args, message: '' }
+  }
+
+  const suggestedPrice = suggestSellOrderPrice(market.bestBid, market.bestAsk)
+  if (suggestedPrice === null) return { changed: false, command, args, message: '' }
+
+  return {
+    changed: true,
+    command: 'create_sell_order',
+    args: {
+      item_id: itemId,
+      quantity,
+      price_each: suggestedPrice,
+    },
+    message: `Rerouted sell -> create_sell_order for ${itemId} at ${locationKey}: no recent instant-buy liquidity, using price_each=${suggestedPrice}`,
   }
 }
 
@@ -630,6 +921,97 @@ function parseNotification(n: unknown): { tag: string; text: string } | null {
     message = (notif.message as string) || JSON.stringify(n)
   }
   return { tag, text: annotateNotification(tag, message) }
+}
+
+function mergeGameStateSnapshot(
+  current: Record<string, unknown> | null | undefined,
+  resp: CommandResult,
+): Record<string, unknown> | null {
+  const payload = (resp.structuredContent ?? resp.result) as Record<string, unknown> | undefined
+  if (!payload || typeof payload !== 'object') return current || null
+
+  const next = current && typeof current === 'object' ? { ...current } : {}
+  let changed = false
+
+  const player = payload.player
+  if (player && typeof player === 'object') {
+    next.player = player
+    changed = true
+  }
+
+  const ship = payload.ship
+  if (ship && typeof ship === 'object') {
+    next.ship = ship
+    changed = true
+  }
+
+  const modules = payload.modules
+  if (Array.isArray(modules)) {
+    next.modules = modules
+    changed = true
+  }
+
+  const locationWrapper = payload.location
+  if (locationWrapper && typeof locationWrapper === 'object') {
+    next.location = locationWrapper
+    changed = true
+  } else if ((payload.poi_id || payload.poi_name || payload.poi_type || payload.system_id || payload.system_name) && !('location' in payload)) {
+    next.location = {
+      ...(next.location && typeof next.location === 'object' ? next.location as Record<string, unknown> : {}),
+      system_id: payload.system_id,
+      system_name: payload.system_name,
+      poi_id: payload.poi_id,
+      poi_name: payload.poi_name,
+      poi_type: payload.poi_type,
+      docked_at: payload.docked_at,
+    }
+    changed = true
+  } else if (payload.location && typeof payload.location === 'object') {
+    next.location = payload.location
+    changed = true
+  }
+
+  const poiBlock = payload.poi
+  if (poiBlock && typeof poiBlock === 'object') {
+    const poi = poiBlock as Record<string, unknown>
+    next.location = {
+      ...(next.location && typeof next.location === 'object' ? next.location as Record<string, unknown> : {}),
+      poi_id: poi.id ?? (next.location as Record<string, unknown> | undefined)?.poi_id,
+      poi_name: poi.name ?? (next.location as Record<string, unknown> | undefined)?.poi_name,
+      poi_type: poi.type ?? (next.location as Record<string, unknown> | undefined)?.poi_type,
+      system_id: poi.system_id ?? (next.location as Record<string, unknown> | undefined)?.system_id,
+    }
+    changed = true
+  }
+
+  return changed ? next : (current || null)
+}
+
+function ingestMarketSnapshot(profileId: string, command: string, resp: CommandResult): void {
+  if (command !== 'view_market' && command !== 'analyze_market') return
+  const payload = (resp.structuredContent ?? resp.result) as Record<string, unknown> | undefined
+  if (!payload || typeof payload !== 'object') return
+
+  const locationKey = pickFirstStringArg(payload.base, payload.station_name, payload.station, payload.base_name)
+  if (!locationKey) return
+
+  const candidates = [payload.items, payload.market, (payload.result as Record<string, unknown> | undefined)?.items]
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) continue
+    for (const item of candidate) {
+      if (!item || typeof item !== 'object') continue
+      const record = item as Record<string, unknown>
+      const itemId = pickFirstStringArg(record.item_id, record.id, record.name)
+      if (!itemId) continue
+      rememberMarketSnapshot(profileId, locationKey, itemId, {
+        bestBid: toFiniteNumber(record.best_bid ?? record.bid_price ?? record.buy_price ?? record.highest_buy),
+        bestAsk: toFiniteNumber(record.best_ask ?? record.ask_price ?? record.sell_price ?? record.lowest_sell),
+        bidVolume: toFiniteNumber(record.bid_volume ?? record.buy_volume ?? record.demand ?? record.quantity_buy),
+        askVolume: toFiniteNumber(record.ask_volume ?? record.sell_volume ?? record.supply ?? record.quantity_sell ?? record.quantity),
+      })
+    }
+    return
+  }
 }
 
 function formatPendingHint(command: string, result: unknown): string | null {

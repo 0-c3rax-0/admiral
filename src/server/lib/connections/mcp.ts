@@ -112,7 +112,7 @@ export class McpConnection implements GameConnection {
   }
 
   isConnected(): boolean {
-    return this.connected
+    return this.connected && !!this.sessionId
   }
 
   private async callTool(name: string, args: Record<string, unknown>): Promise<{

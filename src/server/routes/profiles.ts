@@ -333,8 +333,28 @@ function extractMarketEntries(data: unknown): Array<{
     record.items,
     record.orders,
     record.market,
+    record.entries,
+    record.listings,
     record.result && typeof record.result === 'object' ? (record.result as Record<string, unknown>).items : null,
     record.result && typeof record.result === 'object' ? (record.result as Record<string, unknown>).orders : null,
+    record.result && typeof record.result === 'object' ? (record.result as Record<string, unknown>).entries : null,
+    record.result && typeof record.result === 'object' ? (record.result as Record<string, unknown>).listings : null,
+    record.market && typeof record.market === 'object' ? (record.market as Record<string, unknown>).items : null,
+    record.market && typeof record.market === 'object' ? (record.market as Record<string, unknown>).orders : null,
+    record.market && typeof record.market === 'object' ? (record.market as Record<string, unknown>).entries : null,
+    record.market && typeof record.market === 'object' ? (record.market as Record<string, unknown>).listings : null,
+    record.result && typeof record.result === 'object' && (record.result as Record<string, unknown>).market && typeof (record.result as Record<string, unknown>).market === 'object'
+      ? ((record.result as Record<string, unknown>).market as Record<string, unknown>).items
+      : null,
+    record.result && typeof record.result === 'object' && (record.result as Record<string, unknown>).market && typeof (record.result as Record<string, unknown>).market === 'object'
+      ? ((record.result as Record<string, unknown>).market as Record<string, unknown>).orders
+      : null,
+    record.result && typeof record.result === 'object' && (record.result as Record<string, unknown>).market && typeof (record.result as Record<string, unknown>).market === 'object'
+      ? ((record.result as Record<string, unknown>).market as Record<string, unknown>).entries
+      : null,
+    record.result && typeof record.result === 'object' && (record.result as Record<string, unknown>).market && typeof (record.result as Record<string, unknown>).market === 'object'
+      ? ((record.result as Record<string, unknown>).market as Record<string, unknown>).listings
+      : null,
   ]
 
   for (const candidate of candidates) {
@@ -345,13 +365,24 @@ function extractMarketEntries(data: unknown): Array<{
         const row = item as Record<string, unknown>
         const itemName = String(row.name ?? row.item_name ?? row.item_id ?? '').trim()
         if (!itemName) return null
+        const directPrice = toFiniteNumber(
+          row.price ?? row.unit_price ?? row.market_price ?? row.avg_price ?? row.average_price ?? row.value
+        )
+        const nestedBid = bestOrderPrice(row.buy_orders, 'desc')
+        const nestedAsk = bestOrderPrice(row.sell_orders, 'asc')
+        const nestedBidVolume = sumOrderVolume(row.buy_orders)
+        const nestedAskVolume = sumOrderVolume(row.sell_orders)
         return {
           item_id: stringOrNull(row.item_id),
           item_name: itemName,
-          best_bid: toFiniteNumber(row.best_bid ?? row.bid_price ?? row.buy_price ?? row.highest_buy ?? row.bid),
-          best_ask: toFiniteNumber(row.best_ask ?? row.ask_price ?? row.sell_price ?? row.lowest_sell ?? row.ask),
-          bid_volume: toFiniteNumber(row.bid_volume ?? row.buy_volume ?? row.demand ?? row.quantity_buy),
-          ask_volume: toFiniteNumber(row.ask_volume ?? row.sell_volume ?? row.supply ?? row.quantity_sell ?? row.quantity),
+          best_bid: toFiniteNumber(
+            row.best_bid ?? row.bid_price ?? row.buy_price ?? row.highest_buy ?? row.bid ?? nestedBid ?? directPrice
+          ),
+          best_ask: toFiniteNumber(
+            row.best_ask ?? row.ask_price ?? row.sell_price ?? row.lowest_sell ?? row.ask ?? nestedAsk ?? directPrice
+          ),
+          bid_volume: toFiniteNumber(row.bid_volume ?? row.buy_volume ?? row.demand ?? row.quantity_buy ?? row.buy_quantity ?? nestedBidVolume),
+          ask_volume: toFiniteNumber(row.ask_volume ?? row.sell_volume ?? row.supply ?? row.quantity_sell ?? row.sell_quantity ?? nestedAskVolume ?? row.quantity),
         }
       })
       .filter((entry): entry is {
@@ -386,6 +417,34 @@ function toFiniteNumber(value: unknown): number | null {
     return Number.isFinite(parsed) ? parsed : null
   }
   return null
+}
+
+function bestOrderPrice(orders: unknown, direction: 'asc' | 'desc'): number | null {
+  if (!Array.isArray(orders)) return null
+  let best: number | null = null
+  for (const order of orders) {
+    if (!order || typeof order !== 'object') continue
+    const record = order as Record<string, unknown>
+    const price = toFiniteNumber(record.price_each ?? record.price ?? record.unit_price ?? record.bid_price ?? record.ask_price)
+    if (price === null) continue
+    if (best === null || (direction === 'asc' ? price < best : price > best)) best = price
+  }
+  return best
+}
+
+function sumOrderVolume(orders: unknown): number | null {
+  if (!Array.isArray(orders)) return null
+  let total = 0
+  let found = false
+  for (const order of orders) {
+    if (!order || typeof order !== 'object') continue
+    const record = order as Record<string, unknown>
+    const volume = toFiniteNumber(record.quantity ?? record.remaining_quantity ?? record.volume ?? record.available)
+    if (volume === null) continue
+    total += volume
+    found = true
+  }
+  return found ? total : null
 }
 
 function stringOrNull(value: unknown): string | null {

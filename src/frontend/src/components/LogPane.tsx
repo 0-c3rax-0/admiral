@@ -49,6 +49,11 @@ interface Props {
   connected?: boolean
 }
 
+type CatalogPreview = {
+  type: 'ships' | 'modules' | 'items'
+  rows: Array<{ title: string; meta: string[]; note: string | null }>
+}
+
 export function LogPane({ profileId, profileName, connected }: Props) {
   const [entries, setEntries] = useState<LogEntry[]>(() => logCache.get(profileId) || [])
   const [enabledFilters, setEnabledFilters] = useState<Set<string>>(() => new Set(ALL_FILTER_KEYS))
@@ -413,6 +418,7 @@ function LogDetailModal({ entry, onClose }: { entry: LogEntry; onClose: () => vo
   const content = entry.detail && entry.detail !== entry.summary
     ? entry.detail
     : entry.summary
+  const catalogPreview = parseCatalogPreview(content)
 
   async function handleCopy() {
     try {
@@ -483,6 +489,11 @@ function LogDetailModal({ entry, onClose }: { entry: LogEntry; onClose: () => vo
 
         {/* Content */}
         <div ref={contentRef} onScroll={handleContentScroll} className="flex-1 overflow-auto relative">
+          {catalogPreview ? (
+            <div className="border-b border-border">
+              <CatalogPreviewCard preview={catalogPreview} />
+            </div>
+          ) : null}
           {looksLikeJson(content) ? (
             <JsonHighlight json={content} className="px-3.5 py-2.5 text-[11px] leading-relaxed" />
           ) : entry.type === 'llm_thought' ? (
@@ -520,6 +531,39 @@ function LogDetailModal({ entry, onClose }: { entry: LogEntry; onClose: () => vo
   )
 }
 
+function CatalogPreviewCard({ preview }: { preview: CatalogPreview }) {
+  const title = preview.type === 'ships'
+    ? 'Catalog Ships'
+    : preview.type === 'modules'
+      ? 'Catalog Modules'
+      : 'Catalog Items'
+
+  return (
+    <div className="px-3.5 py-3">
+      <div className="mb-2 text-[10px] uppercase tracking-[1.2px] text-muted-foreground">{title}</div>
+      <div className="space-y-2">
+        {preview.rows.slice(0, 8).map((row, index) => (
+          <div key={`${row.title}-${index}`} className="border border-border bg-background/40 px-2.5 py-2">
+            <div className="text-[12px] text-foreground">{row.title}</div>
+            {row.meta.length > 0 ? (
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                {row.meta.map((item, itemIndex) => (
+                  <span key={`${item}-${itemIndex}`} className="border border-border bg-card px-1.5 py-0.5 text-[10px] uppercase tracking-[0.8px] text-muted-foreground">
+                    {item}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+            {row.note ? (
+              <div className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">{row.note}</div>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function FilterCheckbox({ label, count, checked, indeterminate, onChange }: {
   label: string
   count?: number
@@ -552,6 +596,131 @@ function looksLikeJson(text: string): boolean {
   const trimmed = text.trim()
   return (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
          (trimmed.startsWith('[') && trimmed.endsWith(']'))
+}
+
+function parseCatalogPreview(content: string): CatalogPreview | null {
+  if (!looksLikeJson(content)) return null
+  try {
+    const parsed = JSON.parse(content) as Record<string, unknown>
+    const data = (parsed.structuredContent ?? parsed.result ?? parsed) as Record<string, unknown>
+    if (!data || typeof data !== 'object') return null
+    const nested = (data.result && typeof data.result === 'object') ? data.result as Record<string, unknown> : null
+
+    const shipRows = extractCatalogPreviewRows(
+      data.ships ?? data.listings ?? data.offers ?? data.items ?? nested?.ships ?? nested?.items
+    )
+    if (shipRows.length > 0) {
+      return {
+        type: 'ships',
+        rows: shipRows.map((record) => ({
+          title: firstString(record.name, record.ship_name, record.class_name, record.ship_class, record.class_id) || 'Unknown ship',
+          meta: [
+            firstString(record.category, record.ship_category, record.role),
+            formatMaterials(record.build_material_requirements ?? record.material_requirements ?? record.build_materials),
+            formatSkills(record.required_skills ?? record.skill_requirements ?? record.skills_required),
+          ].filter(Boolean) as string[],
+          note: firstString(record.lore, record.description, record.flavor_text),
+        })),
+      }
+    }
+
+    const moduleRows = extractCatalogPreviewRows(data.modules ?? nested?.modules)
+    if (moduleRows.length > 0) {
+      return {
+        type: 'modules',
+        rows: moduleRows.map((record) => ({
+          title: firstString(record.name, record.module_name, record.item_id, record.id) || 'Unknown module',
+          meta: [
+            formatStat('reach', record.combat_reach ?? record.range ?? record.weapon_range),
+            formatStat('ammo', record.ammo_type ?? record.ammo ?? record.ammunition_type),
+            formatStat('accuracy', record.accuracy_bonus ?? record.hit_bonus ?? record.precision_bonus),
+            formatStat('survey', record.survey_power ?? record.scan_power),
+            formatSkills(record.required_skills ?? record.skill_requirements ?? record.skills_required),
+          ].filter(Boolean) as string[],
+          note: null,
+        })),
+      }
+    }
+
+    const itemRows = extractCatalogPreviewRows(data.items ?? nested?.items)
+    const hazardousRows = itemRows
+      .map((record) => {
+        const warnings = [
+          ...asArray(record.hazardous_material_warnings),
+          ...asArray(record.hazard_warnings),
+          ...asArray(record.warnings),
+        ]
+          .map((value) => typeof value === 'string' ? value.trim() : '')
+          .filter(Boolean)
+        if (warnings.length === 0) return null
+        return {
+          title: firstString(record.name, record.item_name, record.item_id, record.id) || 'Unknown item',
+          meta: ['hazardous'],
+          note: warnings.join(' | '),
+        }
+      })
+      .filter((row): row is { title: string; meta: string[]; note: string } => Boolean(row))
+
+    if (hazardousRows.length > 0) return { type: 'items', rows: hazardousRows }
+  } catch {
+    return null
+  }
+  return null
+}
+
+function extractCatalogPreviewRows(value: unknown): Array<Record<string, unknown>> {
+  return asArray(value).filter((entry): entry is Record<string, unknown> => typeof entry === 'object' && entry !== null)
+}
+
+function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : []
+}
+
+function firstString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return null
+}
+
+function formatStat(label: string, value: unknown): string | null {
+  if (typeof value === 'string' && value.trim()) return `${label} ${value.trim()}`
+  if (typeof value === 'number' && Number.isFinite(value)) return `${label} ${value}`
+  return null
+}
+
+function formatSkills(value: unknown): string | null {
+  if (!value || typeof value !== 'object') return null
+  const entries = Object.entries(value as Record<string, unknown>)
+    .map(([skill, level]) => {
+      const normalizedLevel =
+        typeof level === 'object' && level && 'level' in (level as Record<string, unknown>)
+          ? (level as Record<string, unknown>).level
+          : level
+      if (typeof normalizedLevel !== 'number' && typeof normalizedLevel !== 'string') return null
+      return `${skill} ${normalizedLevel}`
+    })
+    .filter((entry): entry is string => Boolean(entry))
+  return entries.length > 0 ? entries.slice(0, 3).join(', ') : null
+}
+
+function formatMaterials(value: unknown): string | null {
+  if (!Array.isArray(value) || value.length === 0) return null
+  const parts = value
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return null
+      const record = entry as Record<string, unknown>
+      const name = firstString(record.name, record.item_name, record.material_name, record.item_id, record.id)
+      if (!name) return null
+      const quantity = typeof record.quantity === 'number' || typeof record.quantity === 'string'
+        ? ` x${record.quantity}`
+        : typeof record.amount === 'number' || typeof record.amount === 'string'
+          ? ` x${record.amount}`
+          : ''
+      return `${name}${quantity}`
+    })
+    .filter((entry): entry is string => Boolean(entry))
+  return parts.length > 0 ? `build ${parts.slice(0, 3).join(', ')}` : null
 }
 
 /** Normalize a timestamp into a proper ISO 8601 string so Date parsing is

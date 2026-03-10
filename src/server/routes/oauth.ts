@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { loginGeminiCli } from '@mariozechner/pi-ai'
+import { loginGeminiCli } from '@mariozechner/pi-ai/oauth'
 import { getPreference, getProvider, setPreference, upsertProvider } from '../lib/db'
 import fs from 'fs'
 import os from 'os'

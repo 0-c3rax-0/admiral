@@ -667,10 +667,10 @@ export function getStatsDelta1h(profileId: string): StatsDelta1h | null {
   return {
     latest_ts: newest?.ts ?? null,
     anchor_ts: anchor?.ts ?? null,
-    credits: numOrZero(newest?.credits) - numOrZero(anchor?.credits),
-    ore_mined: numOrZero(newest?.ore_mined) - numOrZero(anchor?.ore_mined),
-    trades_completed: numOrZero(newest?.trades_completed) - numOrZero(anchor?.trades_completed),
-    systems_explored: numOrZero(newest?.systems_explored) - numOrZero(anchor?.systems_explored),
+    credits: deltaUsingNearestValues(snapshots, oneHourAgo, 'credits'),
+    ore_mined: deltaUsingNearestValues(snapshots, oneHourAgo, 'ore_mined'),
+    trades_completed: deltaUsingNearestValues(snapshots, oneHourAgo, 'trades_completed'),
+    systems_explored: deltaUsingNearestValues(snapshots, oneHourAgo, 'systems_explored'),
   }
 }
 
@@ -736,6 +736,24 @@ export function listProfileSkills(): Array<{ profile_id: string; ts: string; ski
 
 function numOrZero(v: number | null | undefined): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : 0
+}
+
+function deltaUsingNearestValues(
+  snapshots: StatsSnapshotRow[],
+  oneHourAgo: number,
+  key: 'credits' | 'ore_mined' | 'trades_completed' | 'systems_explored'
+): number {
+  const newest = snapshots.find((snapshot) => typeof snapshot[key] === 'number' && Number.isFinite(snapshot[key] as number))
+  if (!newest) return 0
+
+  const anchor = snapshots.find((snapshot) => (
+    parseSqliteUtcTimestamp(snapshot.ts) <= oneHourAgo &&
+    typeof snapshot[key] === 'number' &&
+    Number.isFinite(snapshot[key] as number)
+  )) || [...snapshots].reverse().find((snapshot) => typeof snapshot[key] === 'number' && Number.isFinite(snapshot[key] as number))
+
+  if (!anchor) return 0
+  return (newest[key] as number) - (anchor[key] as number)
 }
 
 export function createSupervisorRun(input: {

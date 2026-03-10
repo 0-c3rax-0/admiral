@@ -150,7 +150,7 @@ export class WebSocketConnection implements GameConnection {
   }
 
   isConnected(): boolean {
-    return this.connected
+    return this.connected && !!this.ws && this.ws.readyState === WebSocket.OPEN
   }
 
   private async sendCommand(command: string, args?: Record<string, unknown>): Promise<CommandResult> {

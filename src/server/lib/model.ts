@@ -1,4 +1,5 @@
-import { getModel, getModels, getProviders, getOAuthApiKey } from '@mariozechner/pi-ai'
+import { getModel, getModels, getProviders } from '@mariozechner/pi-ai'
+import { getOAuthApiKey } from '@mariozechner/pi-ai/oauth'
 import type { Model, KnownProvider } from '@mariozechner/pi-ai'
 import { getPreference, getProvider, setPreference } from './db'
 

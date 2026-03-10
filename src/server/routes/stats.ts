@@ -29,11 +29,10 @@ stats.get('/summary', (c) => {
     }
 
     if (snapshots.length > 0) {
-      const anchor = snapshots.find((s) => parseSqliteUtcTimestamp(s.ts) <= oneHourAgo) || snapshots[snapshots.length - 1]
-      creditsDelta1h += num(newest?.credits) - num(anchor?.credits)
-      oreDelta1h += num(newest?.ore_mined) - num(anchor?.ore_mined)
-      tradesDelta1h += num(newest?.trades_completed) - num(anchor?.trades_completed)
-      systemsDelta1h += num(newest?.systems_explored) - num(anchor?.systems_explored)
+      creditsDelta1h += deltaUsingNearestValues(snapshots, oneHourAgo, 'credits')
+      oreDelta1h += deltaUsingNearestValues(snapshots, oneHourAgo, 'ore_mined')
+      tradesDelta1h += deltaUsingNearestValues(snapshots, oneHourAgo, 'trades_completed')
+      systemsDelta1h += deltaUsingNearestValues(snapshots, oneHourAgo, 'systems_explored')
     }
 
     events24h += events.filter((e) => parseSqliteUtcTimestamp(e.ts) >= now - (24 * 60 * 60 * 1000)).length
@@ -94,6 +93,30 @@ export default stats
 
 function num(v: number | null | undefined): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : 0
+}
+
+function deltaUsingNearestValues(
+  snapshots: Array<{
+    ts: string
+    credits: number | null
+    ore_mined: number | null
+    trades_completed: number | null
+    systems_explored: number | null
+  }>,
+  oneHourAgo: number,
+  key: 'credits' | 'ore_mined' | 'trades_completed' | 'systems_explored'
+): number {
+  const newest = snapshots.find((snapshot) => typeof snapshot[key] === 'number' && Number.isFinite(snapshot[key] as number))
+  if (!newest) return 0
+
+  const anchor = snapshots.find((snapshot) => (
+    parseSqliteUtcTimestamp(snapshot.ts) <= oneHourAgo &&
+    typeof snapshot[key] === 'number' &&
+    Number.isFinite(snapshot[key] as number)
+  )) || [...snapshots].reverse().find((snapshot) => typeof snapshot[key] === 'number' && Number.isFinite(snapshot[key] as number))
+
+  if (!anchor) return 0
+  return (newest[key] as number) - (anchor[key] as number)
 }
 
 function parseSqliteUtcTimestamp(ts: string | null | undefined): number {

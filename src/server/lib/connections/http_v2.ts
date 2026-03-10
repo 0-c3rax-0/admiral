@@ -1,6 +1,7 @@
 import type { GameConnection, LoginResult, RegisterResult, CommandResult, NotificationHandler } from './interface'
 import { USER_AGENT } from './interface'
 import { fetchOpenApiSpec, type SpecLogFn } from '../schema'
+import { buildNamespacedActionAlias } from '../schema'
 import { normalizeCommandResult } from './command-meta'
 
 const MAX_RECONNECT_ATTEMPTS = 6
@@ -93,6 +94,8 @@ export class HttpV2Connection implements GameConnection {
         const route = `${tool}/${action}`
         // v1-style short name (action) -> route
         addCandidate(action, route)
+        const alias = buildNamespacedActionAlias(tool, action)
+        if (alias) addCandidate(alias, route)
         // v2 operationId -> route
         if (operationId) {
           addCandidate(operationId, route)
@@ -234,7 +237,7 @@ export class HttpV2Connection implements GameConnection {
   }
 
   isConnected(): boolean {
-    return this.connected
+    return this.connected && !!this.session && !this.isSessionExpiring()
   }
 
   /** Returns the v1 base URL when the v2 route map is unavailable. */

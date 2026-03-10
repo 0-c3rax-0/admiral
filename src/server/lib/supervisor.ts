@@ -16,6 +16,15 @@ import type { MutationState, NavigationState } from './agent'
 import { createGameConnection } from './game-connection'
 import { fetchGameCommands, parseRuntimeCommandResult } from './schema'
 import type { Profile } from '../../shared/types'
+import {
+  applyCommissionQuotes,
+  dedupeShipOffers,
+  extractShipOffers,
+  formatRequiredSkills,
+  normalizeCatalogKey,
+  type ShipOffer as CatalogShipOffer,
+  type SkillMap,
+} from './catalog'
 
 const DEFAULT_INTERVAL_SEC = 45
 const MAX_CANDIDATES = 5
@@ -63,6 +72,12 @@ type VerifiedCommands = {
   loadedFrom: string
 }
 
+type CommandHintSignal = {
+  attempted: string
+  suggestions: string[]
+  source: string
+}
+
 type MapSystem = {
   id: string
   name: string
@@ -97,8 +112,6 @@ type ShipCatalogEntry = {
   defenseSlots: number
   utilitySlots: number
 }
-
-type SkillMap = Record<string, number>
 
 type ShipOffer = {
   name: string
@@ -246,7 +259,8 @@ class FleetSupervisor {
       const routeSignals = await this.buildRouteSignals(profile.server_url, status)
       const shipUpgradeSignals = await this.buildShipUpgradeSignals(profile, status)
       const verifiedCommands = await this.getVerifiedCommands(profile)
-      const adviceSignals = buildAdviceSignals(status, recentSignals, routeSignals, shipUpgradeSignals, verifiedCommands, loopSignal)
+      const commandHintSignals = buildCommandHintSignals(logs, verifiedCommands)
+      const adviceSignals = buildAdviceSignals(status, recentSignals, routeSignals, shipUpgradeSignals, verifiedCommands, loopSignal, commandHintSignals)
       const noisyState =
         status.mutation_state !== 'idle' ||
         recentSignals.length > 0 ||
@@ -532,6 +546,7 @@ function buildAdviceSignals(
   shipUpgradeSignals: string[],
   verifiedCommands: VerifiedCommands | null,
   loopSignal: LoopSignal,
+  commandHintSignals: CommandHintSignal[],
 ): AdviceSignal[] {
   const signals: AdviceSignal[] = []
   const ship = status.gameState?.ship
@@ -574,6 +589,22 @@ function buildAdviceSignals(
       recommendedChecks: ['find_route'],
       recommendedActions: ['jump'],
       whyNow: 'repeating the same jump will keep failing or stalling',
+    })
+  }
+
+  for (const hint of commandHintSignals.slice(0, 2)) {
+    signals.push({
+      kind: 'verified_command_hint',
+      priority: 90,
+      summary: `A recently attempted command is not verified; switch to a supported command name before retrying.`,
+      evidence: [
+        `attempted=${hint.attempted}`,
+        hint.suggestions.length > 0 ? `try=${hint.suggestions.join(', ')}` : 'try=use get_commands or a verified command from the current API',
+        `command_validation=${hint.source}`,
+      ],
+      recommendedChecks: ['get_commands'],
+      recommendedActions: hint.suggestions,
+      whyNow: 'repeating unsupported commands wastes turns and hides the real next step',
     })
   }
 
@@ -721,6 +752,78 @@ function buildAdviceSignals(
     .map((signal) => filterAdviceSignal(signal, verifiedCommands))
     .filter((signal): signal is AdviceSignal => signal !== null)
     .sort((a, b) => b.priority - a.priority)
+}
+
+function buildCommandHintSignals(
+  logs: ReturnType<typeof getLogEntries>,
+  verifiedCommands: VerifiedCommands | null,
+): CommandHintSignal[] {
+  if (!verifiedCommands || logs.length === 0) return []
+
+  const attempted = new Set<string>()
+  const signals: CommandHintSignal[] = []
+
+  for (const entry of logs) {
+    if (entry.type !== 'tool_result' && entry.type !== 'error') continue
+    const summary = entry.summary || ''
+    const unknownMatch = summary.match(/Unknown command '([^']+)'/)
+    const blockedMatch = summary.match(/unsupported action '([^']+)'|unsupported command '([^']+)'/)
+    const name = (unknownMatch?.[1] || blockedMatch?.[1] || blockedMatch?.[2] || '').trim()
+    if (!name || attempted.has(name)) continue
+    attempted.add(name)
+
+    const suggestions = suggestVerifiedCommands(name, verifiedCommands.names).slice(0, 3)
+    signals.push({
+      attempted: name,
+      suggestions,
+      source: verifiedCommands.loadedFrom,
+    })
+  }
+
+  return signals
+}
+
+function suggestVerifiedCommands(inputRaw: string, names: Set<string>): string[] {
+  const candidates = [...names]
+  const input = normalizeCommandKey(inputRaw)
+  return candidates
+    .map((name) => {
+      const normalized = normalizeCommandKey(name)
+      let score = levenshtein(input, normalized)
+      if (normalized === input) score -= 5
+      if (normalized.startsWith(input)) score -= 3
+      if (input.startsWith(normalized)) score -= 1
+      if (normalized.includes(input)) score -= 1
+      return { name, score }
+    })
+    .sort((a, b) => a.score - b.score || a.name.length - b.name.length || a.name.localeCompare(b.name))
+    .slice(0, 5)
+    .map((entry) => entry.name)
+}
+
+function normalizeCommandKey(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, '_')
+}
+
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0
+  if (!a.length) return b.length
+  if (!b.length) return a.length
+  const prev = Array.from({ length: b.length + 1 }, (_, i) => i)
+  const curr = new Array<number>(b.length + 1).fill(0)
+  for (let i = 0; i < a.length; i++) {
+    curr[0] = i + 1
+    for (let j = 0; j < b.length; j++) {
+      const cost = a[i] === b[j] ? 0 : 1
+      curr[j + 1] = Math.min(
+        curr[j] + 1,
+        prev[j + 1] + 1,
+        prev[j] + cost,
+      )
+    }
+    for (let j = 0; j <= b.length; j++) prev[j] = curr[j]
+  }
+  return prev[b.length]
 }
 
 function parseSupervisorOutput(text: string): { nudges: Array<{ profile: string; message: string }> } | null {
@@ -918,27 +1021,28 @@ async function fetchShipUpgradeContext(profile: Profile): Promise<ShipUpgradeCon
     const commissionableOffers = extractShipOffers((commissionable.structuredContent ?? commissionable.result) as Record<string, unknown> | undefined)
     const commissionableClassIds = new Set(
       commissionableOffers
-        .map((offer) => normalizeShipKey(offer.classId || offer.name))
+        .map((offer) => normalizeCatalogKey(offer.classId || offer.name))
         .filter(Boolean),
     )
 
-    const offers = dedupeShipOffers(
-      offerResponses.flatMap((resp) => {
+    const offers = await applyCommissionQuotes(connection, profile.id, dedupeShipOffers([
+      ...commissionableOffers,
+      ...offerResponses.flatMap((resp) => {
         if (resp.error) return []
         return extractShipOffers((resp.structuredContent ?? resp.result) as Record<string, unknown> | undefined)
       }),
-    )
+    ]))
 
     return {
       offers: offers
-        .filter((offer): offer is { name: string; classId: string; price: number; requiredSkills: SkillMap } => typeof offer.price === 'number' && Number.isFinite(offer.price))
+        .filter((offer): offer is CatalogShipOffer & { price: number } => typeof offer.price === 'number' && Number.isFinite(offer.price))
         .map((offer) => ({
           name: offer.name,
           classId: offer.classId,
           price: offer.price,
           requiredSkills: offer.requiredSkills,
           skillEligible:
-            commissionableClassIds.has(normalizeShipKey(offer.classId || offer.name)) ||
+            commissionableClassIds.has(normalizeCatalogKey(offer.classId || offer.name)) ||
             hasRequiredSkills(skills, offer.requiredSkills),
         })),
       skills,
@@ -988,59 +1092,11 @@ function parseShipCatalog(html: string): Map<string, ShipCatalogEntry> {
 }
 
 function normalizeShipKey(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, ' ')
+  return normalizeCatalogKey(value)
 }
 
 function stringifyShipValue(value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
-}
-
-function extractShipOffers(data: Record<string, unknown> | undefined): Array<{ name: string; classId: string; price: number | null; requiredSkills: SkillMap }> {
-  if (!data) return []
-  const candidates = [
-    data.ships,
-    data.listings,
-    data.offers,
-    data.items,
-    (data.result as Record<string, unknown> | undefined)?.ships,
-    (data.result as Record<string, unknown> | undefined)?.items,
-  ]
-
-  for (const candidate of candidates) {
-    if (!Array.isArray(candidate)) continue
-    const offers = candidate
-      .map((item) => {
-        if (!item || typeof item !== 'object') return null
-        const record = item as Record<string, unknown>
-        const name = String(record.name || record.ship_name || record.class_name || '').trim()
-        const classId = String(record.ship_class || record.class_id || record.ship_class_id || '').trim()
-        const price = toFiniteNumber(record.price ?? record.ask_price ?? record.cost ?? record.sale_price)
-        const requiredSkills = extractRequiredSkills(record)
-        if (!name && !classId) return null
-        return { name, classId, price, requiredSkills }
-      })
-      .filter((offer): offer is { name: string; classId: string; price: number | null; requiredSkills: SkillMap } => Boolean(offer))
-    if (offers.length > 0) return offers
-  }
-
-  return []
-}
-
-function dedupeShipOffers(offers: Array<{ name: string; classId: string; price: number | null; requiredSkills: SkillMap }>): Array<{ name: string; classId: string; price: number | null; requiredSkills: SkillMap }> {
-  const deduped = new Map<string, { name: string; classId: string; price: number | null; requiredSkills: SkillMap }>()
-  for (const offer of offers) {
-    const key = `${offer.classId.toLowerCase()}|${offer.name.toLowerCase()}`
-    const existing = deduped.get(key)
-    if (
-      !existing ||
-      (existing.price !== null && offer.price !== null && offer.price < existing.price) ||
-      (existing.price === null && offer.price !== null) ||
-      (Object.keys(existing.requiredSkills).length === 0 && Object.keys(offer.requiredSkills).length > 0)
-    ) {
-      deduped.set(key, offer)
-    }
-  }
-  return [...deduped.values()]
 }
 
 function extractSkillLevels(data: Record<string, unknown> | undefined): SkillMap {
@@ -1057,31 +1113,11 @@ function extractSkillLevels(data: Record<string, unknown> | undefined): SkillMap
   return Object.fromEntries(entries)
 }
 
-function extractRequiredSkills(record: Record<string, unknown>): SkillMap {
-  const raw = record.required_skills
-  if (!raw || typeof raw !== 'object') return {}
-  const entries = Object.entries(raw as Record<string, unknown>)
-    .map(([skillId, value]) => {
-      const level = toFiniteNumber(value)
-      if (level === null) return null
-      return [normalizeShipKey(skillId), level] as const
-    })
-    .filter((entry): entry is readonly [string, number] => Boolean(entry))
-  return Object.fromEntries(entries)
-}
-
 function hasRequiredSkills(skills: SkillMap, requiredSkills: SkillMap): boolean {
   for (const [skillId, level] of Object.entries(requiredSkills)) {
     if ((skills[normalizeShipKey(skillId)] || 0) < level) return false
   }
   return true
-}
-
-function formatRequiredSkills(requiredSkills: SkillMap): string {
-  const parts = Object.entries(requiredSkills)
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([skillId, level]) => `${skillId} ${level}`)
-  return parts.join(', ')
 }
 
 function toFiniteNumber(value: unknown): number | null {

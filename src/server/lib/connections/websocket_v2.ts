@@ -5,10 +5,14 @@ import { normalizeCommandResult } from './command-meta'
 
 const RECONNECT_BASE_DELAY = 1000
 const RECONNECT_MAX_DELAY = 30_000
+const CONNECT_TIMEOUT = 10_000
 const COMMAND_TIMEOUT = 30_000
-const HEARTBEAT_INTERVAL = 20_000
+const HEARTBEAT_INTERVAL = 15_000
+const HEARTBEAT_INTERVAL_BUSY = 5_000
 const HEARTBEAT_TIMEOUT = 45_000
 const HEARTBEAT_MISSES_BEFORE_TERMINATE = 2
+const PENDING_ACTIVITY_STALE_MS = 8_000
+const MAX_PENDING_COMMANDS = 32
 
 const RESPONSE_TYPES = new Set([
   'ok',
@@ -40,10 +44,14 @@ export class WebSocketV2Connection implements GameConnection {
   private credentials: { username: string; password: string } | null = null
   private shouldReconnect = true
   private reauthInFlight: Promise<boolean> | null = null
+  private reconnectInFlight: Promise<boolean> | null = null
   private lastPongAt = 0
+  private lastActivityAt = 0
   private heartbeatMisses = 0
+  private transportLog: ((type: 'info' | 'warn' | 'error', msg: string) => void) | null = null
   private onPong = () => {
     this.lastPongAt = Date.now()
+    this.lastActivityAt = this.lastPongAt
     this.heartbeatMisses = 0
   }
 
@@ -57,26 +65,40 @@ export class WebSocketV2Connection implements GameConnection {
     this.shouldReconnect = true
     return new Promise((resolve, reject) => {
       let settled = false
+      let connectTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+        if (settled) return
+        settled = true
+        try { this.ws?.terminate() } catch { /* ignore */ }
+        reject(new Error('WebSocket connection timed out during open handshake'))
+      }, CONNECT_TIMEOUT)
       try {
         this.ws = new WebSocket(this.wsUrl, { headers: { 'User-Agent': USER_AGENT } })
         this.ws.on('unexpected-response', (_req, res) => {
           if (!this.connected && !settled) {
             settled = true
+            if (connectTimer) clearTimeout(connectTimer)
             reject(new Error(`WebSocket handshake failed: HTTP ${res.statusCode}`))
           }
         })
 
         this.ws.onopen = () => {
+          const socket = (this.ws as WebSocket & { _socket?: { setNoDelay?: (noDelay?: boolean) => void } } | null)?._socket
+          socket?.setNoDelay?.(true)
           this.connected = true
           this.reconnectAttempt = 0
           this.lastPongAt = Date.now()
+          this.lastActivityAt = this.lastPongAt
           this.heartbeatMisses = 0
           this.startHeartbeat()
+          this.logTransport('info', `WebSocket opened: ${this.wsUrl}`)
           settled = true
+          if (connectTimer) clearTimeout(connectTimer)
+          connectTimer = null
           resolve()
         }
 
         this.ws.onmessage = (event) => {
+          this.lastActivityAt = Date.now()
           const raw = String(event.data)
           const lines = raw.split('\n').filter(l => l.trim())
           for (const line of lines) {
@@ -95,9 +117,11 @@ export class WebSocketV2Connection implements GameConnection {
           this.connected = false
           this.stopHeartbeat()
           const reason = event.reason ? `: ${event.reason}` : ''
+          this.logTransport('warn', `WebSocket closed (code ${event.code}${reason})`)
           this.rejectAllPending(`Connection closed (code ${event.code}${reason})`)
           if (!settled) {
             settled = true
+            if (connectTimer) clearTimeout(connectTimer)
             reject(new Error(`WebSocket connection closed before open (code ${event.code}${reason})`))
           }
           if (this.shouldReconnect) {
@@ -106,12 +130,15 @@ export class WebSocketV2Connection implements GameConnection {
         }
 
         this.ws.onerror = (err) => {
+          this.logTransport('error', `WebSocket error: ${err.message}`)
           if (!this.connected && !settled) {
             settled = true
+            if (connectTimer) clearTimeout(connectTimer)
             reject(new Error(`WebSocket connection failed: ${err.message}`))
           }
         }
       } catch (err) {
+        if (connectTimer) clearTimeout(connectTimer)
         reject(err)
       }
     })
@@ -162,6 +189,10 @@ export class WebSocketV2Connection implements GameConnection {
     this.notificationHandlers.push(handler)
   }
 
+  setTransportLog(handler: (type: 'info' | 'warn' | 'error', msg: string) => void): void {
+    this.transportLog = handler
+  }
+
   async disconnect(): Promise<void> {
     this.shouldReconnect = false
     this.stopHeartbeat()
@@ -183,12 +214,22 @@ export class WebSocketV2Connection implements GameConnection {
   }
 
   isConnected(): boolean {
-    return this.connected
+    return this.connected && !!this.ws && this.ws.readyState === WebSocket.OPEN
   }
 
   private async sendCommand(command: string, args?: Record<string, unknown>, canRetryAuth = true): Promise<CommandResult> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      const reconnected = await this.ensureSocketReady()
+      if (!reconnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        return { error: { code: 'not_connected', message: 'WebSocket not connected' } }
+      }
+    }
+
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       return { error: { code: 'not_connected', message: 'WebSocket not connected' } }
+    }
+    if (this.pendingQueue.length >= MAX_PENDING_COMMANDS) {
+      return { error: { code: 'client_busy', message: 'Too many pending WebSocket commands; refusing to queue more work' } }
     }
 
     const msg = { type: command, payload: args || {} }
@@ -201,6 +242,7 @@ export class WebSocketV2Connection implements GameConnection {
       }, COMMAND_TIMEOUT)
 
       this.pendingQueue.push({ resolve, timer, command, args, canRetryAuth })
+      this.lastActivityAt = Date.now()
       try {
         this.ws!.send(JSON.stringify(msg))
       } catch (err) {
@@ -217,12 +259,64 @@ export class WebSocketV2Connection implements GameConnection {
     })
 
     if (!response.error || !canRetryAuth) return response
+    if (response.error.code === 'not_connected' || response.error.code === 'disconnected') {
+      const reconnected = await this.ensureSocketReady()
+      if (reconnected) return this.sendCommand(command, args, false)
+      return response
+    }
     if (!AUTH_RECOVERABLE_ERRORS.has(response.error.code)) return response
     if (command === 'login' || !this.credentials) return response
 
     const reauthed = await this.ensureAuthenticated()
     if (!reauthed) return response
     return this.sendCommand(command, args, false)
+  }
+
+  private async ensureSocketReady(): Promise<boolean> {
+    if (!this.shouldReconnect) return false
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) return true
+    if (this.reconnectInFlight) return this.reconnectInFlight
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+
+    this.reconnectInFlight = (async () => {
+      try {
+        if (this.ws) {
+          this.ws.onopen = null
+          this.ws.onmessage = null
+          this.ws.onclose = null
+          this.ws.onerror = null
+          this.ws.off('pong', this.onPong)
+          try { this.ws.close() } catch { /* ignore */ }
+          this.ws = null
+        }
+        this.connected = false
+        this.logTransport('warn', 'Attempting immediate WebSocket reconnect')
+        await this.connect()
+        this.logTransport('info', 'Immediate WebSocket reconnect succeeded')
+        if (this.credentials) {
+          const loginResp = await this.sendCommand('login', {
+            username: this.credentials.username,
+            password: this.credentials.password,
+          }, false)
+          if (loginResp.error) {
+            this.logTransport('error', `Re-login after immediate reconnect failed: ${loginResp.error.code}`)
+            return false
+          }
+          this.logTransport('info', 'Re-login after immediate reconnect succeeded')
+        }
+        return this.connected
+      } catch (err) {
+        this.logTransport('error', `Immediate WebSocket reconnect failed: ${err instanceof Error ? err.message : String(err)}`)
+        return false
+      } finally {
+        this.reconnectInFlight = null
+      }
+    })()
+
+    return this.reconnectInFlight
   }
 
   private handleMessage(msg: Record<string, unknown>): void {
@@ -278,18 +372,26 @@ export class WebSocketV2Connection implements GameConnection {
     const jitter = Math.floor(Math.random() * 500)
     const delay = baseDelay + jitter
     this.reconnectAttempt++
+    this.logTransport('warn', `Scheduling WebSocket reconnect attempt ${this.reconnectAttempt} in ${delay}ms`)
 
     this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null
       try {
         await this.connect()
+        this.logTransport('info', 'Scheduled WebSocket reconnect succeeded')
         if (this.credentials) {
-          await this.sendCommand('login', {
+          const loginResp = await this.sendCommand('login', {
             username: this.credentials.username,
             password: this.credentials.password,
           }, false)
+          if (loginResp.error) {
+            this.logTransport('error', `Re-login after scheduled reconnect failed: ${loginResp.error.code}`)
+            return
+          }
+          this.logTransport('info', 'Re-login after scheduled reconnect succeeded')
         }
-      } catch {
+      } catch (err) {
+        this.logTransport('error', `Scheduled WebSocket reconnect failed: ${err instanceof Error ? err.message : String(err)}`)
         // onclose schedules subsequent retries
       }
     }, delay)
@@ -299,9 +401,16 @@ export class WebSocketV2Connection implements GameConnection {
     this.stopHeartbeat()
     this.heartbeatTimer = setInterval(() => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
+      const now = Date.now()
+      if (this.pendingQueue.length > 0 && now - this.lastActivityAt > PENDING_ACTIVITY_STALE_MS) {
+        this.logTransport('warn', `Terminating stale WebSocket after ${now - this.lastActivityAt}ms with ${this.pendingQueue.length} pending command(s)`)
+        this.ws.terminate()
+        return
+      }
       if (Date.now() - this.lastPongAt > HEARTBEAT_TIMEOUT) {
         this.heartbeatMisses++
         if (this.heartbeatMisses >= HEARTBEAT_MISSES_BEFORE_TERMINATE) {
+          this.logTransport('warn', `Heartbeat timeout after ${Date.now() - this.lastPongAt}ms; terminating socket`)
           this.ws.terminate()
         }
         return
@@ -309,10 +418,11 @@ export class WebSocketV2Connection implements GameConnection {
       this.heartbeatMisses = 0
       try {
         this.ws.ping()
-      } catch {
+      } catch (err) {
+        this.logTransport('error', `WebSocket ping failed: ${err instanceof Error ? err.message : String(err)}`)
         this.ws.terminate()
       }
-    }, HEARTBEAT_INTERVAL)
+    }, this.pendingQueue.length > 0 ? HEARTBEAT_INTERVAL_BUSY : HEARTBEAT_INTERVAL)
   }
 
   private stopHeartbeat(): void {
@@ -320,6 +430,10 @@ export class WebSocketV2Connection implements GameConnection {
       clearInterval(this.heartbeatTimer)
       this.heartbeatTimer = null
     }
+  }
+
+  private logTransport(type: 'info' | 'warn' | 'error', msg: string): void {
+    this.transportLog?.(type, msg)
   }
 
   private async ensureAuthenticated(): Promise<boolean> {

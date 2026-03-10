@@ -26,6 +26,46 @@ const SPEC_CACHE_TTL_MS = 60 * 60 * 1000
 
 export type SpecLogFn = (type: 'info' | 'warn' | 'error', message: string) => void
 
+const GENERIC_TOOL_ACTIONS = new Set([
+  'accept',
+  'advance',
+  'build',
+  'cancel',
+  'claim',
+  'create',
+  'delete',
+  'deposit',
+  'edit',
+  'engage',
+  'help',
+  'info',
+  'join',
+  'list',
+  'login',
+  'logout',
+  'policies',
+  'quote',
+  'read',
+  'register',
+  'release',
+  'reload',
+  'retreat',
+  'salvage',
+  'scrap',
+  'sell',
+  'status',
+  'toggle',
+  'tow',
+  'transfer',
+  'types',
+  'upgrade',
+  'upgrades',
+  'view',
+  'visit',
+  'withdraw',
+  'write',
+])
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' ? value as Record<string, unknown> : null
 }
@@ -149,13 +189,32 @@ function mergeObjectSchema(spec: Record<string, unknown>, schema: Record<string,
   return { properties, required: [...required] }
 }
 
+function aliasToolName(tool: string): string {
+  if (tool === 'spacemolt') return ''
+  return tool.replace(/^spacemolt_?/, '')
+}
+
+export function buildNamespacedActionAlias(tool: string, action: string): string | null {
+  const alias = aliasToolName(tool)
+  if (!alias) return null
+  return `${alias}_${action}`
+}
+
+export function shouldAliasToolAction(tool: string, action: string): boolean {
+  return tool !== 'spacemolt' && (GENERIC_TOOL_ACTIONS.has(action) || tool !== 'spacemolt')
+}
+
 function deriveCommandName(path: string, operationId: string | undefined, toolPrefixes: string[]): string | null {
   const segments = path.replace(/^\/+|\/+$/g, '').split('/').filter(Boolean)
   const effectiveSegments = segments[0] === 'api' && /^v\d+$/.test(segments[1] || '')
     ? segments.slice(2)
     : segments
 
-  if (effectiveSegments.length === 2) return effectiveSegments[1]
+  if (effectiveSegments.length === 2) {
+    const [tool, action] = effectiveSegments
+    const alias = shouldAliasToolAction(tool, action) ? buildNamespacedActionAlias(tool, action) : null
+    return alias || action
+  }
 
   if (effectiveSegments.length === 1) {
     const segment = effectiveSegments[0]
@@ -297,8 +356,8 @@ export async function fetchGameCommands(baseUrl: string, log?: SpecLogFn): Promi
  * Format a single command as a compact signature line for the system prompt.
  * Examples:
  *   mine -- Mine resources at current location
- *   deposit_items(item_id, quantity) -- Move items from cargo to station storage
- *   view_storage(station_id?) -- View your storage at a station
+ *   storage_deposit(item_id, quantity) -- Move items from cargo to station storage
+ *   storage_view(station_id?) -- View your storage at a station
  */
 function formatCommandSignature(cmd: GameCommandInfo): string {
   let sig = cmd.name

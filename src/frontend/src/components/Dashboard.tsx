@@ -58,6 +58,8 @@ const MODE_RANK: Record<'normal' | 'soft' | 'high' | 'critical', number> = {
   critical: 3,
 }
 
+const WEBSOCKET_STATUS_GRACE_MS = 15_000
+
 export function Dashboard({ profiles: initialProfiles, providers, registrationCode, gameserverUrl, onRefresh, onShowProviders }: Props) {
   const [profiles, setProfiles] = useState(initialProfiles)
   const [searchParams, setSearchParams] = useSearchParams()
@@ -105,6 +107,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
   })
   const pollSeqRef = useRef(0)
   const appliedPollSeqRef = useRef(0)
+  const lastConnectedAtRef = useRef<Record<string, number>>({})
 
   const activeProfile = profiles.find(p => p.id === activeId)
   const runningProfiles = profiles.filter(p => statuses[p.id]?.running).length
@@ -165,10 +168,22 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
 
         const newStatuses: Record<string, RuntimeStatus> = {}
         const newPlayerData: Record<string, Record<string, unknown>> = {}
+        const nextLastConnectedAt = { ...lastConnectedAtRef.current }
         for (const p of data) {
           const id = p.id as string
+          const rawConnected = !!p.connected
+          const connectionMode = typeof p.connection_mode === 'string' ? p.connection_mode : 'http'
+          const isWebSocketMode = connectionMode === 'websocket' || connectionMode === 'websocket_v2'
+          if (rawConnected) {
+            nextLastConnectedAt[id] = Date.now()
+          }
+          const withinGrace = isWebSocketMode
+            && !rawConnected
+            && typeof nextLastConnectedAt[id] === 'number'
+            && (Date.now() - nextLastConnectedAt[id]) < WEBSOCKET_STATUS_GRACE_MS
+
           newStatuses[id] = {
-            connected: !!p.connected,
+            connected: rawConnected || withinGrace,
             running: !!p.running,
             adaptive_mode: (p.adaptive_mode as RuntimeStatus['adaptive_mode']) || 'normal',
             mutation_state: (p.mutation_state as RuntimeStatus['mutation_state']) || 'idle',
@@ -184,6 +199,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
             newPlayerData[id] = p.gameState as Record<string, unknown>
           }
         }
+        lastConnectedAtRef.current = nextLastConnectedAt
         setProfiles(data as unknown as Profile[])
         setStatuses(newStatuses)
         if (statsResp.ok) {

@@ -1,5 +1,5 @@
 
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { Square, Plug, PlugZap, Trash2, Pencil, Check, X, PanelLeft, PanelLeftClose, PanelRightClose, MessageSquare, Save, RotateCcw } from 'lucide-react'
 import type { Profile, Provider } from '@/types'
 import { Button } from '@/components/ui/button'
@@ -12,6 +12,12 @@ import { QuickCommands } from './QuickCommands'
 import { LogPane } from './LogPane'
 import { SidePane } from './SidePane'
 import { MarketBrowserModal } from './MarketBrowserModal'
+
+type CatalogPanelData = {
+  type: 'ships' | 'modules' | 'items'
+  query: string
+  rows: Array<{ title: string; meta: string[]; note: string | null }>
+}
 
 /**
  * Parse the rendered text from MCP v2 get_status into structured player data.
@@ -134,6 +140,8 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
   const [directiveSaving, setDirectiveSaving] = useState(false)
   const [showNudgeModal, setShowNudgeModal] = useState(false)
   const [showMarketModal, setShowMarketModal] = useState(false)
+  const [catalogPanel, setCatalogPanel] = useState<CatalogPanelData | null>(null)
+  const [catalogFilter, setCatalogFilter] = useState('')
   const [nudgeValue, setNudgeValue] = useState('')
   const [nudgeHistoryIndex, setNudgeHistoryIndex] = useState(-1)
   const [nudgePending, setNudgePending] = useState('')
@@ -166,6 +174,15 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
   const effectiveBudget = typeof status.effective_context_budget_ratio === 'number'
     ? `${Math.round(status.effective_context_budget_ratio * 100)}%`
     : null
+  const filteredCatalogRows = useMemo(() => {
+    if (!catalogPanel) return []
+    const query = catalogFilter.trim().toLowerCase()
+    if (!query) return catalogPanel.rows
+    return catalogPanel.rows.filter((row) => {
+      const haystack = [row.title, ...row.meta, row.note || ''].join(' ').toLowerCase()
+      return haystack.includes(query)
+    })
+  }, [catalogPanel, catalogFilter])
 
   // Auto-open name edit for new profiles
   useEffect(() => {
@@ -593,6 +610,14 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
       })
       const result = await resp.json()
 
+      if (command === 'catalog') {
+        setCatalogPanel(buildCatalogPanelData(result, args))
+        setCatalogFilter('')
+      } else if (command === 'shipyard_showroom' || command === 'browse_ships') {
+        setCatalogPanel(buildCatalogPanelData(result, { type: 'ships' }))
+        setCatalogFilter('')
+      }
+
       if (command === 'get_status') {
         const data = result.structuredContent ?? result.result
         if (data && typeof data === 'object' && ('player' in data || 'ship' in data || 'location' in data)) {
@@ -609,7 +634,7 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
     } catch {
       // Error logged by agent
     }
-  }, [profile.id])
+  }, [profile.id, onPlayerData])
 
   return (
     <div className="flex flex-col h-full">
@@ -1104,6 +1129,57 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
         running={status.running}
       />
 
+      {catalogPanel && (
+        <div className="border-b border-border bg-card/70 px-3.5 py-3">
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <div>
+              <div className="text-[10px] uppercase tracking-[1.4px] text-muted-foreground">Catalog View</div>
+              <div className="text-xs text-foreground">
+                {catalogPanel.type}{catalogPanel.query ? ` - ${catalogPanel.query}` : ''}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <Input
+                value={catalogFilter}
+                onChange={e => setCatalogFilter(e.target.value)}
+                placeholder="Filter catalog..."
+                className="h-7 w-40 text-[11px]"
+              />
+              <Button variant="ghost" size="sm" onClick={() => { setCatalogPanel(null); setCatalogFilter('') }} className="h-6 px-2 text-[10px] text-muted-foreground">
+                Clear
+              </Button>
+            </div>
+          </div>
+          <div className="mb-2 text-[10px] uppercase tracking-[1.1px] text-muted-foreground">
+            {filteredCatalogRows.length} shown{catalogPanel.rows.length !== filteredCatalogRows.length ? ` of ${catalogPanel.rows.length}` : ''}
+          </div>
+          <div className="max-h-[28rem] overflow-y-auto pr-1">
+            <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+              {filteredCatalogRows.map((row, index) => (
+                <div key={`${row.title}-${index}`} className="border border-border bg-background/50 px-3 py-2.5">
+                  <div className="text-[12px] text-foreground">{row.title}</div>
+                  {row.meta.length > 0 ? (
+                    <div className="mt-1.5 flex flex-wrap gap-1.5">
+                      {row.meta.map((item, itemIndex) => (
+                        <span key={`${item}-${itemIndex}`} className="border border-border bg-card px-1.5 py-0.5 text-[10px] uppercase tracking-[0.8px] text-muted-foreground">
+                          {item}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                  {row.note ? (
+                    <div className="mt-2 text-[11px] leading-relaxed text-muted-foreground">{row.note}</div>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          </div>
+          {filteredCatalogRows.length === 0 && (
+            <div className="mt-2 text-[11px] text-muted-foreground">No catalog entries match the current filter.</div>
+          )}
+        </div>
+      )}
+
       {/* Log pane + side pane */}
       <div ref={containerRef} className="flex flex-1 min-h-0">
         <div data-tour="log-pane" className="flex-1 min-w-0">
@@ -1270,4 +1346,151 @@ function extractCommandSkills(data: unknown): Record<string, number> | null {
     if (skills.length > 0) return Object.fromEntries(skills)
   }
   return null
+}
+
+function buildCatalogPanelData(result: unknown, args?: Record<string, unknown>): CatalogPanelData | null {
+  if (!result || typeof result !== 'object') return null
+  const root = result as Record<string, unknown>
+  const payload = root.structuredContent ?? root.result ?? root
+  if (!payload || typeof payload !== 'object') return null
+  const data = payload as Record<string, unknown>
+  const nested = (data.result && typeof data.result === 'object') ? data.result as Record<string, unknown> : null
+
+  const query = typeof args?.search === 'string'
+    ? args.search.trim()
+    : typeof args?.type === 'string'
+      ? args.type.trim()
+      : ''
+
+  const ships = extractCatalogRows(
+    data.ships ?? data.listings ?? data.offers ?? data.items ?? nested?.ships ?? nested?.items
+  )
+  if (ships.length > 0) {
+    return {
+      type: 'ships',
+      query,
+      rows: ships.map((record) => ({
+        title: pickCatalogLabel(record.name, record.ship_name, record.class_name, record.ship_class, record.class_id),
+        meta: [
+          pickCatalogString(record.category, record.ship_category, record.role),
+          formatCatalogPrice(record.commission_quote ?? record.quote_price ?? record.price ?? record.cost),
+          formatCatalogMaterials(record.build_material_requirements ?? record.material_requirements ?? record.build_materials),
+          formatCatalogSkills(record.required_skills ?? record.skill_requirements ?? record.skills_required),
+        ].filter(Boolean) as string[],
+        note: pickCatalogString(record.lore, record.description, record.flavor_text),
+      })),
+    }
+  }
+
+  const modules = extractCatalogRows(data.modules ?? nested?.modules)
+  if (modules.length > 0) {
+    return {
+      type: 'modules',
+      query,
+      rows: modules.map((record) => ({
+        title: pickCatalogLabel(record.name, record.module_name, record.item_id, record.id),
+        meta: [
+          formatCatalogStat('reach', record.combat_reach ?? record.range ?? record.weapon_range),
+          formatCatalogStat('ammo', record.ammo_type ?? record.ammo ?? record.ammunition_type),
+          formatCatalogStat('accuracy', record.accuracy_bonus ?? record.hit_bonus ?? record.precision_bonus),
+          formatCatalogStat('survey', record.survey_power ?? record.scan_power),
+          formatCatalogSkills(record.required_skills ?? record.skill_requirements ?? record.skills_required),
+        ].filter(Boolean) as string[],
+        note: pickCatalogString(record.description, record.lore),
+      })),
+    }
+  }
+
+  const items = extractCatalogRows(data.items ?? nested?.items)
+  if (items.length > 0) {
+    return {
+      type: 'items',
+      query,
+      rows: items
+        .map((record) => {
+          const warnings = [
+            ...catalogArray(record.hazardous_material_warnings),
+            ...catalogArray(record.hazard_warnings),
+            ...catalogArray(record.warnings),
+          ]
+            .map((value) => typeof value === 'string' ? value.trim() : '')
+            .filter(Boolean)
+          const meta = [
+            pickCatalogString(record.category, record.type, record.item_type, record.subtype),
+            pickCatalogString(record.rarity, record.tier, record.grade),
+            warnings.length > 0 ? 'hazardous' : null,
+          ].filter(Boolean) as string[]
+          return {
+            title: pickCatalogLabel(record.name, record.item_name, record.item_id, record.id),
+            meta,
+            note: warnings.length > 0 ? warnings.join(' | ') : pickCatalogString(record.description),
+          }
+        })
+        .filter((row) => row.title || row.note),
+    }
+  }
+
+  return null
+}
+
+function extractCatalogRows(value: unknown): Array<Record<string, unknown>> {
+  return catalogArray(value).filter((entry): entry is Record<string, unknown> => typeof entry === 'object' && entry !== null)
+}
+
+function catalogArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : []
+}
+
+function pickCatalogString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim()
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  }
+  return null
+}
+
+function pickCatalogLabel(...values: unknown[]): string {
+  return pickCatalogString(...values) || 'Unknown entry'
+}
+
+function formatCatalogStat(label: string, value: unknown): string | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return `${label} ${value}`
+  if (typeof value === 'string' && value.trim()) return `${label} ${value.trim()}`
+  return null
+}
+
+function formatCatalogPrice(value: unknown): string | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return `${value} cr`
+  if (typeof value === 'string' && value.trim()) return `${value.trim()} cr`
+  return null
+}
+
+function formatCatalogSkills(value: unknown): string | null {
+  if (!value || typeof value !== 'object') return null
+  const skills = Object.entries(value as Record<string, unknown>)
+    .map(([skill, level]) => {
+      const normalized =
+        typeof level === 'object' && level && 'level' in (level as Record<string, unknown>)
+          ? (level as Record<string, unknown>).level
+          : level
+      if (typeof normalized !== 'number' && typeof normalized !== 'string') return null
+      return `${skill} ${normalized}`
+    })
+    .filter((entry): entry is string => Boolean(entry))
+  return skills.length > 0 ? skills.slice(0, 3).join(', ') : null
+}
+
+function formatCatalogMaterials(value: unknown): string | null {
+  if (!Array.isArray(value) || value.length === 0) return null
+  const materials = value
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return null
+      const record = entry as Record<string, unknown>
+      const name = pickCatalogString(record.name, record.item_name, record.material_name, record.item_id, record.id)
+      if (!name) return null
+      const quantity = pickCatalogString(record.quantity, record.amount, record.count)
+      return `${name}${quantity ? ` x${quantity}` : ''}`
+    })
+    .filter((entry): entry is string => Boolean(entry))
+  return materials.length > 0 ? `build ${materials.slice(0, 3).join(', ')}` : null
 }

@@ -4,9 +4,11 @@ import { clearPendingMutation, getPendingMutation, setPendingMutation } from './
 type PendingNavigation = {
   command: 'travel' | 'jump'
   destination?: string
+  createdAtMs: number
 }
 
 const pendingByProfile = new Map<string, PendingNavigation>()
+const STALE_PENDING_WITHOUT_DESTINATION_MS = 15_000
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' ? value as Record<string, unknown> : null
@@ -39,6 +41,7 @@ export function getPendingNavigation(profileId: string): PendingNavigation | nul
   const restored: PendingNavigation = {
     command: persisted.command as 'travel' | 'jump',
     destination: persisted.destination || undefined,
+    createdAtMs: Date.parse(persisted.updated_at || persisted.created_at || '') || Date.now(),
   }
   pendingByProfile.set(profileId, restored)
   return restored
@@ -61,6 +64,7 @@ export function updatePendingNavigationFromResult(profileId: string, command: st
     const pending: PendingNavigation = {
       command: command as 'travel' | 'jump',
       destination: resolveDestination(command, args),
+      createdAtMs: Date.now(),
     }
     pendingByProfile.set(profileId, pending)
     setPendingMutation(profileId, pending.command, pending.destination)
@@ -131,6 +135,11 @@ export function reconcilePendingNavigationWithStatus(profileId: string, result: 
   const systemName = pickFirstString(location?.system_name, player?.current_system)
   const poiId = pickFirstString(location?.poi_id, player?.current_poi_id)
   const poiName = pickFirstString(location?.poi_name, player?.current_poi)
+  const inTransit = Boolean(
+    location?.in_transit === true ||
+    data.in_transit === true ||
+    pickFirstString(location?.transit_type, data.transit_type),
+  )
 
   if (pending.command === 'jump' && matchesDestination(pending.destination, systemId, systemName)) {
     clearPendingNavigation(profileId)
@@ -139,16 +148,23 @@ export function reconcilePendingNavigationWithStatus(profileId: string, result: 
 
   if (pending.command === 'travel' && matchesDestination(pending.destination, poiId, poiName)) {
     clearPendingNavigation(profileId)
+    return
+  }
+
+  // If a nav mutation was persisted without a target and the ship is clearly not
+  // in transit anymore, do not let that orphaned pending flag block the agent forever.
+  if (!pending.destination && !inTransit && Date.now() - pending.createdAtMs >= STALE_PENDING_WITHOUT_DESTINATION_MS) {
+    clearPendingNavigation(profileId)
   }
 }
 
 function resolveDestination(command: string, args: Record<string, unknown>): string | undefined {
   if (command === 'travel') {
-    const value = args.target_poi ?? args.id ?? args.text
+    const value = args.target_poi ?? args.poi_id ?? args.destination_id ?? args.poi ?? args.target ?? args.id ?? args.text
     return typeof value === 'string' && value.trim() ? value : undefined
   }
   if (command === 'jump') {
-    const value = args.target_system ?? args.id ?? args.text
+    const value = args.target_system ?? args.system_id ?? args.destination_system ?? args.system ?? args.target ?? args.id ?? args.text
     return typeof value === 'string' && value.trim() ? value : undefined
   }
   return undefined

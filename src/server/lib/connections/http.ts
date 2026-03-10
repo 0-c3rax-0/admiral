@@ -141,7 +141,7 @@ export class HttpConnection implements GameConnection {
   }
 
   isConnected(): boolean {
-    return this.connected
+    return this.connected && !!this.session && !this.isSessionExpiring()
   }
 
   private async ensureSession(): Promise<void> {

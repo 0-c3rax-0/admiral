@@ -22,7 +22,23 @@ interface HistoryEntry {
   args: string
 }
 
+type CommandPreset = {
+  label: string
+  command: string
+  args?: Record<string, unknown>
+  fillOnly?: boolean
+}
+
 const MAX_HISTORY = 50
+
+const COMMAND_PRESETS: CommandPreset[] = [
+  { label: 'Catalog Ships', command: 'catalog', args: { type: 'ships' } },
+  { label: 'Catalog Modules', command: 'catalog', args: { type: 'modules' } },
+  { label: 'Catalog Items', command: 'catalog', args: { type: 'items' } },
+  { label: 'Browse Ships', command: 'browse_ships' },
+  { label: 'Showroom', command: 'shipyard_showroom' },
+  { label: 'Commission Quote', command: 'commission_quote', args: { ship_class: '' }, fillOnly: true },
+]
 
 function getHistory(profileId: string): HistoryEntry[] {
   try {
@@ -198,6 +214,22 @@ export function CommandPanel({ profileId, onSend, disabled, commandInputRef, ser
     setShowAutocomplete(false)
   }
 
+  function applyPreset(preset: CommandPreset) {
+    const nextArgs = preset.args ? JSON.stringify(preset.args) : ''
+    setCommand(preset.command)
+    setArgsStr(nextArgs)
+    setHistoryIndex(-1)
+    setShowAutocomplete(false)
+
+    if (preset.fillOnly) {
+      requestAnimationFrame(() => commandRef.current?.focus())
+      return
+    }
+
+    pushHistory(profileId, { command: preset.command, args: nextArgs })
+    onSend(preset.command, preset.args)
+  }
+
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     // Autocomplete navigation
     if (showAutocomplete && matches.length > 0) {
@@ -265,6 +297,20 @@ export function CommandPanel({ profileId, onSend, disabled, commandInputRef, ser
 
   return (
     <div className="relative" data-tour="command-panel">
+      <div className="flex flex-wrap items-center gap-1.5 border-t border-border bg-card px-3.5 pt-2 pb-1.5">
+        <span className="text-[10px] uppercase tracking-[1.4px] text-muted-foreground">Presets</span>
+        {COMMAND_PRESETS.map((preset) => (
+          <button
+            key={preset.label}
+            type="button"
+            onClick={() => applyPreset(preset)}
+            disabled={disabled}
+            className="border border-border bg-background px-2 py-1 text-[10px] uppercase tracking-[0.8px] text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {preset.label}
+          </button>
+        ))}
+      </div>
       <form onSubmit={handleSubmit} className="flex items-center gap-2.5 px-3.5 py-2.5 bg-card border-t border-border">
         <span className="text-[11px] text-muted-foreground uppercase tracking-[1.5px] shrink-0">Cmd</span>
         <div className="relative flex-[2] min-w-0">

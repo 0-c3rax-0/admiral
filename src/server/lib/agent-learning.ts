@@ -8,6 +8,20 @@ const AGENTS_DIR = path.join(process.cwd(), 'data', 'agents')
 const MAX_EPISODES = 60
 const MAX_FAILURES = 40
 const MAX_RULES = 24
+const QUERY_COMMANDS = new Set([
+  'get_status', 'get_location', 'get_system', 'get_poi', 'get_cargo', 'get_ship', 'get_ships', 'get_skills',
+  'get_missions', 'get_active_missions', 'get_nearby', 'get_action_log', 'view_market', 'analyze_market',
+  'estimate_purchase', 'catalog', 'browse_ships', 'list_ships', 'quote', 'wrecks', 'forum_list', 'forum_get_thread',
+  'captains_log_list', 'captains_log_get', 'social_captains_log_list', 'social_captains_log_get',
+  'get_commands', 'get_base', 'view_orders', 'search_systems', 'find_route', 'storage_view', 'salvage_quote',
+])
+const MUTATION_COMMANDS = new Set([
+  'undock', 'travel', 'jump', 'dock', 'mine', 'sell', 'refuel', 'repair', 'craft', 'install_mod', 'accept_mission',
+  'complete_mission', 'create_sell_order', 'cancel_order', 'modify_order', 'buy_ship', 'commission_ship', 'switch_ship',
+  'insure', 'loot', 'salvage', 'join', 'chat', 'captains_log_add', 'social_chat', 'social_captains_log_add', 'buy',
+  'storage_deposit', 'storage_withdraw', 'market_create_sell_order', 'market_create_buy_order',
+  'faction_commerce_create_sell_order', 'faction_commerce_create_buy_order',
+])
 
 export interface AgentIdentity {
   version: 1
@@ -78,6 +92,12 @@ interface LastActionSnapshot {
   error_code?: string
 }
 
+interface DecisionTelemetry {
+  query_streak: number
+  last_query_at: string | null
+  last_mutation_at: string | null
+}
+
 export interface StructuredAgentMemory {
   version: 1
   episodic: Episode[]
@@ -85,6 +105,7 @@ export interface StructuredAgentMemory {
   failures: FailurePattern[]
   last_status: StatusSnapshot | null
   last_action: LastActionSnapshot | null
+  decision: DecisionTelemetry
 }
 
 interface RolePreset {
@@ -104,7 +125,7 @@ const ROLE_PRESETS: Record<AgentRole, RolePreset> = {
       'Unload or sell before cargo becomes critically full.',
       'Match the mining target to the installed mining equipment: ore miners to asteroid belts, ice harvesters to ice fields, gas harvesters to gas clouds.',
     ],
-    development_focus: ['mining_efficiency', 'inventory_discipline', 'route_planning'],
+    development_focus: ['mining_efficiency', 'inventory_discipline', 'route_planning', 'decision_efficiency'],
     playstyle: [
       'Prefer mining belts and reliable unload stations.',
       'Do not travel to a resource node that the current loadout cannot actually mine.',
@@ -118,7 +139,7 @@ const ROLE_PRESETS: Record<AgentRole, RolePreset> = {
       'Avoid bad instant sells when orderbook quality is poor.',
       'Check market conditions before committing cargo or route changes.',
     ],
-    development_focus: ['market_timing', 'inventory_discipline', 'mission_selection'],
+    development_focus: ['market_timing', 'inventory_discipline', 'mission_selection', 'query_discipline'],
     playstyle: [
       'Prefer stations, market reads, and profitable sell/buy timing.',
       'Treat cargo as inventory capital, not something to dump blindly.',
@@ -131,7 +152,7 @@ const ROLE_PRESETS: Record<AgentRole, RolePreset> = {
       'Do not start long routes without fuel validation.',
       'Prioritize discovering systems and routes over local grinding.',
     ],
-    development_focus: ['route_planning', 'risk_management', 'mission_selection'],
+    development_focus: ['route_planning', 'risk_management', 'mission_selection', 'decision_efficiency'],
     playstyle: [
       'Prefer movement, mapping, and discovery of new systems.',
       'Use travel as the main source of progress rather than staying in one loop.',
@@ -144,7 +165,7 @@ const ROLE_PRESETS: Record<AgentRole, RolePreset> = {
       'Avoid reckless losses when damaged, stranded, or outmatched.',
       'Treat survival and escape options as valid parts of aggression.',
     ],
-    development_focus: ['risk_management', 'route_planning', 'mission_selection'],
+    development_focus: ['risk_management', 'route_planning', 'mission_selection', 'decision_efficiency'],
     playstyle: [
       'Prefer high-value disruptive opportunities over routine grinding.',
       'Stay opportunistic, but do not self-destruct the account with bad risk control.',
@@ -157,7 +178,7 @@ const ROLE_PRESETS: Record<AgentRole, RolePreset> = {
       'Prefer production chains with measurable margin.',
       'Check recipe and market viability before crafting or refining.',
     ],
-    development_focus: ['market_timing', 'inventory_discipline', 'mission_selection'],
+    development_focus: ['market_timing', 'inventory_discipline', 'mission_selection', 'query_discipline'],
     playstyle: [
       'Prefer refining, crafting, and ship/equipment progression.',
       'Think in value chains instead of only raw ore liquidation.',
@@ -169,7 +190,7 @@ const ROLE_PRESETS: Record<AgentRole, RolePreset> = {
     constraints: [
       'Do not over-commit to one activity when another clearly outperforms it.',
     ],
-    development_focus: ['route_planning', 'market_timing', 'risk_management'],
+    development_focus: ['route_planning', 'market_timing', 'risk_management', 'decision_efficiency'],
     playstyle: [
       'Blend mining, travel, trading, and missions based on current opportunity.',
     ],
@@ -333,8 +354,59 @@ export function recordCommandOutcome(
   const memory = loadStructuredMemory(profileId)
   const skills = getOrCreateSkillMap(profileId)
   const ts = new Date().toISOString()
+  const isQuery = QUERY_COMMANDS.has(normalized)
+  const isMutation = MUTATION_COMMANDS.has(normalized)
   let changed = false
   let skillsChanged = false
+
+  if (isQuery) {
+    memory.decision.query_streak += 1
+    memory.decision.last_query_at = ts
+    if (memory.decision.query_streak >= 3) {
+      skillsChanged = adjustSkill(skills, 'query_discipline', -0.35 * memory.decision.query_streak) || skillsChanged
+      skillsChanged = adjustSkill(skills, 'decision_efficiency', -0.25 * memory.decision.query_streak) || skillsChanged
+      changed = confirmRule(
+        memory,
+        'After a fresh status/location check, avoid long query chains and commit to one concrete next action unless blocked.',
+        0.72,
+        ts,
+      ) || changed
+    }
+  }
+
+  if (isMutation) {
+    const queryStreak = memory.decision.query_streak
+    const prevMutationAt = memory.decision.last_mutation_at
+    const secondsSinceMutation = prevMutationAt ? Math.max(0, (Date.parse(ts) - Date.parse(prevMutationAt)) / 1000) : null
+    memory.decision.query_streak = 0
+    memory.decision.last_mutation_at = ts
+
+    if (queryStreak <= 2) {
+      skillsChanged = adjustSkill(skills, 'decision_efficiency', 1.1) || skillsChanged
+      skillsChanged = adjustSkill(skills, 'query_discipline', 0.8) || skillsChanged
+      changed = confirmRule(
+        memory,
+        'Prefer acting within one or two routine queries when the next step is already clear.',
+        0.76,
+        ts,
+      ) || changed
+    } else if (queryStreak >= 5) {
+      skillsChanged = adjustSkill(skills, 'decision_efficiency', -1.2) || skillsChanged
+      skillsChanged = adjustSkill(skills, 'query_discipline', -1.0) || skillsChanged
+      changed = confirmFailure(
+        memory,
+        'decision_loop_overquery',
+        'If the next step is routine and unblocked, stop gathering more context and commit to a mutation after at most 2-3 queries.',
+        ts,
+      ) || changed
+    }
+
+    if (secondsSinceMutation !== null && secondsSinceMutation <= 75) {
+      skillsChanged = adjustSkill(skills, 'decision_efficiency', 0.6) || skillsChanged
+    } else if (secondsSinceMutation !== null && secondsSinceMutation >= 180) {
+      skillsChanged = adjustSkill(skills, 'decision_efficiency', -0.8) || skillsChanged
+    }
+  }
 
   if (result.error) {
     memory.last_action = {
@@ -360,6 +432,16 @@ export function recordCommandOutcome(
     }
     if (result.error.code === 'already_in_system' || result.error.code === 'invalid_payload') {
       skillsChanged = adjustSkill(skills, 'route_planning', -0.5) || skillsChanged
+    }
+    if (result.error.code === 'action_pending') {
+      skillsChanged = adjustSkill(skills, 'decision_efficiency', -1.5) || skillsChanged
+      skillsChanged = adjustSkill(skills, 'query_discipline', -0.8) || skillsChanged
+      changed = confirmFailure(
+        memory,
+        'action_pending_followup',
+        'After a pending mutation, refresh state instead of stacking another action too early.',
+        ts,
+      ) || changed
     }
   } else {
     memory.last_action = {
@@ -418,11 +500,12 @@ function ensureAgentIdentity(profileId: string): AgentIdentity {
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf-8')) as AgentIdentity
     if (parsed && parsed.version === 1) {
-      const normalized: AgentIdentity = {
+      const normalizedRole = normalizeRole(parsed.role)
+      const normalized = applyRolePreset({
         ...parsed,
-        role: normalizeRole(parsed.role),
-      }
-      if (normalized.role !== parsed.role) saveAgentIdentity(profileId, normalized)
+        role: normalizedRole,
+      }, normalizedRole)
+      if (JSON.stringify(normalized) !== JSON.stringify(parsed)) saveAgentIdentity(profileId, normalized)
       return normalized
     }
   } catch {
@@ -469,6 +552,7 @@ function loadStructuredMemory(profileId: string): StructuredAgentMemory {
         failures: Array.isArray(parsed.failures) ? parsed.failures.slice(0, MAX_FAILURES) : [],
         last_status: parsed.last_status || null,
         last_action: parsed.last_action || null,
+        decision: parsed.decision || { query_streak: 0, last_query_at: null, last_mutation_at: null },
       }
     }
   } catch {
@@ -481,6 +565,7 @@ function loadStructuredMemory(profileId: string): StructuredAgentMemory {
     failures: [],
     last_status: null,
     last_action: null,
+    decision: { query_streak: 0, last_query_at: null, last_mutation_at: null },
   }
 }
 
@@ -499,6 +584,8 @@ function getOrCreateSkillMap(profileId: string): Record<string, number> {
     risk_management: 50,
     inventory_discipline: 50,
     mission_selection: 50,
+    decision_efficiency: 50,
+    query_discipline: 50,
     ...existing,
   }
 }
@@ -684,6 +771,7 @@ function inferDevelopmentFocus(seed: string): string[] {
   if (seed.includes('travel') || seed.includes('route')) focus.push('route_planning')
   if (seed.includes('mine')) focus.push('mining_efficiency')
   if (seed.includes('risk') || seed.includes('safe')) focus.push('risk_management')
+  if (seed.includes('decision') || seed.includes('efficient')) focus.push('decision_efficiency')
   return focus.length > 0 ? focus : ['market_timing', 'route_planning']
 }
 

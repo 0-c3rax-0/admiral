@@ -22,6 +22,16 @@ import { createGameConnection } from './game-connection'
 import { buildLearningContext, observeGameState, recordCommandOutcome } from './agent-learning'
 import { addTradeEvent } from './economy-db'
 import { isDockedPoi, isResourcePoi } from './poi'
+import { ingestRuntimeNotification } from './runtime-guards'
+import {
+  applyCommissionQuotes,
+  dedupeShipOffers,
+  extractItemDetails,
+  extractModuleDetails,
+  extractShipOffers,
+  formatMaterialRequirements,
+  formatRequiredSkills,
+} from './catalog'
 
 const TURN_INTERVAL = 5000
 const PROMPT_PATH = path.join(process.cwd(), 'prompt.md')
@@ -33,6 +43,13 @@ const MARKET_TELEMETRY_INTERVAL = 3
 const SHIP_TELEMETRY_INTERVAL = 8
 const MUTATION_STALL_NUDGE_THRESHOLD = 4
 const LOCAL_MUTATION_STUCK_THRESHOLD = 6
+const HTTP_V2_FALLBACK_QUERY_COMMANDS = new Set([
+  'get_status', 'get_location', 'get_system', 'get_poi', 'get_cargo', 'get_ship', 'get_ships', 'get_skills',
+  'get_missions', 'get_active_missions', 'get_nearby', 'get_action_log', 'view_market', 'analyze_market',
+  'estimate_purchase', 'catalog', 'browse_ships', 'list_ships', 'quote', 'wrecks', 'forum_list', 'forum_get_thread',
+  'captains_log_list', 'captains_log_get', 'social_captains_log_list', 'social_captains_log_get',
+  'get_commands', 'get_base', 'view_orders', 'search_systems', 'find_route', 'storage_view', 'salvage_quote',
+])
 
 export type MutationState = 'idle' | 'mutation_pending' | 'navigation_pending' | 'local_stall'
 export type NavigationState = 'docked' | 'undocked' | 'at_resource_poi' | 'navigation_pending' | 'local_stall' | 'unknown'
@@ -172,9 +189,10 @@ export class Agent {
   private async executeSilentQuery(command: string, args?: Record<string, unknown>): Promise<CommandResult | null> {
     if (!this.connection) return null
     try {
-      return await this.connection.execute(command, args)
+      const result = await this.connection.execute(command, args)
+      return await this.maybeFallbackToHttpV2(command, args, result, false)
     } catch {
-      return null
+      return await this.tryHttpV2Fallback(command, args, false)
     }
   }
 
@@ -285,31 +303,44 @@ export class Agent {
     const commissionableItems = commissionableCatalogResp?.error ? [] : extractShipOffers((commissionableCatalogResp?.structuredContent ?? commissionableCatalogResp?.result) as Record<string, unknown> | undefined)
     const showroomItems = showroomResp?.error ? [] : extractShipOffers((showroomResp?.structuredContent ?? showroomResp?.result) as Record<string, unknown> | undefined)
     const listedItems = browseResp?.error ? [] : extractShipOffers((browseResp?.structuredContent ?? browseResp?.result) as Record<string, unknown> | undefined)
-    const combined = dedupeShipOffers([
+    const combined = await applyCommissionQuotes(this.connection!, this.profileId, dedupeShipOffers([
       ...commissionableItems,
       ...showroomItems,
       ...listedItems,
-    ])
+    ]))
     if (combined.length === 0) return null
 
     const credits = toFiniteNumber(((this._gameState?.player as Record<string, unknown> | undefined) || {}).credits)
-    const practical = combined
-      .filter((offer) => offer.price !== null)
-      .sort((a, b) => (a.price ?? Number.MAX_SAFE_INTEGER) - (b.price ?? Number.MAX_SAFE_INTEGER))
-      .slice(0, 5)
+    const sorted = [...combined].sort((a, b) => {
+      const aPrice = a.price ?? Number.MAX_SAFE_INTEGER
+      const bPrice = b.price ?? Number.MAX_SAFE_INTEGER
+      return aPrice - bPrice
+    })
+    const priced = sorted.filter((offer) => offer.price !== null)
+    const affordable = credits !== null ? priced.filter((offer) => (offer.price ?? Number.MAX_SAFE_INTEGER) <= credits) : []
+    const chosen = affordable.length > 0
+      ? affordable.slice(0, 5)
+      : priced.length > 0
+        ? priced.slice(0, 5)
+        : sorted.slice(0, 5)
 
-    if (practical.length === 0) return null
+    if (chosen.length === 0) return null
 
-    const affordable = credits !== null ? practical.filter((offer) => (offer.price ?? Number.MAX_SAFE_INTEGER) <= credits) : []
-    const chosen = affordable.length > 0 ? affordable : practical
     const lines = chosen.map((offer) => {
       const price = offer.price !== null ? `${offer.price} cr` : 'price unknown'
       const label = [offer.name, offer.classId].filter(Boolean).join(' / ')
-      return `- ${label || 'Unknown ship'} at ${price}`
+      const extras = [
+        offer.category ? `category ${offer.category}` : '',
+        offer.buildMaterials.length > 0 ? `build ${formatMaterialRequirements(offer.buildMaterials)}` : '',
+        offer.requiredSkills && Object.keys(offer.requiredSkills).length > 0 ? `skills ${formatRequiredSkills(offer.requiredSkills)}` : '',
+      ].filter(Boolean)
+      return `- ${label || 'Unknown ship'} at ${price}${extras.length > 0 ? ` (${extras.join('; ')})` : ''}`
     })
     const header = affordable.length > 0
       ? 'Affordable ship opportunities:'
-      : 'Nearby ship opportunities to monitor:'
+      : priced.length > 0
+        ? 'Nearby ship opportunities to monitor:'
+        : 'Nearby ship opportunities (quote unavailable):'
     return `${header}\n${lines.join('\n')}`
   }
 
@@ -333,6 +364,11 @@ export class Agent {
         this.log(type === 'error' ? 'error' : 'system', msg)
       })
     }
+    if (this.connection instanceof WebSocketV2Connection) {
+      this.connection.setTransportLog((type, msg) => {
+        this.log(type === 'error' ? 'error' : 'connection', msg)
+      })
+    }
 
     try {
       await this.connection.connect()
@@ -347,7 +383,20 @@ export class Agent {
     // Set up notification handler
     this.connection.onNotification((n) => {
       updatePendingNavigationFromNotification(this.profileId, n)
+      ingestRuntimeNotification(this.profileId, n)
       ingestTradeNotification(this.profileId, n, this._gameState)
+      if (isReconnectNotification(n)) {
+        const detail = formatReconnectDetail(n)
+        this.log('connection', formatNotificationSummary(n), detail ?? JSON.stringify(n, null, 2))
+        void this.executeSilentQuery('get_status')
+          .then((statusResp) => {
+            if (!statusResp) return
+            this.cacheGameState(statusResp)
+            this.log('system', 'Automatic state refresh triggered after reconnect notification')
+          })
+          .catch(() => {})
+        return
+      }
       this.log('notification', formatNotificationSummary(n), JSON.stringify(n, null, 2))
     })
 
@@ -818,7 +867,8 @@ export class Agent {
     }
 
     this.log('tool_call', `manual: ${command}(${args ? JSON.stringify(args) : ''})`)
-    const result = await this.connection.execute(command, args)
+    const primaryResult = await this.connection.execute(command, args)
+    const result = await this.maybeFallbackToHttpV2(command, args, primaryResult, true)
 
     if (command === 'get_status') this.cacheGameState(result)
     recordCommandOutcome(this.profileId, command, args, result, this._gameState)
@@ -826,13 +876,64 @@ export class Agent {
     if (result.error) {
       this.log('tool_result', `Error: ${result.error.message}`, JSON.stringify(result, null, 2))
     } else {
-      const summary = typeof result.result === 'string'
-        ? result.result.slice(0, 200)
-        : JSON.stringify(result.result).slice(0, 200)
+      const summary = summarizeCommandResult(command, args, result)
       this.log('tool_result', summary, JSON.stringify(result, null, 2))
     }
 
     return result
+  }
+
+  private async maybeFallbackToHttpV2(
+    command: string,
+    args: Record<string, unknown> | undefined,
+    result: CommandResult,
+    emitLog: boolean,
+  ): Promise<CommandResult> {
+    if (!result.error) return result
+    const fallbackCodes = new Set(['not_connected', 'disconnected', 'timeout', 'send_failed'])
+    if (!fallbackCodes.has(result.error.code)) return result
+    const fallback = await this.tryHttpV2Fallback(command, args, emitLog)
+    return fallback ?? result
+  }
+
+  private async tryHttpV2Fallback(
+    command: string,
+    args: Record<string, unknown> | undefined,
+    emitLog: boolean,
+  ): Promise<CommandResult | null> {
+    const profile = getProfile(this.profileId)
+    if (!profile) return null
+    if (profile.connection_mode !== 'websocket_v2') return null
+    if (!HTTP_V2_FALLBACK_QUERY_COMMANDS.has(command)) return null
+    if (!profile.username || !profile.password) return null
+
+    const fallback = new HttpV2Connection(profile.server_url)
+    try {
+      await fallback.connect()
+      const loginResult = await fallback.login(profile.username, profile.password)
+      if (!loginResult.success) {
+        if (emitLog) this.log('system', `HTTP v2 fallback login failed for ${command}: ${loginResult.error || 'unknown error'}`)
+        return null
+      }
+      const result = await fallback.execute(command, args)
+      if (emitLog) {
+        if (result.error) {
+          this.log('system', `HTTP v2 fallback for ${command} also failed: ${result.error.code}`)
+        } else {
+          this.log('system', `HTTP v2 fallback served ${command} after websocket_v2 transport failure`)
+        }
+      }
+      return result
+    } catch (err) {
+      if (emitLog) this.log('system', `HTTP v2 fallback for ${command} failed: ${err instanceof Error ? err.message : String(err)}`)
+      return null
+    } finally {
+      try {
+        await fallback.disconnect()
+      } catch {
+        // ignore cleanup failures for one-shot fallback connections
+      }
+    }
   }
 
   /**
@@ -1114,6 +1215,12 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - Use a strict selling workflow: \`get_status\` -> confirm docked -> inspect market/orderbook -> decide price/quantity -> \`sell\` once -> verify the result. If any step is ambiguous, refresh instead of submitting the sell.
 - If the market has no meaningful buy orders, do not dump cargo into a bad or empty instant market. Check existing sell orders and choose a reasonable ask based on the visible orderbook instead of forcing an immediate sale at a poor price.
 - If your sell attempt returns \`quantity_sold: 0\`, \`total_earned: 0\`, or leaves cargo unchanged, interpret that as no fill or a bad market fit. Re-check docked state, orders, and the local orderbook before attempting another sell.
+- After creating a sell order, let it run for at least 3 ticks (about 30 seconds) before considering \`cancel_order\` or \`modify_order\`, unless the order is clearly wrong (wrong item, wrong quantity, obviously bad price, or a strategic emergency requires immediate liquidity).
+- Do not cancel a newly created order just because it is still unfilled on the first verification. Unfilled for one or two checks is normal.
+- Use a strict order-management workflow: \`view_orders\` -> identify the exact \`order_id\` and \`created_at\` -> compare against current orderbook -> only then \`modify_order\` or \`cancel_order\`.
+- Never call \`cancel_order\` with \`item_id\`, quantity, or price fields as a substitute for \`order_id\`. Cancel only by exact \`order_id\`.
+- Ship browse/showroom/catalog lists may expose ship category instead of a live hull price. When you need a real current purchase price for a ship, use \`commission_quote\` rather than trusting a static list price.
+- Catalog detail responses may now include ship lore and build materials, module combat reach/ammo/accuracy bonus/survey power/skill requirements, and item hazardous-material warnings. Use those fields when evaluating fit, safety, and upgrade prerequisites.
 - Never use irreversible self-destruction, account reset, character wipe, or similarly destructive escape-hatch commands. Self-destruction is not a navigation shortcut: it can destroy the current ship, cargo, equipped modules, and expensive mining gear/badges tied to the loadout. If stranded or blocked, recover through travel, docking, refueling, repair, insurance, chat, or by waiting for better state information.
 - Never claim a stuck mutation queue, deadlock, or server freeze unless multiple fresh observations explicitly prove commands are neither executing nor changing state after verification with \`get_status\`.
 - Always check fuel before traveling and cargo space before mining.
@@ -1124,6 +1231,16 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - Mining loops should be practical: mine until cargo is near full (roughly 80-90%), but stop early if yields fail, the location lacks resources, the node mismatches the current mining fit, cargo is full, or a better unload/travel opportunity appears.
 - Do not hoard ore blindly. When docked with valuable raw materials, inspect the market before selling. Avoid dumping into obviously bad instant bids; prefer corrected pricing or listing behavior when needed.
 - Periodically check for practical ship upgrades when docked at a shipyard or base. Favor upgrades that materially improve cargo, mining throughput, survivability, or travel efficiency and are affordable without stalling progress.
+- For Solarian mining accounts, use this default upgrade path unless current market prices, missing skills, or mission constraints make a nearby step impractical:
+  Solarian Miner Upgrade Path
+  | Ship | Tier | Hull Price | Cargo | Slots W/D/U | Mining Fit | Ship Skills |
+  | Theoria | 0 | 0 cr | 70 | 1/1/3 | 1x Mining Laser I, 1x Afterburner I, 2x Cargo Bay Expansion | none publicly exposed |
+  | Archimedes | 1 | 2200 cr | 185 | 1/1/3 | 1x Mining Laser I, 1x Afterburner I, 2x Cargo Bay Expansion | none publicly exposed |
+  | Excavation | 2 | 8000 cr | 250 | 1/1/4 | 1x Mining Laser II, 1x Afterburner II, 3x Cargo Bay Expansion | mining 3, small_ships 3 |
+  | Deep Survey | 3 | 30000 cr | 660 | 1/1/6 | 1x Mining Laser III, 1x Afterburner III, 5x Cargo Bay Expansion | mining 5, small_ships 5 |
+  | Deep Core Platform | 4 | 100000 cr | 1680 | 1/2/8 | 1x Mining Laser IV, 1x Afterburner III, 7x Cargo Bay Expansion | mining 7, medium_ships 3 |
+  | Automated Extraction Complex | 5 | 400000 cr | 2400 | 1/3/10 | 1x Mining Laser IV, 1x Afterburner III, 9x Cargo Bay Expansion | mining 7, large_ships 5 |
+- When evaluating a Solarian miner upgrade, prefer the next ship in that path first. Only skip a step if the next hull is unavailable, unaffordable after fitting reserve, blocked by skills, or a later step is already clearly affordable and skill-legal.
 - Be social -- chat with players you meet.
 - Prioritize faction coordination: use faction chat frequently to share status, plans, threats, trade needs, and requests for support.
 - Interact in faction chat: react to incoming messages, answer teammates, ask follow-up questions, and agree on concrete coordinated actions.
@@ -1137,7 +1254,7 @@ function formatNotificationSummary(n: unknown): string {
 
   const notif = n as Record<string, unknown>
   const type = (notif.type as string) || (notif.msg_type as string) || 'event'
-  let data = notif.data as Record<string, unknown> | string | undefined
+  let data = getNotificationBody(notif)
   if (typeof data === 'string') {
     try { data = JSON.parse(data) } catch { /* leave as string */ }
   }
@@ -1213,6 +1330,9 @@ function buildNavigationStateNudge(
   gameState: Record<string, unknown> | null,
 ): string | null {
   if (navigationState === 'unknown') return null
+  const transitGuidance = navigationState === 'navigation_pending'
+    ? buildTransitWaitGuidance(gameState)
+    : null
   return [
     '## Navigation State',
     `Current navigation state: ${navigationState}`,
@@ -1220,6 +1340,7 @@ function buildNavigationStateNudge(
     'This is a derived planning hint from recent state, not a perfect guarantee.',
     'Use it to form a hypothesis, then verify with fresh get_status before major navigation, docking, or mining choices if the situation is unclear.',
     'Typical interpretation: docked => sell/refuel/upgrade, undocked => travel or mine, at_resource_poi => mine or leave, navigation_pending => the ship may still be traveling/jumping; prefer get_location plus get_status before treating it as blocked.',
+    transitGuidance || '',
     'Verified current state:',
     formatVerifiedGameState(gameState),
   ].filter(Boolean).join('\n\n')
@@ -1315,10 +1436,12 @@ function formatVerifiedGameState(gameState: Record<string, unknown> | null): str
   const maxHull = stringifyStateValue(ship.max_hull) || '?'
   const navigationState = deriveNavigationState(gameState)
   const navigationDetail = describeNavigationState(gameState, navigationState, null)
+  const transitSummary = describeTransitState(gameState)
 
   return [
     `- Location: ${systemName} / ${poiName}`,
     `- Navigation state: ${navigationState}${navigationDetail ? ` (${navigationDetail})` : ''}`,
+    transitSummary ? `- Transit: ${transitSummary}` : '',
     `- Credits: ${credits}`,
     `- Ship: ${shipName}`,
     `- Cargo: ${cargoUsed}/${cargoCapacity}`,
@@ -1343,7 +1466,7 @@ function describeRecoveryProbe(gameState: Record<string, unknown> | null): strin
     case 'undocked':
       return 'prefer exactly one dock() if you are already at a base/station, otherwise exactly one travel() to a clearly valid nearby destination'
     case 'navigation_pending':
-      return 'do not stack more navigation; refresh with get_status, verify whether you already arrived, then send at most one corrected dock/undock'
+      return 'do not stack more navigation; inspect transit ETA with get_location if needed, wait until arrival tick or a fresh arrival signal, then verify with get_status before sending at most one corrected follow-up action'
     case 'local_stall':
       return 'refresh with get_status, then send at most one simple mutation consistent with the verified state instead of repeating passive stall messages'
     default:
@@ -1355,6 +1478,7 @@ function deriveNavigationState(gameState: Record<string, unknown> | null): Navig
   if (!gameState) return 'unknown'
   const player = (gameState.player as Record<string, unknown> | undefined) || {}
   const location = (gameState.location as Record<string, unknown> | undefined) || {}
+  if (isTransitState(gameState)) return 'navigation_pending'
   const poiType = location.poi_type || player.current_poi_type
   const poiName = location.poi_name || player.current_poi
 
@@ -1381,6 +1505,8 @@ function describeNavigationState(
   const poiName = stringifyStateValue(player.current_poi ?? location.poi_name) || '?'
 
   switch (navigationState) {
+    case 'navigation_pending':
+      return describeTransitState(gameState) || 'navigation mutation accepted; ship may still be in transit'
     case 'docked':
       return `currently at base/station in ${systemName} / ${poiName}`
     case 'at_resource_poi':
@@ -1389,6 +1515,77 @@ function describeNavigationState(
       return `currently in space at ${systemName} / ${poiName}`
     default:
       return null
+  }
+}
+
+function buildTransitWaitGuidance(gameState: Record<string, unknown> | null): string | null {
+  const transit = extractTransitInfo(gameState)
+  if (!transit) {
+    return 'If this pending state comes from travel or jump, prefer waiting for the queued arrival instead of sending another navigation mutation. Use get_location sparingly to confirm transit progress.'
+  }
+
+  const parts = [
+    'Transit handling:',
+    `- Current transit type: ${transit.type || 'navigation'}`,
+    transit.destination ? `- Destination: ${transit.destination}` : '',
+    transit.ticksRemaining !== null ? `- Ticks remaining: ${transit.ticksRemaining}` : '',
+    transit.arrivalTick !== null ? `- Arrival tick: ${transit.arrivalTick}` : '',
+    '- Treat this as progress. Do not send another travel/jump while this remains active.',
+    '- Prefer waiting until the arrival tick or a fresh arrival/result notification before re-planning.',
+    '- If you need one verification query while waiting, prefer get_location first; then use get_status after arrival or if the transit evidence disappears.',
+  ]
+  return parts.filter(Boolean).join('\n')
+}
+
+function describeTransitState(gameState: Record<string, unknown> | null): string | null {
+  const transit = extractTransitInfo(gameState)
+  if (!transit) return null
+  const parts = [
+    transit.type ? `${transit.type} in progress` : 'transit in progress',
+    transit.destination ? `to ${transit.destination}` : '',
+    transit.ticksRemaining !== null ? `${transit.ticksRemaining} ticks remaining` : '',
+    transit.arrivalTick !== null ? `arrival tick ${transit.arrivalTick}` : '',
+  ]
+  return parts.filter(Boolean).join(', ')
+}
+
+function isTransitState(gameState: Record<string, unknown> | null): boolean {
+  return extractTransitInfo(gameState) !== null
+}
+
+function extractTransitInfo(gameState: Record<string, unknown> | null): {
+  type: string | null
+  destination: string | null
+  ticksRemaining: number | null
+  arrivalTick: number | null
+} | null {
+  if (!gameState) return null
+  const location = (gameState.location as Record<string, unknown> | undefined) || {}
+  const data = gameState
+  const type = stringifyStateValue(location.transit_type ?? data.transit_type) || null
+  const inTransit =
+    location.in_transit === true ||
+    data.in_transit === true ||
+    Boolean(type)
+
+  if (!inTransit) return null
+
+  const destination = stringifyStateValue(
+    location.transit_dest_system_name ??
+    location.transit_dest_system_id ??
+    location.destination_name ??
+    location.destination_id ??
+    data.transit_dest_system_name ??
+    data.transit_dest_system_id ??
+    data.destination_name ??
+    data.destination_id,
+  ) || null
+
+  return {
+    type,
+    destination,
+    ticksRemaining: toFiniteNumber(location.ticks_remaining ?? data.ticks_remaining),
+    arrivalTick: toFiniteNumber(location.transit_arrival_tick ?? data.transit_arrival_tick ?? location.arrival_tick ?? data.arrival_tick),
   }
 }
 
@@ -1557,56 +1754,6 @@ function extractActiveOrders(data: Record<string, unknown>): Array<{ name: strin
   return []
 }
 
-function extractShipOffers(data: Record<string, unknown> | undefined): Array<{ name: string; classId: string; price: number | null }> {
-  if (!data) return []
-  const candidates = [
-    data.ships,
-    data.listings,
-    data.offers,
-    data.items,
-    (data.result as Record<string, unknown> | undefined)?.ships,
-    (data.result as Record<string, unknown> | undefined)?.items,
-  ]
-
-  for (const candidate of candidates) {
-    if (!Array.isArray(candidate)) continue
-    const offers = candidate
-      .map((item) => {
-        if (!item || typeof item !== 'object') return null
-        const record = item as Record<string, unknown>
-        const name = String(record.name || record.ship_name || record.class_name || '').trim()
-        const classId = String(record.ship_class || record.class_id || record.ship_class_id || '').trim()
-        const price = toFiniteNumber(record.price ?? record.ask_price ?? record.cost ?? record.sale_price)
-        if (!name && !classId) return null
-        return { name, classId, price }
-      })
-      .filter((offer): offer is { name: string; classId: string; price: number | null } => Boolean(offer))
-    if (offers.length > 0) return offers
-  }
-
-  return []
-}
-
-function dedupeShipOffers(offers: Array<{ name: string; classId: string; price: number | null }>): Array<{ name: string; classId: string; price: number | null }> {
-  const deduped = new Map<string, { name: string; classId: string; price: number | null }>()
-  for (const offer of offers) {
-    const key = `${offer.classId.toLowerCase()}|${offer.name.toLowerCase()}`
-    const existing = deduped.get(key)
-    if (!existing) {
-      deduped.set(key, offer)
-      continue
-    }
-    if (existing.price === null && offer.price !== null) {
-      deduped.set(key, offer)
-      continue
-    }
-    if (existing.price !== null && offer.price !== null && offer.price < existing.price) {
-      deduped.set(key, offer)
-    }
-  }
-  return [...deduped.values()]
-}
-
 type MarketEntry = {
   name: string
   bid: number | null
@@ -1630,6 +1777,53 @@ function extractMarketEntries(data: Record<string, unknown>): MarketEntry[] {
   if (orderbook.length > 0) return orderbook
 
   return []
+}
+
+function summarizeCommandResult(command: string, args: Record<string, unknown> | undefined, result: CommandResult): string {
+  const data = (result.structuredContent ?? result.result) as Record<string, unknown> | undefined
+  if (command === 'catalog' && data) {
+    const type = typeof args?.type === 'string' ? args.type.trim().toLowerCase() : ''
+    if (type === 'ships') {
+      const ships = extractShipOffers(data)
+      if (ships.length > 0) {
+        const preview = ships.slice(0, 3).map((ship) => {
+          const parts = [ship.name || ship.classId]
+          if (ship.category) parts.push(ship.category)
+          if (ship.buildMaterials.length > 0) parts.push(`build ${formatMaterialRequirements(ship.buildMaterials)}`)
+          return parts.join(' | ')
+        }).join('; ')
+        return `Catalog ships: ${preview}`.slice(0, 200)
+      }
+    }
+
+    if (type === 'modules') {
+      const modules = extractModuleDetails(data)
+      if (modules.length > 0) {
+        const preview = modules.slice(0, 3).map((module) => {
+          const parts = [module.name || module.itemId]
+          if (module.combatReach !== null) parts.push(`reach ${module.combatReach}`)
+          if (module.ammoType) parts.push(`ammo ${module.ammoType}`)
+          if (module.surveyPower !== null) parts.push(`survey ${module.surveyPower}`)
+          if (Object.keys(module.requiredSkills).length > 0) parts.push(`skills ${formatRequiredSkills(module.requiredSkills)}`)
+          return parts.join(' | ')
+        }).join('; ')
+        return `Catalog modules: ${preview}`.slice(0, 200)
+      }
+    }
+
+    if (type === 'items') {
+      const items = extractItemDetails(data)
+      const hazardous = items.filter((item) => item.hazardousWarnings.length > 0)
+      if (hazardous.length > 0) {
+        const preview = hazardous.slice(0, 3).map((item) => `${item.name || item.itemId}: ${item.hazardousWarnings[0]}`).join('; ')
+        return `Catalog hazards: ${preview}`.slice(0, 200)
+      }
+    }
+  }
+
+  return typeof result.result === 'string'
+    ? result.result.slice(0, 200)
+    : JSON.stringify(result.result).slice(0, 200)
 }
 
 function extractMarketEntriesFromArrayCandidates(candidates: unknown[]): MarketEntry[] {
@@ -1721,7 +1915,7 @@ function parseNotificationMeta(n: unknown): { type: string; message: string } | 
 
   const notif = n as Record<string, unknown>
   const type = String((notif.type as string) || (notif.msg_type as string) || 'event')
-  let data = notif.data as Record<string, unknown> | string | undefined
+  let data = getNotificationBody(notif)
   if (typeof data === 'string') {
     try { data = JSON.parse(data) } catch { /* leave as string */ }
   }
@@ -1734,6 +1928,38 @@ function parseNotificationMeta(n: unknown): { type: string; message: string } | 
   if (typeof data === 'string') return { type, message: data }
   if (typeof notif.message === 'string') return { type, message: notif.message }
   return { type, message: JSON.stringify(n) }
+}
+
+function getNotificationBody(notif: Record<string, unknown>): Record<string, unknown> | string | undefined {
+  return notif.payload as Record<string, unknown> | string | undefined
+    ?? notif.data as Record<string, unknown> | string | undefined
+}
+
+function isReconnectNotification(n: unknown): boolean {
+  const parsed = parseNotificationMeta(n)
+  return parsed?.type.toLowerCase() === 'reconnected'
+}
+
+function formatReconnectDetail(n: unknown): string | null {
+  if (typeof n !== 'object' || n === null) return null
+  const notif = n as Record<string, unknown>
+  const body = getNotificationBody(notif)
+  if (!body || typeof body !== 'object') return null
+
+  const payload = body as Record<string, unknown>
+  const details: string[] = []
+  if (typeof payload.message === 'string' && payload.message.trim()) {
+    details.push(payload.message.trim())
+  }
+  if (typeof payload.was_pilotless === 'boolean') {
+    details.push(`was_pilotless=${payload.was_pilotless}`)
+  }
+  const ticksRemaining = toFiniteNumber(payload.ticks_remaining)
+  if (ticksRemaining !== null) {
+    details.push(`ticks_remaining=${ticksRemaining}`)
+  }
+
+  return details.length > 0 ? details.join(' | ') : null
 }
 
 function ingestTradeNotification(profileId: string, notification: unknown, gameState: Record<string, unknown> | null): void {
