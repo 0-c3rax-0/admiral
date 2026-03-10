@@ -883,7 +883,7 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
       </div>
 
       {/* Manual command input */}
-      <CommandPanel profileId={profile.id} onSend={handleSendCommand} disabled={!status.connected} commandInputRef={commandInputRef} serverUrl={profile.server_url} />
+      <CommandPanel profileId={profile.id} onSend={handleSendCommand} disabled={!status.connected} commandInputRef={commandInputRef} serverUrl={profile.server_url} connectionMode={profile.connection_mode} />
 
       {/* Directive modal */}
       {showDirectiveModal && (
