@@ -282,11 +282,9 @@ export class HttpV2Connection implements GameConnection {
     try {
       const data = await resp.json()
       if (data.session) this.session = data.session
-      // v2 returns { result: <text>, structuredContent: <JSON> }
-      // Normalize: prefer structuredContent as `result` for programmatic consumers
-      if (data.structuredContent !== undefined && data.structuredContent !== null) {
-        data.result = data.structuredContent
-      }
+      // v2 returns { result: <rendered text>, structuredContent: <JSON> }
+      // Keep both: result (text) goes to the LLM, structuredContent is used
+      // for cacheGameState and player data display.
       return data as CommandResult
     } catch {
       return { error: { code: 'http_error', message: `HTTP ${resp.status}` } }
