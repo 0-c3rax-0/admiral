@@ -39,7 +39,7 @@ import {
   type NavigationState,
   shouldForceStateRefreshFromNotifications,
 } from '../../fork/server'
-import { isDockedPoi, isResourcePoi } from './poi'
+import { isDockedPoi, isResourcePoi, resolvePoiSnapshot } from './poi'
 import { ingestRuntimeNotification } from './runtime-guards'
 import {
   applyCommissionQuotes,
@@ -227,7 +227,8 @@ export class Agent {
   private isLikelyDocked(): boolean {
     const location = (this._gameState?.location as Record<string, unknown> | undefined) || {}
     const player = (this._gameState?.player as Record<string, unknown> | undefined) || {}
-    return isDockedPoi(location.poi_type || player.current_poi_type, location.poi_name || player.current_poi)
+    const poi = resolvePoiSnapshot(location, player)
+    return isDockedPoi(poi.type, poi.name)
   }
 
   private async collectFreeTelemetry(): Promise<string | null> {
@@ -318,14 +319,11 @@ export class Agent {
 
   private async collectShipTelemetry(): Promise<string | null> {
     const commissionableCatalogResp = await this.executeSilentQuery('catalog', { type: 'ships', commissionable: true })
-    const showroomResp = await this.executeSilentQuery('shipyard_showroom', {})
     const browseResp = await this.executeSilentQuery('browse_ships', {})
     const commissionableItems = commissionableCatalogResp?.error ? [] : extractShipOffers((commissionableCatalogResp?.structuredContent ?? commissionableCatalogResp?.result) as Record<string, unknown> | undefined)
-    const showroomItems = showroomResp?.error ? [] : extractShipOffers((showroomResp?.structuredContent ?? showroomResp?.result) as Record<string, unknown> | undefined)
     const listedItems = browseResp?.error ? [] : extractShipOffers((browseResp?.structuredContent ?? browseResp?.result) as Record<string, unknown> | undefined)
     const combined = await applyCommissionQuotes(this.connection!, this.profileId, dedupeShipOffers([
       ...commissionableItems,
-      ...showroomItems,
       ...listedItems,
     ]))
     if (combined.length === 0) return null
@@ -1239,11 +1237,12 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - If you hit errors like \`already_in_system\`, \`cargo_full\`, \`not_enough_fuel\`, \`invalid_payload\` for a zero-quantity sell, or a market/sell rejection, treat them as planning feedback. Verify state, change strategy, and avoid repeating the same blocked action.
 - Before every \`sell\` mutation, run a fresh \`get_status\` and verify that you are docked at a valid base/station and that the cargo quantity you plan to sell is still present. Do not rely on stale docked/cargo assumptions.
 - Use a strict selling workflow: \`get_status\` -> confirm docked -> inspect market/orderbook -> decide price/quantity -> \`sell\` once -> verify the result. If any step is ambiguous, refresh instead of submitting the sell.
-- Use a strict cargo-unload fallback when docked with sale inventory: first try to sell directly only if the local market has meaningful buy-side liquidity and the instant sale is acceptable; if immediate sale is not realistically possible or would be obviously bad, move the cargo into the station's local storage before doing anything else with it.
-- If the market has no meaningful buy orders, do not dump cargo into a bad or empty instant market. Prefer putting the goods into local station storage first so the ship can resume work with free cargo space, then decide whether to create a sell order from that station later.
+- Read the market sides correctly: instant \`sell\` fills against existing buy orders and therefore depends on the bid/buy side, not the listed \`sell_orders\`. \`sell_orders\` are the ask side and only describe competing sellers unless you create your own sell order.
+- Use a strict cargo-unload fallback when docked with sale inventory: first try to sell directly only if the local market has real bid-side liquidity and the instant sale is acceptable; if immediate sale is not realistically possible or would be obviously bad, move the cargo into the station's local storage before doing anything else with it.
+- If the market has no meaningful buy orders or bid-side depth, do not dump cargo into a bad or empty instant market. Prefer putting the goods into local station storage first so the ship can resume work with free cargo space, then batch inventory and decide whether to create a well-placed sell order from that station later.
 - If your sell attempt returns \`quantity_sold: 0\`, \`total_earned: 0\`, or leaves cargo unchanged, interpret that as no fill or a bad market fit. Re-check docked state, orders, and the local orderbook before attempting another sell.
 - When using the storage fallback, use the station's personal/local storage, confirm the cargo actually moved, and keep a note of what was stored and where.
-- Treat \`create_sell_order\` as fee-bearing. Before listing, inspect the listing fee and compare it to the expected total sale value and expected margin. Do not create tiny low-value orders where the fee eats a meaningful share of proceeds.
+- Treat \`create_sell_order\` as fee-bearing. Before listing, inspect the listing fee and compare it to the expected total sale value and expected margin. Do not create tiny low-value orders where the fee eats a meaningful share of proceeds, and prefer larger batched listings when that materially improves fee efficiency.
 - Prefer batching sale inventory in local station storage and waiting until you have a meaningfully larger stack before creating a sell order. A single larger order is usually better than many tiny fee-paying orders for the same item at the same station.
 - "Batching" can include running multiple mining trips first: if the current station and route are still good for the same ore family, it is often better to unload to local storage, return to the belt for more, and combine several trips into one later sell order instead of listing every small haul immediately.
 - After creating a sell order, let it run for at least 3 ticks (about 30 seconds) before considering \`cancel_order\` or \`modify_order\`, unless the order is clearly wrong (wrong item, wrong quantity, obviously bad price, or a strategic emergency requires immediate liquidity).
@@ -1266,11 +1265,14 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - Keep a wallet reserve of at least 10000 credits. Do not spend below that floor on ship purchases, fitting, or optional upgrades unless explicit human guidance overrides it.
 - Before buying another ship, check \`list_ships\` for already-owned hulls. If you already own a larger or clearly better ship than the current active hull, prefer switching into that owned ship before spending more credits on a new purchase.
 - When multiple owned ships are available, prefer the best already-owned practical upgrade first: usually the highest-tier hull that is actually usable now, with priority on cargo, survivability, and slot count for the current role. Do not keep flying a clearly inferior starter ship while a better owned hull is sitting in storage at a reachable station.
-- After \`buy_ship\`, treat the purchased hull as the new active ship immediately and continue the plan in that ship. Verify the active hull with \`get_ship\`/\`get_status\` before resuming travel, mining, or selling.
+- After \`buy_listed_ship\`, treat the purchased hull as the new active ship immediately and continue the plan in that ship. The previous active ship is stored automatically. Verify the active hull with \`get_ship\`/\`get_status\` before resuming travel, mining, or selling.
 - After \`commission_ship\`, do not forget the delivery step: monitor until the build is complete, then use \`list_ships\` and \`switch_ship\` at the correct station so the commissioned hull actually becomes the active ship before treating the upgrade as done.
 - Ship switching does not transfer modules automatically. When moving into a newly bought or commissioned ship, inspect both fit and cargo/storage, then either:
   1. move the old fit over with \`uninstall_mod\` -> \`switch_ship\` -> \`install_mod\`, or
   2. buy/install a fresh fit if that is faster or clearly better.
+- Carrier ships can transport stored ships in a bay. When flying a carrier and docked at the same station as the ship you want to move, load it with \`storage_deposit(item_id=<ship_id>, target=self)\` and unload it later with \`storage_withdraw(item_id=<ship_id>)\`.
+- On carrier ships, inspect \`get_cargo\` for \`carried_ships\`, \`bay_used\`, and \`bay_capacity\` before loading more ships or planning long travel.
+- Do not treat carried ships as ordinary cargo inventory. They consume carrier bay capacity, and if the carrier is destroyed the loaded ships become separate wrecks at that location.
 - Do not leave an upgraded ship idle in storage while continuing to fly the weaker hull, unless the new ship is temporarily unusable because of missing modules, skills, fuel, or required fitting work.
 - For miners, prioritize restoring a workable mining fit immediately after an upgrade: mining laser first, travel/fuel support second, cargo expansions after that. If the old modules remain on the stored ship, recover them or replace them before returning to the mining loop.
 - For Solarian mining accounts, use this default upgrade path unless current market prices, missing skills, or mission constraints make a nearby step impractical:
@@ -1280,8 +1282,8 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
   | Archimedes | 1 | 2200 cr | 185 | 1/1/3 | 1x Mining Laser I, 1x Afterburner I, 2x Cargo Bay Expansion | none publicly exposed |
   | Excavation | 2 | 8000 cr | 250 | 1/1/4 | 1x Mining Laser II, 1x Afterburner II, 3x Cargo Bay Expansion | mining 3, small_ships 3 |
   | Deep Survey | 3 | 30000 cr | 660 | 1/1/6 | 1x Mining Laser III, 1x Afterburner III, 5x Cargo Bay Expansion | mining 5, small_ships 5 |
-  | Deep Core Platform | 4 | 100000 cr | 1680 | 1/2/8 | 1x Mining Laser IV, 1x Afterburner III, 7x Cargo Bay Expansion | mining 7, medium_ships 3 |
-  | Automated Extraction Complex | 5 | 400000 cr | 2400 | 1/3/10 | 1x Mining Laser IV, 1x Afterburner III, 9x Cargo Bay Expansion | mining 7, large_ships 5 |
+  | Lithosphere | 4 | 100000 cr | 1680 | 1/2/8 | 1x Mining Laser IV, 1x Afterburner III, 7x Cargo Bay Expansion | mining 7, medium_ships 3 |
+  | Tellurian | 5 | 400000 cr | 2400 | 1/3/10 | 1x Mining Laser IV, 1x Afterburner III, 9x Cargo Bay Expansion | mining 7, large_ships 5 |
 - When evaluating a Solarian miner upgrade, prefer the next ship in that path first. Only skip a step if the next hull is unavailable, unaffordable after fitting reserve, blocked by skills, or a later step is already clearly affordable and skill-legal.
 - Be social -- chat with players you meet.
 - Prioritize faction coordination: use faction chat frequently to share status, plans, threats, trade needs, and requests for support.

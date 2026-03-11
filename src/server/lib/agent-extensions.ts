@@ -1,5 +1,5 @@
 import { addTradeEvent } from './economy-db'
-import { isDockedPoi, isResourcePoi } from './poi'
+import { isDockedPoi, isResourcePoi, resolvePoiSnapshot } from './poi'
 
 export type MutationState = 'idle' | 'mutation_pending' | 'navigation_pending' | 'local_stall'
 export type NavigationState = 'docked' | 'undocked' | 'at_resource_poi' | 'navigation_pending' | 'local_stall' | 'unknown'
@@ -177,12 +177,11 @@ export function deriveNavigationState(gameState: Record<string, unknown> | null)
   const player = (gameState.player as Record<string, unknown> | undefined) || {}
   const location = (gameState.location as Record<string, unknown> | undefined) || {}
   if (isTransitState(gameState)) return 'navigation_pending'
-  const poiType = location.poi_type || player.current_poi_type
-  const poiName = location.poi_name || player.current_poi
+  const poi = resolvePoiSnapshot(location, player)
 
-  if (isDockedPoi(poiType, poiName)) return 'docked'
-  if (isResourcePoi(poiType, poiName)) return 'at_resource_poi'
-  if (String(poiName || '').trim() || String(poiType || '').trim()) return 'undocked'
+  if (isDockedPoi(poi.type, poi.name)) return 'docked'
+  if (isResourcePoi(poi.type, poi.name)) return 'at_resource_poi'
+  if (String(poi.name || '').trim() || String(poi.type || '').trim()) return 'undocked'
   return 'unknown'
 }
 

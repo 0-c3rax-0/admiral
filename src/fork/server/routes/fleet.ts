@@ -1,8 +1,6 @@
 import { Hono } from 'hono'
 import { listProfiles } from '../../../server/lib/db'
 import { createGameConnection } from '../../../server/lib/game-connection'
-import { HttpConnection } from '../../../server/lib/connections/http'
-import { HttpV2Connection } from '../../../server/lib/connections/http_v2'
 
 const fleet = new Hono()
 const FLEET_REQUEST_TIMEOUT_MS = 12_000
@@ -22,7 +20,7 @@ fleet.get('/ships', async (c) => {
       }
     }
 
-    const connection = createFleetConnection(profile)
+    const connection = createGameConnection(profile)
     try {
       await withTimeout(connection.connect(), FLEET_REQUEST_TIMEOUT_MS, `${profile.name}: connect timed out`)
       const login = await withTimeout(connection.login(profile.username, profile.password), FLEET_REQUEST_TIMEOUT_MS, `${profile.name}: login timed out`)
@@ -85,16 +83,6 @@ fleet.get('/ships', async (c) => {
 })
 
 export default fleet
-
-function createFleetConnection(profile: { connection_mode: string; server_url: string }) {
-  if (profile.connection_mode === 'http_v2' || profile.connection_mode === 'websocket_v2' || profile.connection_mode === 'mcp_v2') {
-    return new HttpV2Connection(profile.server_url)
-  }
-  if (profile.connection_mode === 'http' || profile.connection_mode === 'websocket' || profile.connection_mode === 'mcp') {
-    return new HttpConnection(profile.server_url)
-  }
-  return createGameConnection(profile as Parameters<typeof createGameConnection>[0])
-}
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | null = null

@@ -36,7 +36,6 @@ const COMMAND_PRESETS: CommandPreset[] = [
   { label: 'Catalog Modules', command: 'catalog', args: { type: 'modules' } },
   { label: 'Catalog Items', command: 'catalog', args: { type: 'items' } },
   { label: 'Browse Ships', command: 'browse_ships' },
-  { label: 'Showroom', command: 'shipyard_showroom' },
   { label: 'Commission Quote', command: 'commission_quote', args: { ship_class: '' }, fillOnly: true },
 ]
 

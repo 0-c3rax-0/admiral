@@ -613,7 +613,7 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
       if (command === 'catalog') {
         setCatalogPanel(buildCatalogPanelData(result, args))
         setCatalogFilter('')
-      } else if (command === 'shipyard_showroom' || command === 'browse_ships') {
+      } else if (command === 'browse_ships') {
         setCatalogPanel(buildCatalogPanelData(result, { type: 'ships' }))
         setCatalogFilter('')
       }

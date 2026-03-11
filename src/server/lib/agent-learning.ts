@@ -2,7 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import type { CommandResult } from './connections/interface'
 import { getProfile, getProfileSkills, upsertProfileSkills } from './db'
-import { isDockedPoi } from './poi'
+import { isDockedPoi, resolvePoiSnapshot } from './poi'
 
 const AGENTS_DIR = path.join(process.cwd(), 'data', 'agents')
 const MAX_EPISODES = 60
@@ -17,7 +17,7 @@ const QUERY_COMMANDS = new Set([
 ])
 const MUTATION_COMMANDS = new Set([
   'undock', 'travel', 'jump', 'dock', 'mine', 'sell', 'refuel', 'repair', 'craft', 'install_mod', 'accept_mission',
-  'complete_mission', 'create_sell_order', 'cancel_order', 'modify_order', 'buy_ship', 'commission_ship', 'switch_ship',
+  'complete_mission', 'create_sell_order', 'cancel_order', 'modify_order', 'buy_listed_ship', 'commission_ship', 'switch_ship',
   'insure', 'loot', 'salvage', 'join', 'chat', 'captains_log_add', 'social_chat', 'social_captains_log_add', 'buy',
   'storage_deposit', 'storage_withdraw', 'market_create_sell_order', 'market_create_buy_order',
   'faction_commerce_create_sell_order', 'faction_commerce_create_buy_order',
@@ -611,8 +611,9 @@ function extractStatusSnapshot(gameState: Record<string, unknown>): StatusSnapsh
 function deriveDockedFromState(gameState: Record<string, unknown>): boolean | null {
   const location = ((gameState.location as Record<string, unknown> | undefined) || {})
   const player = ((gameState.player as Record<string, unknown> | undefined) || {})
-  const poiType = location.poi_type || player.current_poi_type
-  const poiName = location.poi_name || player.current_poi
+  const poi = resolvePoiSnapshot(location, player)
+  const poiType = poi.type
+  const poiName = poi.name
   if (!String(poiType || '').trim() && !String(poiName || '').trim()) return null
   return isDockedPoi(poiType, poiName)
 }

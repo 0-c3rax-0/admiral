@@ -150,7 +150,6 @@ Between turns, Admiral can inject compact telemetry based on commands such as:
 - `get_status`
 - `get_cargo`
 - `view_market`
-- `shipyard_showroom`
 - `browse_ships`
 
 This helps agents:

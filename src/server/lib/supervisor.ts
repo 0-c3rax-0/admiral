@@ -777,8 +777,8 @@ function buildAdviceSignals(
       priority: 72,
       summary: 'A materially better ship appears affordable with reserve left for fitting.',
       evidence: shipUpgradeSignals.slice(0, 1),
-      recommendedChecks: ['shipyard_showroom', 'browse_ships'],
-      recommendedActions: ['shipyard_buy'],
+      recommendedChecks: ['browse_ships'],
+      recommendedActions: ['buy_listed_ship'],
       whyNow: credits !== null ? `current credits=${credits}` : 'an affordable upgrade window is available',
     })
   }
@@ -1117,7 +1117,6 @@ async function fetchShipUpgradeContext(profile: Profile): Promise<ShipUpgradeCon
     const responses = await Promise.all([
       connection.execute('catalog', { type: 'ships', commissionable: true }),
       connection.execute('get_skills', {}),
-      connection.execute('shipyard_showroom', {}),
       connection.execute('browse_ships', {}),
     ])
 

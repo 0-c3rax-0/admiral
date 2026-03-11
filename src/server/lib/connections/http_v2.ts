@@ -1,7 +1,6 @@
 import type { GameConnection, LoginResult, RegisterResult, CommandResult, NotificationHandler } from './interface'
 import { USER_AGENT } from './interface'
-import { fetchOpenApiSpec, type SpecLogFn } from '../schema'
-import { buildNamespacedActionAlias } from '../schema'
+import { buildNamespacedActionAlias, fetchOpenApiSpec, getOpenApiSpecUrls, type SpecLogFn } from '../schema'
 import { normalizeCommandResult } from './command-meta'
 
 const MAX_RECONNECT_ATTEMPTS = 6
@@ -69,7 +68,11 @@ export class HttpV2Connection implements GameConnection {
 
   private async fetchToolMapping(): Promise<void> {
     this.commandRouteMap.clear()
-    const spec = await fetchOpenApiSpec(`${this.baseUrl}/openapi.json`, this.specLog)
+    let spec = null
+    for (const specUrl of getOpenApiSpecUrls(this.baseUrl)) {
+      spec = await fetchOpenApiSpec(specUrl, this.specLog)
+      if (spec) break
+    }
     if (!spec) return
 
     const allPaths = Object.keys(spec.paths || {})

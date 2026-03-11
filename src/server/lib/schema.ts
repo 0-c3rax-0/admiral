@@ -23,6 +23,7 @@ interface RuntimeCommandEntry {
 
 // Cache TTL: 1 hour
 const SPEC_CACHE_TTL_MS = 60 * 60 * 1000
+const CANONICAL_V2_SPEC_URL = 'https://game.spacemolt.com/api/v2/openapi.json'
 
 export type SpecLogFn = (type: 'info' | 'warn' | 'error', message: string) => void
 
@@ -105,30 +106,44 @@ export function parseRuntimeCommandResult(result: unknown): GameCommandInfo[] {
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 
-function getOpenApiSpecUrls(baseUrl: string): string[] {
+export function getOpenApiSpecUrls(baseUrl: string): string[] {
   const normalizedBaseUrl = baseUrl.replace(/\/$/, '')
+  const urls: string[] = []
+  const addUrl = (url: string) => {
+    if (!urls.includes(url)) urls.push(url)
+  }
 
   if (/\/api\/v2$/.test(normalizedBaseUrl)) {
-    return [`${normalizedBaseUrl}/openapi.json`, normalizedBaseUrl.replace(/\/api\/v2$/, '/api/openapi.json')]
+    addUrl(`${normalizedBaseUrl}/openapi.json`)
+    addUrl(normalizedBaseUrl.replace(/\/api\/v2$/, '/api/openapi.json'))
+    addUrl(CANONICAL_V2_SPEC_URL)
+    return urls
   }
 
   if (/\/api\/v\d+$/.test(normalizedBaseUrl)) {
     const versionedSpecUrl = `${normalizedBaseUrl}/openapi.json`
     if (/\/api\/v1$/.test(normalizedBaseUrl)) {
-      return [normalizedBaseUrl.replace(/\/api\/v1$/, '/api/v2/openapi.json'), versionedSpecUrl, normalizedBaseUrl.replace(/\/api\/v1$/, '/api/openapi.json')]
+      addUrl(normalizedBaseUrl.replace(/\/api\/v1$/, '/api/v2/openapi.json'))
+      addUrl(versionedSpecUrl)
+      addUrl(normalizedBaseUrl.replace(/\/api\/v1$/, '/api/openapi.json'))
+      addUrl(CANONICAL_V2_SPEC_URL)
+      return urls
     }
-    return [versionedSpecUrl]
+    addUrl(versionedSpecUrl)
+    return urls
   }
 
   if (/\/v\d+$/.test(normalizedBaseUrl)) {
-    return [`${normalizedBaseUrl}/openapi.json`]
+    addUrl(`${normalizedBaseUrl}/openapi.json`)
+    if (/\/v2$/.test(normalizedBaseUrl)) addUrl(CANONICAL_V2_SPEC_URL)
+    return urls
   }
 
-  return [
-    `${normalizedBaseUrl}/api/v2/openapi.json`,
-    `${normalizedBaseUrl}/api/openapi.json`,
-    `${normalizedBaseUrl}/openapi.json`,
-  ]
+  addUrl(`${normalizedBaseUrl}/api/v2/openapi.json`)
+  addUrl(`${normalizedBaseUrl}/api/openapi.json`)
+  addUrl(`${normalizedBaseUrl}/openapi.json`)
+  addUrl(CANONICAL_V2_SPEC_URL)
+  return urls
 }
 
 function resolveSchemaRef(spec: Record<string, unknown>, ref: string): Record<string, unknown> | null {
@@ -356,7 +371,7 @@ export async function fetchGameCommands(baseUrl: string, log?: SpecLogFn): Promi
  * Format a single command as a compact signature line for the system prompt.
  * Examples:
  *   mine -- Mine resources at current location
- *   storage_deposit(item_id, quantity) -- Move items from cargo to station storage
+ *   storage_deposit(item_id, quantity, target?) -- Move items from cargo to station storage or into a carrier bay when target=self
  *   storage_view(station_id?) -- View your storage at a station
  */
 function formatCommandSignature(cmd: GameCommandInfo): string {

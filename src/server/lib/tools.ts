@@ -5,7 +5,7 @@ import { getProfile, updateProfile } from './db'
 import { fetchGameCommands, parseRuntimeCommandResult } from './schema'
 import { getPendingNavigation, reconcilePendingNavigationWithStatus, updatePendingNavigationFromResult } from './navigation-guard'
 import { classifyMiningFit } from './mining-fit'
-import { classifyPoi } from './poi'
+import { classifyPoi, resolvePoiSnapshot } from './poi'
 import { lookupKbPoiKind } from './system-kb'
 import {
   clearPendingMutationSeen,
@@ -608,8 +608,7 @@ function validateMineAgainstLiveState(
   const player = (gameState?.player as Record<string, unknown> | undefined) || {}
   const location = (gameState?.location as Record<string, unknown> | undefined) || {}
   const modules = Array.isArray(gameState?.modules) ? gameState?.modules : []
-  const poiType = location.poi_type ?? player.current_poi_type
-  const poiName = location.poi_name ?? player.current_poi
+  const { type: poiType, name: poiName } = resolvePoiSnapshot(location, player)
   const poiKind = classifyPoi(poiType, poiName)
   const fitKind = classifyMiningFit(modules)
 
@@ -1090,15 +1089,51 @@ function ingestMarketSnapshot(profileId: string, command: string, resp: CommandR
       const record = item as Record<string, unknown>
       const itemId = pickFirstStringArg(record.item_id, record.id, record.name)
       if (!itemId) continue
+      const nestedBid = bestOrderPrice(record.buy_orders, 'desc')
+      const nestedAsk = bestOrderPrice(record.sell_orders, 'asc')
+      const nestedBidVolume = sumOrderVolume(record.buy_orders)
+      const nestedAskVolume = sumOrderVolume(record.sell_orders)
       rememberMarketSnapshot(profileId, locationKey, itemId, {
-        bestBid: toFiniteNumber(record.best_bid ?? record.bid_price ?? record.buy_price ?? record.highest_buy),
-        bestAsk: toFiniteNumber(record.best_ask ?? record.ask_price ?? record.sell_price ?? record.lowest_sell),
-        bidVolume: toFiniteNumber(record.bid_volume ?? record.buy_volume ?? record.demand ?? record.quantity_buy),
-        askVolume: toFiniteNumber(record.ask_volume ?? record.sell_volume ?? record.supply ?? record.quantity_sell ?? record.quantity),
+        bestBid: toFiniteNumber(record.best_bid ?? record.bid_price ?? record.buy_price ?? record.highest_buy ?? record.bid ?? nestedBid),
+        bestAsk: toFiniteNumber(record.best_ask ?? record.ask_price ?? record.sell_price ?? record.lowest_sell ?? record.ask ?? nestedAsk),
+        bidVolume: toFiniteNumber(record.bid_volume ?? record.buy_volume ?? record.demand ?? record.quantity_buy ?? record.buy_quantity ?? nestedBidVolume),
+        askVolume: toFiniteNumber(record.ask_volume ?? record.sell_volume ?? record.supply ?? record.quantity_sell ?? record.sell_quantity ?? record.quantity ?? nestedAskVolume),
       })
     }
     return
   }
+}
+
+function bestOrderPrice(orders: unknown, direction: 'asc' | 'desc'): number | null {
+  if (!Array.isArray(orders)) return null
+  let best: number | null = null
+  for (const order of orders) {
+    if (!order || typeof order !== 'object') continue
+    const record = order as Record<string, unknown>
+    const price = toFiniteNumber(record.price ?? record.unit_price ?? record.ask_price ?? record.bid_price ?? record.buy_price ?? record.sell_price)
+    if (price === null) continue
+    if (best === null) {
+      best = price
+      continue
+    }
+    if (direction === 'asc' ? price < best : price > best) best = price
+  }
+  return best
+}
+
+function sumOrderVolume(orders: unknown): number | null {
+  if (!Array.isArray(orders)) return null
+  let total = 0
+  let seen = false
+  for (const order of orders) {
+    if (!order || typeof order !== 'object') continue
+    const record = order as Record<string, unknown>
+    const volume = toFiniteNumber(record.quantity ?? record.remaining_quantity ?? record.available ?? record.volume)
+    if (volume === null) continue
+    total += volume
+    seen = true
+  }
+  return seen ? total : null
 }
 
 function formatPendingHint(command: string, result: unknown): string | null {

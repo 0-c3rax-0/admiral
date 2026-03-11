@@ -143,7 +143,6 @@ Typical free-query telemetry includes:
 - `get_status`
 - `get_cargo`
 - `view_market`
-- `shipyard_showroom`
 - `browse_ships`
 
 Operational effect:

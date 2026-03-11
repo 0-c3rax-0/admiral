@@ -1,4 +1,5 @@
 export type NormalizedPoiKind = 'station' | 'ore' | 'ice' | 'gas' | 'resource' | 'unknown'
+export type PoiSnapshot = { type: unknown; name: unknown }
 
 function normalize(value: unknown): string {
   return typeof value === 'string' ? value.trim().toLowerCase() : ''
@@ -16,6 +17,23 @@ export function classifyPoi(type: unknown, name: unknown): NormalizedPoiKind {
   if (haystack.includes('asteroid') || haystack.includes('belt') || haystack.includes('ring')) return 'ore'
   if (haystack.includes('field') || haystack.includes('resource')) return 'resource'
   return 'unknown'
+}
+
+export function resolvePoiSnapshot(
+  location: Record<string, unknown> | undefined,
+  player: Record<string, unknown> | undefined,
+): PoiSnapshot {
+  const locationType = location?.poi_type
+  const locationName = location?.poi_name
+  const playerType = player?.current_poi_type
+  const playerName = player?.current_poi
+
+  const hasLocationPoi = normalize(locationType) || normalize(locationName)
+  if (hasLocationPoi) {
+    return { type: locationType, name: locationName }
+  }
+
+  return { type: playerType, name: playerName }
 }
 
 export function isDockedPoi(type: unknown, name: unknown): boolean {

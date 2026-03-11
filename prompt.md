@@ -57,6 +57,8 @@ Guide selection rules:
 - **Query often**: `get_status`, `get_cargo`, `get_system`, `get_poi` are free — use them constantly
 - **Fuel management**: Always check fuel before traveling. Refuel at every dock. Running out of fuel strands you.
 - **Fuel planning**: Cargo weight no longer changes jump fuel cost. Plan fuel from ship mass/scale, speed, distance, and module choices instead.
+- **Carrier ships**: Carriers can haul other ships. Load a ship into a carrier with `storage_deposit(item_id=<ship_id>, target=self)` while both are at the same station, and unload it with `storage_withdraw(item_id=<ship_id>)`.
+- **Carrier cargo checks**: On a carrier, use `get_cargo` to inspect `carried_ships`, `bay_used`, and `bay_capacity` before moving more ships.
 - **Mining fit must match the node**: ore mining equipment belongs at asteroid belts, ice harvesters at ice fields, and gas harvesters at gas clouds. Do not travel to a resource POI and call `mine` unless the installed modules are compatible with that resource type.
 - **Route system travel explicitly**: For multi-system movement, first resolve the destination with `search_systems` if needed, then call `find_route(target_system=...)`, then jump only to the next hop from the returned route. After each jump or travel step, verify again with `get_status` or `get_location` before issuing the next navigation mutation.
 - **Save early**: After registering, immediately `save_credentials`

@@ -13,7 +13,7 @@ type MarketSnapshotEntry = {
 type PendingBudgetState = {
   lastPendingSeenAt: number
   lastVerificationAt: number
-  verificationCount: number
+  verificationCommands: Set<string>
   lastVerificationCommand: string | null
 }
 
@@ -27,8 +27,8 @@ type ProfileRuntimeState = {
 const ZERO_FILL_TTL_MS = 15 * 60_000
 const MARKET_SNAPSHOT_TTL_MS = 10 * 60_000
 const UNKNOWN_COMMAND_TTL_MS = 30 * 60_000
-const PENDING_VERIFY_COOLDOWN_MS = 12_000
-const MAX_PENDING_VERIFICATIONS = 1
+const PENDING_VERIFY_COOLDOWN_MS = 8_000
+const MAX_PENDING_VERIFICATIONS = 2
 
 const stateByProfile = new Map<string, ProfileRuntimeState>()
 
@@ -114,7 +114,7 @@ export function markPendingMutationSeen(profileId: string): void {
   state.pendingBudget = {
     lastPendingSeenAt: Date.now(),
     lastVerificationAt: 0,
-    verificationCount: 0,
+    verificationCommands: new Set(),
     lastVerificationCommand: null,
   }
 }
@@ -128,8 +128,11 @@ export function shouldThrottlePendingVerification(profileId: string, command: st
   if (normalized !== 'get_status' && normalized !== 'get_location') return false
   const budget = getState(profileId).pendingBudget
   if (!budget) return false
-  if (budget.verificationCount >= MAX_PENDING_VERIFICATIONS) return true
-  return Date.now() - budget.lastVerificationAt < PENDING_VERIFY_COOLDOWN_MS
+  if (budget.lastVerificationCommand === normalized && Date.now() - budget.lastVerificationAt < PENDING_VERIFY_COOLDOWN_MS) {
+    return true
+  }
+  if (budget.verificationCommands.has(normalized)) return false
+  return budget.verificationCommands.size >= MAX_PENDING_VERIFICATIONS
 }
 
 export function notePendingVerification(profileId: string, command: string): void {
@@ -138,7 +141,7 @@ export function notePendingVerification(profileId: string, command: string): voi
   const budget = getState(profileId).pendingBudget
   if (!budget) return
   budget.lastVerificationAt = Date.now()
-  budget.verificationCount += 1
+  budget.verificationCommands.add(normalized)
   budget.lastVerificationCommand = normalized
 }
 

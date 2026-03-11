@@ -85,7 +85,6 @@ Common queries:
 - `get_status`
 - `get_cargo`
 - `view_market`
-- `shipyard_showroom`
 - `browse_ships`
 
 Intent:
