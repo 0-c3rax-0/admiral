@@ -127,6 +127,12 @@ export async function executeTool(
       ctx.log('system', `Adjusted command: ${command} -> ${resolved}`)
       command = resolved
     }
+    const verifiedCommandError = await validateVerifiedGameCommand(ctx.profileId, command, ctx.connection)
+    if (verifiedCommandError) {
+      ctx.log('system', verifiedCommandError.systemMessage)
+      ctx.log('tool_result', verifiedCommandError.errorMessage)
+      return verifiedCommandError.errorMessage
+    }
     if (isBlockedGameCommand(command)) {
       const errMsg = `Error: blocked unsafe command '${command}'. Irreversible self-destruction or account-reset actions are never allowed.`
       ctx.log('error', errMsg)
@@ -333,6 +339,24 @@ async function validateLocalGameCommand(
   return {
     systemMessage: 'Blocked sell locally: requested quantity is 0 or negative. Refresh cargo/state before trying to sell again.',
     errorMessage: formatCommandError('sell', 'invalid_payload', 'invalid_payload: Quantity must be greater than 0.'),
+  }
+}
+
+async function validateVerifiedGameCommand(
+  profileId: string,
+  command: string,
+  connection: GameConnection,
+): Promise<{ systemMessage: string; errorMessage: string } | null> {
+  const names = await getAvailableCommandNames(profileId, connection)
+  if (names.length === 0) return null
+  if (names.includes(command)) return null
+
+  rememberUnknownCommand(profileId, command)
+  const suggestions = await suggestCommands(profileId, command, connection)
+  const suggestionSuffix = suggestions.length > 0 ? ` Did you mean: ${suggestions.join(', ')}` : ''
+  return {
+    systemMessage: `Blocked unverified command locally: '${command}' is not present in the current API command list.`,
+    errorMessage: `Error: unsupported command '${command}'. This command is not available in the current API.${suggestionSuffix}`,
   }
 }
 
@@ -687,7 +711,44 @@ async function fetchAvailableCommands(connection: GameConnection, serverUrl: str
     }
   }
 
-  return fetchGameCommands(`${serverUrl}/api/${apiVersion}`)
+  const commands = await fetchGameCommands(`${serverUrl}/api/${apiVersion}`)
+  return canonicalizeDiscoveredCommands(commands)
+}
+
+function canonicalizeDiscoveredCommands(commands: Array<{ name: string }>): Array<{ name: string }> {
+  const preferred = new Map<string, { name: string }>()
+
+  for (const command of commands) {
+    const shortName = stripNamespacedAlias(command.name)
+    if (!preferred.has(shortName)) {
+      preferred.set(shortName, { ...command, name: shortName })
+      continue
+    }
+
+    const existing = preferred.get(shortName)!
+    if (existing.name !== shortName && command.name === shortName) {
+      preferred.set(shortName, { ...command, name: shortName })
+    }
+  }
+
+  return [...preferred.values()].sort((a, b) => a.name.localeCompare(b.name))
+}
+
+function stripNamespacedAlias(name: string): string {
+  const normalized = normalizeCommand(name)
+  const segments = normalized.split('_').filter(Boolean)
+  if (segments.length < 3) return normalized
+  const knownPrefixes = new Set([
+    'auth',
+    'combat',
+    'faction',
+    'market',
+    'salvage',
+    'ship',
+    'social',
+  ])
+  if (!knownPrefixes.has(segments[0])) return normalized
+  return segments.slice(1).join('_')
 }
 
 function semanticCommandHints(inputRaw: string): string[] {
@@ -696,7 +757,7 @@ function semanticCommandHints(inputRaw: string): string[] {
 
   if (input === 'get_recipes' || input === 'get_recipe' || input === 'get_receipe' || input === 'get_receipes') {
     hints.push('catalog(args={ type: "recipes" })')
-    hints.push('craft(args={ recipe_id: "..." })')
+    hints.push('craft(args={ recipe_id: "recipe_or_item_id" })')
   }
 
   if (input === 'recipe' || input === 'recipes') {

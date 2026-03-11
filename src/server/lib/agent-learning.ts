@@ -9,7 +9,7 @@ const MAX_EPISODES = 60
 const MAX_FAILURES = 40
 const MAX_RULES = 24
 const QUERY_COMMANDS = new Set([
-  'get_status', 'get_location', 'get_system', 'get_poi', 'get_cargo', 'get_ship', 'get_ships', 'get_skills',
+  'get_status', 'get_location', 'get_system', 'get_poi', 'get_cargo', 'get_ship', 'get_skills',
   'get_missions', 'get_active_missions', 'get_nearby', 'get_action_log', 'view_market', 'analyze_market',
   'estimate_purchase', 'catalog', 'browse_ships', 'list_ships', 'quote', 'wrecks', 'forum_list', 'forum_get_thread',
   'captains_log_list', 'captains_log_get', 'social_captains_log_list', 'social_captains_log_get',

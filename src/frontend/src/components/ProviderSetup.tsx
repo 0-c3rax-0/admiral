@@ -141,6 +141,7 @@ export function ProviderSetup({
   const [oauthStartedAt, setOauthStartedAt] = useState<number | null>(null)
   const [oauthCurrentProjectId, setOauthCurrentProjectId] = useState<string | null>(null)
   const [oauthCurrentEmail, setOauthCurrentEmail] = useState<string | null>(null)
+  const [oauthConnected, setOauthConnected] = useState(false)
   const [oauthProjectDetectSource, setOauthProjectDetectSource] = useState<string | null>(null)
 
   // Close on Escape
@@ -162,6 +163,7 @@ export function ProviderSetup({
         const resp = await fetch('/api/oauth/google-gemini-cli/current')
         if (!resp.ok) return
         const data = await resp.json()
+        setOauthConnected(!!data.connected)
         setOauthCurrentProjectId(data.projectId || null)
         setOauthCurrentEmail(data.email || null)
         setOauthProjectDetectSource(data.projectId ? 'oauth_auth_json' : null)
@@ -199,6 +201,7 @@ export function ProviderSetup({
             if (authResp.ok) {
               const authData = await authResp.json()
               if (!cancelled) {
+                setOauthConnected(!!authData.connected)
                 setOauthCurrentProjectId(authData.projectId || null)
                 setOauthCurrentEmail(authData.email || null)
                 setOauthProjectDetectSource(authData.projectId ? 'oauth_auth_json' : null)
@@ -682,7 +685,7 @@ export function ProviderSetup({
                 4) Paste it into <span className="text-foreground">Manual callback</span> below and click <span className="text-foreground">Submit</span>.
               </div>
               <div className="ml-[7.25rem] text-[11px] text-muted-foreground">
-                Active account: <span className="text-foreground">{oauthCurrentEmail || '(not connected)'}</span>
+                Active account: <span className="text-foreground">{oauthCurrentEmail || (oauthConnected ? '(connected, no email returned)' : '(not connected)')}</span>
                 {' | '}
                 Project ID: <span className="text-foreground">{oauthCurrentProjectId || '(unknown)'}</span>
                 {oauthProjectDetectSource ? (

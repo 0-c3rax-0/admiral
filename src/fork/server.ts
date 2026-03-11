@@ -3,6 +3,7 @@ import stats from './server/routes/stats'
 import map from './server/routes/map'
 import oauth from './server/routes/oauth'
 import economy from './server/routes/economy'
+import fleet from './server/routes/fleet'
 export {
   buildProfileResponse,
   handleProfileCommandSideEffects,
@@ -47,6 +48,7 @@ export function registerServerForkRoutes(app: Hono): void {
   app.route('/api/map', map)
   app.route('/api/oauth', oauth)
   app.route('/api/economy', economy)
+  app.route('/api/fleet', fleet)
 }
 
 export function startServerForkServices(): void {

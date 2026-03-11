@@ -155,6 +155,12 @@ export function CommandPanel({ profileId, onSend, disabled, commandInputRef, ser
     return scored.slice(0, 12).map(s => s.cmd)
   }, [command, commands])
 
+  const availablePresets = useMemo(() => {
+    if (commands.length === 0) return COMMAND_PRESETS
+    const available = new Set(commands.map((cmd) => cmd.name))
+    return COMMAND_PRESETS.filter((preset) => available.has(preset.command))
+  }, [commands])
+
   // Selected command info (exact match)
   const selectedCommand = useMemo(() => {
     const q = command.trim().toLowerCase()
@@ -299,7 +305,7 @@ export function CommandPanel({ profileId, onSend, disabled, commandInputRef, ser
     <div className="relative" data-tour="command-panel">
       <div className="flex flex-wrap items-center gap-1.5 border-t border-border bg-card px-3.5 pt-2 pb-1.5">
         <span className="text-[10px] uppercase tracking-[1.4px] text-muted-foreground">Presets</span>
-        {COMMAND_PRESETS.map((preset) => (
+        {availablePresets.map((preset) => (
           <button
             key={preset.label}
             type="button"

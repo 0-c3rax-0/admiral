@@ -31,7 +31,7 @@ const MAX_CANDIDATES = 5
 const NUDGE_COOLDOWN_MS = 10 * 60_000
 const KB_CACHE_TTL_MS = 6 * 60 * 60_000
 const SHIP_UPGRADE_CACHE_TTL_MS = 20 * 60_000
-const MIN_FITTING_RESERVE_CREDITS = 15_000
+const MIN_FITTING_RESERVE_CREDITS = 10_000
 const MIN_FITTING_RESERVE_RATIO = 0.2
 const SHIP_KB_URL = 'https://rsned.github.io/spacemolt-kb/ships/'
 
@@ -46,6 +46,7 @@ type Candidate = {
   recentSignals: string[]
   routeSignals: string[]
   shipUpgradeSignals: string[]
+  ownedShipSignals: string[]
   adviceSignals: AdviceSignal[]
 }
 
@@ -132,6 +133,7 @@ class FleetSupervisor {
   private lastNudgeAtByProfile = new Map<string, number>()
   private lastNudgeTextByProfile = new Map<string, string>()
   private shipUpgradeSignalsCache = new Map<string, { expiresAt: number; signals: string[] }>()
+  private ownedShipSignalsCache = new Map<string, { expiresAt: number; signals: string[] }>()
   private verifiedCommandsCache = new Map<string, { expiresAt: number; commands: VerifiedCommands | null }>()
 
   start(): void {
@@ -258,15 +260,17 @@ class FleetSupervisor {
       const loopSignal = detectReplanningLoop(logs, status)
       const routeSignals = await this.buildRouteSignals(profile.server_url, status)
       const shipUpgradeSignals = await this.buildShipUpgradeSignals(profile, status)
+      const ownedShipSignals = await this.buildOwnedShipSignals(profile, status)
       const verifiedCommands = await this.getVerifiedCommands(profile)
       const commandHintSignals = buildCommandHintSignals(logs, verifiedCommands)
-      const adviceSignals = buildAdviceSignals(status, recentSignals, routeSignals, shipUpgradeSignals, verifiedCommands, loopSignal, commandHintSignals)
+      const adviceSignals = buildAdviceSignals(status, recentSignals, routeSignals, shipUpgradeSignals, ownedShipSignals, verifiedCommands, loopSignal, commandHintSignals)
       const noisyState =
         status.mutation_state !== 'idle' ||
         recentSignals.length > 0 ||
         loopSignal.detected ||
         routeSignals.length > 0 ||
         shipUpgradeSignals.length > 0 ||
+        ownedShipSignals.length > 0 ||
         adviceSignals.length > 0
       if (!noisyState) continue
 
@@ -281,6 +285,7 @@ class FleetSupervisor {
         recentSignals,
         routeSignals,
         shipUpgradeSignals,
+        ownedShipSignals,
         adviceSignals,
       })
 
@@ -301,6 +306,23 @@ class FleetSupervisor {
 
     const signals = await computeShipUpgradeSignals(profile, status)
     this.shipUpgradeSignalsCache.set(profile.id, {
+      expiresAt: Date.now() + SHIP_UPGRADE_CACHE_TTL_MS,
+      signals,
+    })
+    return signals
+  }
+
+  private async buildOwnedShipSignals(
+    profile: Profile,
+    status: ReturnType<typeof agentManager.getStatus>,
+  ): Promise<string[]> {
+    const cached = this.ownedShipSignalsCache.get(profile.id)
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.signals
+    }
+
+    const signals = await computeOwnedShipSignals(profile, status)
+    this.ownedShipSignalsCache.set(profile.id, {
       expiresAt: Date.now() + SHIP_UPGRADE_CACHE_TTL_MS,
       signals,
     })
@@ -544,6 +566,7 @@ function buildAdviceSignals(
   recentSignals: string[],
   routeSignals: string[],
   shipUpgradeSignals: string[],
+  ownedShipSignals: string[],
   verifiedCommands: VerifiedCommands | null,
   loopSignal: LoopSignal,
   commandHintSignals: CommandHintSignal[],
@@ -733,6 +756,18 @@ function buildAdviceSignals(
       recommendedChecks: ['get_status'],
       recommendedActions: [],
       whyNow: 'repeating the same travel adds no progress',
+    })
+  }
+
+  if (ownedShipSignals.length > 0) {
+    signals.push({
+      kind: 'switch_to_owned_ship',
+      priority: 74,
+      summary: 'A better already-owned ship is available; switch into it before buying another hull.',
+      evidence: ownedShipSignals.slice(0, 1),
+      recommendedChecks: ['list_ships', 'get_ship'],
+      recommendedActions: ['switch_ship'],
+      whyNow: 'a stronger owned hull is already available and should be used first',
     })
   }
 
@@ -959,6 +994,78 @@ async function computeShipUpgradeSignals(
   return [
     `affordable ship upgrade available: ${currentShip.name} -> ${best.ship.name} for ${best.price} cr; reserve after hull purchase stays ${spareCredits} cr for fitting; skill check passed${requiredSkillsSummary ? ` (${requiredSkillsSummary})` : ''}; cargo ${currentShip.cargo}->${best.ship.cargo}, durability ${currentShip.hull + currentShip.shield}->${best.ship.hull + best.ship.shield}, total slots ${totalSlotsCurrent}->${totalSlotsNext}, tier ${currentShip.tier}->${best.ship.tier}`,
   ]
+}
+
+async function computeOwnedShipSignals(
+  profile: Profile,
+  status: ReturnType<typeof agentManager.getStatus>,
+): Promise<string[]> {
+  if (!profile.username || !profile.password) return []
+
+  const shipRecord = status.gameState?.ship
+  const shipName = stringifyShipValue(shipRecord?.name) || stringifyShipValue(shipRecord?.class)
+  const currentShip = shipName ? await getShipCatalogEntry(shipName) : null
+  if (!currentShip) return []
+
+  const connection = createGameConnection(profile)
+  try {
+    await connection.connect()
+    const login = await connection.login(profile.username || '', profile.password || '')
+    if (!login.success) return []
+
+    const resp = await connection.execute('list_ships', {})
+    if (resp.error) return []
+    const data = ((resp.structuredContent ?? resp.result) as Record<string, unknown> | undefined) || {}
+    const ships = Array.isArray(data.ships) ? data.ships : []
+
+    const candidates: Array<{ ship: ShipCatalogEntry; location: string | null }> = []
+    for (const item of ships) {
+      if (!item || typeof item !== 'object') continue
+      const record = item as Record<string, unknown>
+      if (record.is_active === true) continue
+      const name = stringifyShipValue(record.custom_name) || stringifyShipValue(record.class_name) || stringifyShipValue(record.class_id)
+      if (!name) continue
+      const ship = await getShipCatalogEntry(name)
+      if (!ship) continue
+      if (normalizeShipKey(ship.name) === normalizeShipKey(currentShip.name)) continue
+
+      const improvesCargo = ship.cargo > currentShip.cargo
+      const improvesDurability = ship.hull + ship.shield > currentShip.hull + currentShip.shield
+      const improvesSlots =
+        ship.weaponSlots + ship.defenseSlots + ship.utilitySlots >
+        currentShip.weaponSlots + currentShip.defenseSlots + currentShip.utilitySlots
+      const improvesTier = ship.tier > currentShip.tier
+      if (!improvesCargo && !improvesDurability && !improvesSlots && !improvesTier) continue
+
+      candidates.push({
+        ship,
+        location: stringifyShipValue(record.location) || stringifyShipValue(record.location_base_id),
+      })
+    }
+
+    candidates.sort((a, b) =>
+      (b.ship.tier - a.ship.tier) ||
+      (b.ship.cargo - a.ship.cargo) ||
+      ((b.ship.hull + b.ship.shield) - (a.ship.hull + a.ship.shield)) ||
+      (
+        (b.ship.weaponSlots + b.ship.defenseSlots + b.ship.utilitySlots) -
+        (a.ship.weaponSlots + a.ship.defenseSlots + a.ship.utilitySlots)
+      ) ||
+      a.ship.name.localeCompare(b.ship.name)
+    )
+    const best = candidates[0]
+    if (!best) return []
+
+    const totalSlotsCurrent = currentShip.weaponSlots + currentShip.defenseSlots + currentShip.utilitySlots
+    const totalSlotsNext = best.ship.weaponSlots + best.ship.defenseSlots + best.ship.utilitySlots
+    return [
+      `better owned ship already available: ${currentShip.name} -> ${best.ship.name}${best.location ? ` at ${best.location}` : ''}; cargo ${currentShip.cargo}->${best.ship.cargo}, durability ${currentShip.hull + currentShip.shield}->${best.ship.hull + best.ship.shield}, total slots ${totalSlotsCurrent}->${totalSlotsNext}, tier ${currentShip.tier}->${best.ship.tier}`,
+    ]
+  } catch {
+    return []
+  } finally {
+    await connection.disconnect().catch(() => {})
+  }
 }
 
 async function pickUpgradeOffer(

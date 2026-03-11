@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Loader2, RefreshCw, Store, X } from 'lucide-react'
+import { ChevronDown, ChevronRight, Loader2, RefreshCw, Store, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 
@@ -43,6 +43,8 @@ export function MarketBrowserModal({ open, connected, profileId, onClose }: Prop
   const [storedEntries, setStoredEntries] = useState<StoredMarketEntry[]>([])
   const [storedAt, setStoredAt] = useState<string | null>(null)
   const [recentTrades, setRecentTrades] = useState<TradeEvent[]>([])
+  const [snapshotOpen, setSnapshotOpen] = useState(false)
+  const [tradesOpen, setTradesOpen] = useState(false)
 
   async function loadHistory(nextCategory: string) {
     setHistoryLoading(true)
@@ -149,18 +151,24 @@ export function MarketBrowserModal({ open, connected, profileId, onClose }: Prop
 
         <div className="overflow-auto max-h-[calc(85vh-125px)]">
           <section className="border-b border-border">
-            <div className="px-4 py-2.5 bg-background/30 flex items-center justify-between">
-              <span className="text-[11px] uppercase tracking-[1.2px] text-muted-foreground">Stored Market Snapshot</span>
+            <button
+              onClick={() => setSnapshotOpen((value) => !value)}
+              className="w-full px-4 py-2.5 bg-background/30 flex items-center justify-between hover:bg-background/40 transition-colors"
+            >
+              <span className="inline-flex items-center gap-2 text-[11px] uppercase tracking-[1.2px] text-muted-foreground">
+                {snapshotOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                Stored Market Snapshot
+              </span>
               <span className="text-[10px] text-muted-foreground">
                 {storedAt ? formatDateTime(storedAt) : historyLoading ? 'laedt...' : 'keine Daten'}
               </span>
-            </div>
-            {!historyLoading && filteredStoredEntries.length === 0 && (
+            </button>
+            {snapshotOpen && !historyLoading && filteredStoredEntries.length === 0 && (
               <div className="px-4 py-4 text-sm text-muted-foreground">
                 Kein gespeicherter Snapshot fuer diese Kategorie vorhanden.
               </div>
             )}
-            {filteredStoredEntries.length > 0 && (
+            {snapshotOpen && filteredStoredEntries.length > 0 && (
               <table className="w-full text-xs">
                 <thead className="bg-card/70">
                   <tr className="border-b border-border text-muted-foreground uppercase tracking-[1.2px]">
@@ -189,16 +197,22 @@ export function MarketBrowserModal({ open, connected, profileId, onClose }: Prop
           </section>
 
           <section>
-            <div className="px-4 py-2.5 bg-background/30 flex items-center justify-between">
-              <span className="text-[11px] uppercase tracking-[1.2px] text-muted-foreground">Recent Trades</span>
+            <button
+              onClick={() => setTradesOpen((value) => !value)}
+              className="w-full px-4 py-2.5 bg-background/30 flex items-center justify-between hover:bg-background/40 transition-colors"
+            >
+              <span className="inline-flex items-center gap-2 text-[11px] uppercase tracking-[1.2px] text-muted-foreground">
+                {tradesOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                Recent Trades
+              </span>
               <span className="text-[10px] text-muted-foreground">{recentTrades.length} Eintraege</span>
-            </div>
-            {!historyLoading && recentTrades.length === 0 && (
+            </button>
+            {tradesOpen && !historyLoading && recentTrades.length === 0 && (
               <div className="px-4 py-4 text-sm text-muted-foreground">
                 Noch keine eigenen Trades in der Economy-DB gespeichert.
               </div>
             )}
-            {recentTrades.length > 0 && (
+            {tradesOpen && recentTrades.length > 0 && (
               <table className="w-full text-xs">
                 <thead className="bg-card/70">
                   <tr className="border-b border-border text-muted-foreground uppercase tracking-[1.2px]">

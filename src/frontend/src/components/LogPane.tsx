@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
-import { ArrowDown, ArrowUp, Check, Copy, Loader2, Minus, X } from 'lucide-react'
+import { AlertTriangle, ArrowDown, ArrowUp, Check, Copy, Loader2, Minus, X } from 'lucide-react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useSearchParams } from 'react-router'
 import type { LogEntry, LogType } from '@/types'
@@ -176,6 +176,22 @@ export function LogPane({ profileId, profileName, connected }: Props) {
     return map
   }, [entries])
 
+  const apiMismatch = useMemo(() => {
+    const recent = [...entries].reverse().find((entry) =>
+      (entry.type === 'tool_result' || entry.type === 'error') &&
+      (
+        entry.summary.includes('unsupported command') ||
+        entry.summary.includes('Blocked unverified command locally') ||
+        entry.summary.includes('temporarily blocked repeated unknown or invalid command')
+      )
+    )
+    if (!recent) return null
+    return {
+      id: recent.id,
+      summary: recent.summary,
+    }
+  }, [entries])
+
   // Virtualizer
   const virtualizer = useVirtualizer({
     count: filtered.length,
@@ -263,6 +279,16 @@ export function LogPane({ profileId, profileName, connected }: Props) {
           />
         ))}
         <div className="flex-1" />
+        {apiMismatch && (
+          <button
+            onClick={() => setSelectedLogId(apiMismatch.id)}
+            className="mr-2 inline-flex items-center gap-1 rounded border border-amber-500/30 bg-amber-500/8 px-2 py-0.5 text-[10px] text-amber-300 hover:bg-amber-500/12"
+            title={apiMismatch.summary}
+          >
+            <AlertTriangle size={11} />
+            <span className="uppercase tracking-[1.1px]">API mismatch</span>
+          </button>
+        )}
         {entries.length > 0 && (
           <button
             onClick={handleClear}

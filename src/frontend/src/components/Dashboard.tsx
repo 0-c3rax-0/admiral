@@ -16,6 +16,7 @@ const NewProfileWizard = lazy(() => import('./NewProfileWizard').then((mod) => (
 const AdmiralTour = lazy(() => import('./AdmiralTour').then((mod) => ({ default: mod.AdmiralTour })))
 const GalaxyMapModal = lazy(() => import('./GalaxyMapModal').then((mod) => ({ default: mod.GalaxyMapModal })))
 const EconomyOverviewModal = lazy(() => import('./EconomyOverviewModal').then((mod) => ({ default: mod.EconomyOverviewModal })))
+const FleetShipsModal = lazy(() => import('../fork/FleetShipsModal').then((mod) => ({ default: mod.FleetShipsModal })))
 
 interface Props {
   profiles: Profile[]
@@ -63,6 +64,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
   const [showStats, setShowStats] = useState(false)
   const [showMap, setShowMap] = useState(false)
   const [showMarkets, setShowMarkets] = useState(false)
+  const [showFleet, setShowFleet] = useState(false)
   const [connectingAll, setConnectingAll] = useState(false)
   const [nudgingAll, setNudgingAll] = useState(false)
   const [statusAllLoading, setStatusAllLoading] = useState(false)
@@ -477,6 +479,14 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
             Markets
           </button>
           <button
+            onClick={() => setShowFleet(true)}
+            disabled={profiles.length === 0}
+            className="flex items-center gap-1.5 text-xs text-muted-foreground uppercase tracking-wider px-2.5 py-1.5 hover:text-foreground transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            title="Fleet ships and fitting"
+          >
+            Fleet
+          </button>
+          <button
             onClick={handleOpenMap}
             disabled={statusAllLoading}
             className="flex items-center gap-1.5 text-xs text-muted-foreground uppercase tracking-wider px-2.5 py-1.5 hover:text-foreground transition-colors"
@@ -834,6 +844,15 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
             onClose={() => setShowMarkets(false)}
             profiles={profiles}
             activeProfileId={activeProfile?.id || null}
+          />
+        </Suspense>
+      )}
+
+      {showFleet && (
+        <Suspense fallback={<ModalLoading label="Loading fleet..." />}>
+          <FleetShipsModal
+            open={showFleet}
+            onClose={() => setShowFleet(false)}
           />
         </Suspense>
       )}

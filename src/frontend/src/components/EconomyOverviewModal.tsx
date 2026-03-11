@@ -163,7 +163,7 @@ export function EconomyOverviewModal({ open, onClose, profiles, activeProfileId 
               </div>
               <div>
                 {tradesByProfile.map((group) => {
-                  const isOpen = expandedProfiles[group.profileId] ?? true
+                  const isOpen = expandedProfiles[group.profileId] ?? false
                   return (
                     <div key={group.profileId} className="border-b border-border/50 last:border-b-0">
                       <button

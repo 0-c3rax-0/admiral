@@ -62,7 +62,7 @@ const SHIP_TELEMETRY_INTERVAL = 8
 const MUTATION_STALL_NUDGE_THRESHOLD = 4
 const LOCAL_MUTATION_STUCK_THRESHOLD = 6
 const HTTP_V2_FALLBACK_QUERY_COMMANDS = new Set([
-  'get_status', 'get_location', 'get_system', 'get_poi', 'get_cargo', 'get_ship', 'get_ships', 'get_skills',
+  'get_status', 'get_location', 'get_system', 'get_poi', 'get_cargo', 'get_ship', 'get_skills',
   'get_missions', 'get_active_missions', 'get_nearby', 'get_action_log', 'view_market', 'analyze_market',
   'estimate_purchase', 'catalog', 'browse_ships', 'list_ships', 'quote', 'wrecks', 'forum_list', 'forum_get_thread',
   'captains_log_list', 'captains_log_get', 'social_captains_log_list', 'social_captains_log_get',
@@ -1232,9 +1232,12 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - If you hit errors like \`already_in_system\`, \`cargo_full\`, \`not_enough_fuel\`, \`invalid_payload\` for a zero-quantity sell, or a market/sell rejection, treat them as planning feedback. Verify state, change strategy, and avoid repeating the same blocked action.
 - Before every \`sell\` mutation, run a fresh \`get_status\` and verify that you are docked at a valid base/station and that the cargo quantity you plan to sell is still present. Do not rely on stale docked/cargo assumptions.
 - Use a strict selling workflow: \`get_status\` -> confirm docked -> inspect market/orderbook -> decide price/quantity -> \`sell\` once -> verify the result. If any step is ambiguous, refresh instead of submitting the sell.
-- If the market has no meaningful buy orders, do not dump cargo into a bad or empty instant market. Check existing sell orders and choose a reasonable ask based on the visible orderbook instead of forcing an immediate sale at a poor price.
+- Use a strict cargo-unload fallback when docked with sale inventory: first try to sell directly only if the local market has meaningful buy-side liquidity and the instant sale is acceptable; if immediate sale is not realistically possible or would be obviously bad, move the cargo into the station's local storage before doing anything else with it.
+- If the market has no meaningful buy orders, do not dump cargo into a bad or empty instant market. Prefer putting the goods into local station storage first so the ship can resume work with free cargo space, then decide whether to create a sell order from that station later.
 - If your sell attempt returns \`quantity_sold: 0\`, \`total_earned: 0\`, or leaves cargo unchanged, interpret that as no fill or a bad market fit. Re-check docked state, orders, and the local orderbook before attempting another sell.
+- When using the storage fallback, use the station's personal/local storage, confirm the cargo actually moved, and keep a note of what was stored and where.
 - After creating a sell order, let it run for at least 3 ticks (about 30 seconds) before considering \`cancel_order\` or \`modify_order\`, unless the order is clearly wrong (wrong item, wrong quantity, obviously bad price, or a strategic emergency requires immediate liquidity).
+- Only create a sell order after the cargo is safely unloaded or when you have explicitly verified that listing it is better than keeping it in local storage for later sale.
 - Do not cancel a newly created order just because it is still unfilled on the first verification. Unfilled for one or two checks is normal.
 - Use a strict order-management workflow: \`view_orders\` -> identify the exact \`order_id\` and \`created_at\` -> compare against current orderbook -> only then \`modify_order\` or \`cancel_order\`.
 - Never call \`cancel_order\` with \`item_id\`, quantity, or price fields as a substitute for \`order_id\`. Cancel only by exact \`order_id\`.
@@ -1250,6 +1253,16 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - Mining loops should be practical: mine until cargo is near full (roughly 80-90%), but stop early if yields fail, the location lacks resources, the node mismatches the current mining fit, cargo is full, or a better unload/travel opportunity appears.
 - Do not hoard ore blindly. When docked with valuable raw materials, inspect the market before selling. Avoid dumping into obviously bad instant bids; prefer corrected pricing or listing behavior when needed.
 - Periodically check for practical ship upgrades when docked at a shipyard or base. Favor upgrades that materially improve cargo, mining throughput, survivability, or travel efficiency and are affordable without stalling progress.
+- Keep a wallet reserve of at least 10000 credits. Do not spend below that floor on ship purchases, fitting, or optional upgrades unless explicit human guidance overrides it.
+- Before buying another ship, check \`list_ships\` for already-owned hulls. If you already own a larger or clearly better ship than the current active hull, prefer switching into that owned ship before spending more credits on a new purchase.
+- When multiple owned ships are available, prefer the best already-owned practical upgrade first: usually the highest-tier hull that is actually usable now, with priority on cargo, survivability, and slot count for the current role. Do not keep flying a clearly inferior starter ship while a better owned hull is sitting in storage at a reachable station.
+- After \`buy_ship\`, treat the purchased hull as the new active ship immediately and continue the plan in that ship. Verify the active hull with \`get_ship\`/\`get_status\` before resuming travel, mining, or selling.
+- After \`commission_ship\`, do not forget the delivery step: monitor until the build is complete, then use \`list_ships\` and \`switch_ship\` at the correct station so the commissioned hull actually becomes the active ship before treating the upgrade as done.
+- Ship switching does not transfer modules automatically. When moving into a newly bought or commissioned ship, inspect both fit and cargo/storage, then either:
+  1. move the old fit over with \`uninstall_mod\` -> \`switch_ship\` -> \`install_mod\`, or
+  2. buy/install a fresh fit if that is faster or clearly better.
+- Do not leave an upgraded ship idle in storage while continuing to fly the weaker hull, unless the new ship is temporarily unusable because of missing modules, skills, fuel, or required fitting work.
+- For miners, prioritize restoring a workable mining fit immediately after an upgrade: mining laser first, travel/fuel support second, cargo expansions after that. If the old modules remain on the stored ship, recover them or replace them before returning to the mining loop.
 - For Solarian mining accounts, use this default upgrade path unless current market prices, missing skills, or mission constraints make a nearby step impractical:
   Solarian Miner Upgrade Path
   | Ship | Tier | Hull Price | Cargo | Slots W/D/U | Mining Fit | Ship Skills |
