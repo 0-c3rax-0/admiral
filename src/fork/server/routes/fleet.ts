@@ -5,6 +5,7 @@ import { HttpConnection } from '../../../server/lib/connections/http'
 import { HttpV2Connection } from '../../../server/lib/connections/http_v2'
 
 const fleet = new Hono()
+const FLEET_REQUEST_TIMEOUT_MS = 12_000
 
 fleet.get('/ships', async (c) => {
   const enabledOnly = c.req.query('enabled_only') !== 'false'
@@ -23,8 +24,8 @@ fleet.get('/ships', async (c) => {
 
     const connection = createFleetConnection(profile)
     try {
-      await connection.connect()
-      const login = await connection.login(profile.username, profile.password)
+      await withTimeout(connection.connect(), FLEET_REQUEST_TIMEOUT_MS, `${profile.name}: connect timed out`)
+      const login = await withTimeout(connection.login(profile.username, profile.password), FLEET_REQUEST_TIMEOUT_MS, `${profile.name}: login timed out`)
       if (!login.success) {
         return {
           profile_id: profile.id,
@@ -36,8 +37,12 @@ fleet.get('/ships', async (c) => {
       }
 
       const [listShipsResp, getShipResp] = await Promise.all([
-        connection.execute('list_ships'),
-        connection.execute('get_ship').catch(() => ({ result: undefined, structuredContent: undefined, error: { code: 'get_ship_failed', message: 'get_ship failed' } })),
+        withTimeout(connection.execute('list_ships'), FLEET_REQUEST_TIMEOUT_MS, `${profile.name}: list_ships timed out`),
+        withTimeout(
+          connection.execute('get_ship').catch(() => ({ result: undefined, structuredContent: undefined, error: { code: 'get_ship_failed', message: 'get_ship failed' } })),
+          FLEET_REQUEST_TIMEOUT_MS,
+          `${profile.name}: get_ship timed out`,
+        ),
       ])
 
       if (listShipsResp.error) {
@@ -89,6 +94,20 @@ function createFleetConnection(profile: { connection_mode: string; server_url: s
     return new HttpConnection(profile.server_url)
   }
   return createGameConnection(profile as Parameters<typeof createGameConnection>[0])
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

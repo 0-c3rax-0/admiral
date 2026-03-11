@@ -35,6 +35,23 @@ export type ItemDetail = {
   hazardousWarnings: string[]
 }
 
+export type RecipeDetail = {
+  name: string
+  recipeId: string
+  category: string | null
+  inputCount: number | null
+  outputCount: number | null
+  requiredSkills: SkillMap
+}
+
+export type SkillDetail = {
+  name: string
+  skillId: string
+  category: string | null
+  maxLevel: number | null
+  requiredSkills: SkillMap
+}
+
 type CommissionQuoteTarget = {
   key: string
   name: string
@@ -115,11 +132,16 @@ function collectCatalogArrays(data: Record<string, unknown> | undefined): unknow
     asArray(data.ships),
     asArray(data.modules),
     asArray(data.items),
+    asArray(data.recipes),
+    asArray(data.skills),
     asArray(data.listings),
     asArray(data.offers),
     asArray(result?.ships),
     asArray(result?.modules),
     asArray(result?.items),
+    asArray(result?.recipes),
+    asArray(result?.skills),
+    asArray(asRecord(result?.result)?.items),
   ].filter((entries) => entries.length > 0)
 }
 
@@ -130,12 +152,12 @@ export function extractShipOffers(data: Record<string, unknown> | undefined): Sh
         const record = asRecord(item)
         if (!record) return null
         const name = String(record.name ?? record.ship_name ?? record.class_name ?? '').trim()
-        const classId = String(record.ship_class ?? record.class_id ?? record.ship_class_id ?? '').trim()
+        const classId = String(record.ship_class ?? record.class_id ?? record.ship_class_id ?? record.id ?? '').trim()
         if (!name && !classId) return null
         return {
           name,
           classId,
-          category: firstNonEmptyString(record.category, record.ship_category, record.role),
+          category: firstNonEmptyString(record.category, record.ship_category, record.role, record.class),
           price: toFiniteNumber(record.price ?? record.ask_price ?? record.cost ?? record.sale_price),
           lore: firstNonEmptyString(record.lore, record.description, record.flavor_text),
           buildMaterials: extractMaterialRequirements(record),
@@ -232,6 +254,53 @@ export function extractItemDetails(data: Record<string, unknown> | undefined): I
         } satisfies ItemDetail
       })
       .filter((detail): detail is ItemDetail => Boolean(detail))
+    if (details.length > 0) return details
+  }
+  return []
+}
+
+export function extractRecipeDetails(data: Record<string, unknown> | undefined): RecipeDetail[] {
+  for (const candidate of collectCatalogArrays(data)) {
+    const details = candidate
+      .map((item) => {
+        const record = asRecord(item)
+        if (!record) return null
+        const name = String(record.name ?? record.recipe_name ?? '').trim()
+        const recipeId = String(record.id ?? record.recipe_id ?? '').trim()
+        if (!name && !recipeId) return null
+        return {
+          name,
+          recipeId,
+          category: firstNonEmptyString(record.category, record.recipe_category),
+          inputCount: asArray(record.inputs).length || toFiniteNumber(record.input_count),
+          outputCount: asArray(record.outputs).length || toFiniteNumber(record.output_count),
+          requiredSkills: extractRequiredSkills(record),
+        } satisfies RecipeDetail
+      })
+      .filter((detail): detail is RecipeDetail => Boolean(detail))
+    if (details.length > 0) return details
+  }
+  return []
+}
+
+export function extractSkillDetails(data: Record<string, unknown> | undefined): SkillDetail[] {
+  for (const candidate of collectCatalogArrays(data)) {
+    const details = candidate
+      .map((item) => {
+        const record = asRecord(item)
+        if (!record) return null
+        const name = String(record.name ?? record.skill_name ?? '').trim()
+        const skillId = String(record.id ?? record.skill_id ?? '').trim()
+        if (!name && !skillId) return null
+        return {
+          name,
+          skillId,
+          category: firstNonEmptyString(record.category, record.skill_category),
+          maxLevel: toFiniteNumber(record.max_level ?? record.maxLevel),
+          requiredSkills: extractRequiredSkills(record),
+        } satisfies SkillDetail
+      })
+      .filter((detail): detail is SkillDetail => Boolean(detail))
     if (details.length > 0) return details
   }
   return []

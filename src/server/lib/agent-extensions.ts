@@ -362,7 +362,7 @@ function buildTransitWaitGuidance(gameState: Record<string, unknown> | null): st
     transit.arrivalTick !== null ? `- Arrival tick: ${transit.arrivalTick}` : '',
     '- Treat this as progress. Do not send another travel/jump while this remains active.',
     '- Prefer waiting until the arrival tick or a fresh arrival/result notification before re-planning.',
-    '- If you need one verification query while waiting, prefer get_location first; then use get_status after arrival or if the transit evidence disappears.',
+    '- If you need one verification query while waiting, prefer get_location first. Use get_cargo instead when the only open question is whether mining changed cargo. Reserve get_status for broader reconciliation after arrival or when the evidence conflicts.',
   ]
   return parts.filter(Boolean).join('\n')
 }

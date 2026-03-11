@@ -10,7 +10,7 @@ import { McpConnection } from './connections/mcp'
 import { McpV2Connection } from './connections/mcp_v2'
 import { resolveModel } from './model'
 import { fetchGameCommands, formatCommandList, parseRuntimeCommandResult } from './schema'
-import { allTools } from './tools'
+import { allTools, mergeGameStateSnapshot } from './tools'
 import { is429PredictionEnabled, predict429Risk, runAgentTurn, type CompactionState } from './loop'
 import { addLogEntry, getLatestPendingLlmRequest, getProfile, updateProfile, getPreference } from './db'
 import { EventEmitter } from 'events'
@@ -46,7 +46,9 @@ import {
   dedupeShipOffers,
   extractItemDetails,
   extractModuleDetails,
+  extractRecipeDetails,
   extractShipOffers,
+  extractSkillDetails,
   formatMaterialRequirements,
   formatRequiredSkills,
 } from './catalog'
@@ -179,11 +181,12 @@ export class Agent {
 
   private cacheGameState(result: CommandResult): void {
     const data = result.structuredContent ?? result.result
-    if (data && typeof data === 'object' && ('player' in data || 'ship' in data || 'location' in data)) {
-      this._gameState = data as Record<string, unknown>
-      reconcilePendingNavigationWithStatus(this.profileId, result)
-      observeGameState(this.profileId, this._gameState)
-    }
+    if (!data || typeof data !== 'object') return
+    const merged = mergeGameStateSnapshot(this._gameState, result)
+    if (!merged) return
+    this._gameState = merged
+    reconcilePendingNavigationWithStatus(this.profileId, result)
+    observeGameState(this.profileId, this._gameState)
   }
 
   private refreshLearningContext(): boolean {
@@ -405,11 +408,14 @@ export class Agent {
       if (isReconnectNotification(n)) {
         const detail = formatReconnectDetail(n)
         this.log('connection', formatNotificationSummary(n), detail ?? JSON.stringify(n, null, 2))
-        void this.executeSilentQuery('get_status')
-          .then((statusResp) => {
-            if (!statusResp) return
-            this.cacheGameState(statusResp)
-            this.log('system', 'Automatic state refresh triggered after reconnect notification')
+        void Promise.all([
+          this.executeSilentQuery('get_status'),
+          this.executeSilentQuery('get_location'),
+        ])
+          .then(([statusResp, locationResp]) => {
+            if (statusResp) this.cacheGameState(statusResp)
+            if (locationResp) this.cacheGameState(locationResp)
+            this.log('system', 'Automatic status/location refresh triggered after reconnect notification')
           })
           .catch(() => {})
         return
@@ -889,7 +895,7 @@ export class Agent {
     const primaryResult = await this.connection.execute(command, args)
     const result = await this.maybeFallbackToHttpV2(command, args, primaryResult, true)
 
-    if (command === 'get_status') this.cacheGameState(result)
+    if (command === 'get_status' || command === 'get_location') this.cacheGameState(result)
     recordCommandOutcome(this.profileId, command, args, result, this._gameState)
 
     if (result.error) {
@@ -1223,9 +1229,10 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - For any destination outside the current system, use a strict routing workflow: if the system name is uncertain, resolve it with \`search_systems\`; then call \`find_route(target_system=...)\`; then jump only to the immediate next hop from the returned route. After each jump or in-system travel step, refresh with \`get_status\` or \`get_location\` before issuing the next navigation mutation. Do not skip directly to a far-away system name when a route has multiple hops.
 - Never describe the situation as a deadlock, stuck mutation queue, or server freeze unless you have strong evidence: at least 4 consecutive fresh verification cycles after a pending mutation, no \`ACTION_RESULT\` notification, and no meaningful state change despite repeated \`get_status\` checks.
 - If one specific account appears blocked for several verification cycles, describe it as a local mutation stall for that account/session only. Do not generalize that to the whole server unless multiple independent accounts show the same evidence.
-- If Admiral provides a \`Mutation State\` block, use it as a strong operational hint. Prefer those exact labels (\`idle\`, \`mutation_pending\`, \`navigation_pending\`, \`local_stall\`) instead of inventing stronger terms like deadlock or server-wide freeze, but still verify important decisions against fresh \`get_status\` evidence.
-- If Admiral provides a \`Navigation State\` block, treat it as a derived hint from recent \`get_status\` data, not as perfect ground truth. Before committing to important travel/dock/mine decisions, verify the current state yourself with fresh \`get_status\` if there is any ambiguity.
-- If \`navigation_pending\` follows a recent \`jump\` or \`travel\`, first assume the ship may still be in transit. Prefer \`get_location\` to inspect active transit destination and arrival tick, then refresh with \`get_status\` and compare fuel, position, and notifications before declaring a navigation stall.
+- If Admiral provides a \`Mutation State\` block, use it as a strong operational hint. Prefer those exact labels (\`idle\`, \`mutation_pending\`, \`navigation_pending\`, \`local_stall\`) instead of inventing stronger terms like deadlock or server-wide freeze, but choose the narrowest verification query that resolves the uncertainty instead of defaulting to \`get_status\`.
+- If Admiral provides a \`Navigation State\` block, treat it as a derived hint from recent \`get_status\` data, not as perfect ground truth. Before committing to important travel/dock/mine decisions, verify the current state yourself with the narrowest fresh query that resolves the ambiguity: \`get_location\` for live POI/transit, \`get_cargo\` for mining completion or cargo changes, \`get_status\` only for broad state reconciliation.
+- If \`navigation_pending\` follows a recent \`jump\` or \`travel\`, first assume the ship may still be in transit. Prefer \`get_location\` to inspect active transit destination and arrival tick, then refresh with \`get_status\` only if you need broader reconciliation before declaring a navigation stall.
+- After a pending \`mine\`, do not reflexively spam \`get_status\`. If you only need to confirm that mining completed or cargo changed, prefer \`get_cargo\`. Use \`get_location\` when the question is whether you are actually at a compatible resource node. Reserve \`get_status\` for broader state reconciliation.
 - If you see a state error like \`not_docked\` after \`undock\`, or \`already_docked\` after \`dock\`, interpret it as evidence that the desired state may already be true. Refresh with \`get_status\` before retrying or claiming the server is frozen.
 - If you have verified a local stall for several cycles, do not stay in passive monitoring forever. After refreshing with \`get_status\`, test exactly one simple low-risk mutation that matches the verified state (typically a corrected \`dock\`, \`undock\`, \`sell\`, \`refuel\`, or other obvious local action).
 - When testing a recovery mutation, send only one probe action, wait for the result, and reassess from fresh \`get_status\`. Do not spam repeated retries of the same command.
@@ -1236,6 +1243,9 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - If the market has no meaningful buy orders, do not dump cargo into a bad or empty instant market. Prefer putting the goods into local station storage first so the ship can resume work with free cargo space, then decide whether to create a sell order from that station later.
 - If your sell attempt returns \`quantity_sold: 0\`, \`total_earned: 0\`, or leaves cargo unchanged, interpret that as no fill or a bad market fit. Re-check docked state, orders, and the local orderbook before attempting another sell.
 - When using the storage fallback, use the station's personal/local storage, confirm the cargo actually moved, and keep a note of what was stored and where.
+- Treat \`create_sell_order\` as fee-bearing. Before listing, inspect the listing fee and compare it to the expected total sale value and expected margin. Do not create tiny low-value orders where the fee eats a meaningful share of proceeds.
+- Prefer batching sale inventory in local station storage and waiting until you have a meaningfully larger stack before creating a sell order. A single larger order is usually better than many tiny fee-paying orders for the same item at the same station.
+- "Batching" can include running multiple mining trips first: if the current station and route are still good for the same ore family, it is often better to unload to local storage, return to the belt for more, and combine several trips into one later sell order instead of listing every small haul immediately.
 - After creating a sell order, let it run for at least 3 ticks (about 30 seconds) before considering \`cancel_order\` or \`modify_order\`, unless the order is clearly wrong (wrong item, wrong quantity, obviously bad price, or a strategic emergency requires immediate liquidity).
 - Only create a sell order after the cargo is safely unloaded or when you have explicitly verified that listing it is better than keeping it in local storage for later sale.
 - Do not cancel a newly created order just because it is still unfilled on the first verification. Unfilled for one or two checks is normal.
@@ -1495,6 +1505,38 @@ function summarizeCommandResult(command: string, args: Record<string, unknown> |
       if (hazardous.length > 0) {
         const preview = hazardous.slice(0, 3).map((item) => `${item.name || item.itemId}: ${item.hazardousWarnings[0]}`).join('; ')
         return `Catalog hazards: ${preview}`.slice(0, 200)
+      }
+      if (items.length > 0) {
+        const preview = items.slice(0, 3).map((item) => item.name || item.itemId).join('; ')
+        return `Catalog items: ${preview}`.slice(0, 200)
+      }
+    }
+
+    if (type === 'recipes') {
+      const recipes = extractRecipeDetails(data)
+      if (recipes.length > 0) {
+        const preview = recipes.slice(0, 3).map((recipe) => {
+          const parts = [recipe.name || recipe.recipeId]
+          if (recipe.category) parts.push(recipe.category)
+          if (recipe.inputCount !== null || recipe.outputCount !== null) parts.push(`${recipe.inputCount ?? '?'}->${recipe.outputCount ?? '?'}`)
+          if (Object.keys(recipe.requiredSkills).length > 0) parts.push(`skills ${formatRequiredSkills(recipe.requiredSkills)}`)
+          return parts.join(' | ')
+        }).join('; ')
+        return `Catalog recipes: ${preview}`.slice(0, 200)
+      }
+    }
+
+    if (type === 'skills') {
+      const skills = extractSkillDetails(data)
+      if (skills.length > 0) {
+        const preview = skills.slice(0, 3).map((skill) => {
+          const parts = [skill.name || skill.skillId]
+          if (skill.category) parts.push(skill.category)
+          if (skill.maxLevel !== null) parts.push(`max ${skill.maxLevel}`)
+          if (Object.keys(skill.requiredSkills).length > 0) parts.push(`req ${formatRequiredSkills(skill.requiredSkills)}`)
+          return parts.join(' | ')
+        }).join('; ')
+        return `Catalog skills: ${preview}`.slice(0, 200)
       }
     }
   }

@@ -520,7 +520,7 @@ export function getLlmRateWindowStats(profileId: string): LlmRateWindowStats {
       END) AS errors_429_last_300s,
       SUM(CASE
         WHEN type = 'system'
-          AND summary LIKE 'Switching to failover API key%'
+          AND summary LIKE 'Switching to profile failover model%'
           AND timestamp >= datetime('now', '-300 seconds')
         THEN 1 ELSE 0
       END) AS failover_activations_last_300s

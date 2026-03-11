@@ -131,7 +131,7 @@ export function CommandPanel({ profileId, onSend, disabled, commandInputRef, ser
   // Fetch commands from API
   useEffect(() => {
     const url = serverUrl || 'https://game.spacemolt.com'
-    const apiVersion = connectionMode === 'http_v2' || connectionMode === 'mcp_v2' ? 'v2' : 'v1'
+    const apiVersion = connectionMode === 'http_v2' || connectionMode === 'websocket_v2' || connectionMode === 'mcp_v2' ? 'v2' : 'v1'
     fetch(`/api/commands?server_url=${encodeURIComponent(url)}&api_version=${apiVersion}`)
       .then(r => r.json())
       .then(data => {

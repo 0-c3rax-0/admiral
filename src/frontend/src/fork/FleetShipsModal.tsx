@@ -33,23 +33,49 @@ export function FleetShipsModal({ open, onClose }: Props) {
   const [loading, setLoading] = useState(false)
   const [generatedAt, setGeneratedAt] = useState<string | null>(null)
   const [profiles, setProfiles] = useState<FleetProfile[]>([])
+  const [error, setError] = useState<string | null>(null)
+  const [statusNotice, setStatusNotice] = useState<string | null>(null)
   const [expandedProfiles, setExpandedProfiles] = useState<Record<string, boolean>>({})
 
   async function loadFleet() {
     setLoading(true)
+    setError(null)
+    setStatusNotice('Loading fleet snapshot...')
     try {
       const resp = await fetch('/api/fleet/ships')
+      const text = await resp.text()
+      let data: Record<string, unknown> = {}
+      try {
+        data = text ? JSON.parse(text) as Record<string, unknown> : {}
+      } catch {
+        data = {}
+      }
       if (!resp.ok) {
         setProfiles([])
         setGeneratedAt(null)
+        setExpandedProfiles({})
+        const message = typeof data.error === 'string' ? data.error : text || `Fleet request failed (${resp.status})`
+        setError(message)
+        setStatusNotice(`Fleet load failed: ${message}`)
         return
       }
-      const data = await resp.json()
       setProfiles(Array.isArray(data.profiles) ? data.profiles : [])
       setGeneratedAt(typeof data.generated_at === 'string' ? data.generated_at : null)
+      const nextProfiles = Array.isArray(data.profiles) ? data.profiles as FleetProfile[] : []
+      setExpandedProfiles(Object.fromEntries(nextProfiles.map((profile) => [profile.profile_id, profile.ships.length > 0 || !profile.ok])))
+      const failedCount = nextProfiles.filter((profile) => !profile.ok).length
+      const shipCount = nextProfiles.reduce((sum, profile) => sum + profile.ships.length, 0)
+      setStatusNotice(
+        failedCount > 0
+          ? `Fleet loaded: ${shipCount} ships across ${nextProfiles.length} accounts, ${failedCount} with errors`
+          : `Fleet loaded: ${shipCount} ships across ${nextProfiles.length} accounts`,
+      )
     } catch {
       setProfiles([])
       setGeneratedAt(null)
+      setExpandedProfiles({})
+      setError('Fleet request failed')
+      setStatusNotice('Fleet load failed')
     } finally {
       setLoading(false)
     }
@@ -59,6 +85,12 @@ export function FleetShipsModal({ open, onClose }: Props) {
     if (!open) return
     loadFleet()
   }, [open])
+
+  useEffect(() => {
+    if (!statusNotice || loading) return
+    const timer = setTimeout(() => setStatusNotice(null), 3000)
+    return () => clearTimeout(timer)
+  }, [statusNotice, loading])
 
   const groupedProfiles = useMemo(() => {
     return [...profiles]
@@ -104,12 +136,23 @@ export function FleetShipsModal({ open, onClose }: Props) {
             <div className="mt-1 text-[11px]">
               Full fitting names are only guaranteed for the active ship of each account. Stored ships usually expose only module count via `list_ships`.
             </div>
+            {statusNotice && (
+              <div className="mt-2 text-[11px] text-foreground">
+                {statusNotice}
+              </div>
+            )}
           </div>
 
           <div className="max-h-[calc(100vh-8rem)] overflow-auto">
             {failedProfiles.length > 0 && (
               <div className="border-b border-border px-4 py-3 text-xs text-[hsl(var(--smui-orange))]">
                 {failedProfiles.map((profile) => `${profile.profile_name}: ${profile.error || 'request failed'}`).join(' | ')}
+              </div>
+            )}
+
+            {error && (
+              <div className="border-b border-border px-4 py-3 text-xs text-[hsl(var(--smui-orange))]">
+                {error}
               </div>
             )}
 

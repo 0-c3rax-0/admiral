@@ -755,6 +755,12 @@ function semanticCommandHints(inputRaw: string): string[] {
   const input = normalizeCommand(inputRaw)
   const hints: string[] = []
 
+  if (input === 'get_notifications' || input === 'notifications' || input === 'get_events') {
+    hints.push('get_location')
+    hints.push('get_cargo')
+    hints.push('get_status')
+  }
+
   if (input === 'get_recipes' || input === 'get_recipe' || input === 'get_receipe' || input === 'get_receipes') {
     hints.push('catalog(args={ type: "recipes" })')
     hints.push('craft(args={ recipe_id: "recipe_or_item_id" })')
@@ -794,6 +800,9 @@ function findCanonicalAlias(inputRaw: string, names: string[]): string | null {
   if (names.includes(inputRaw)) return inputRaw
   if (names.includes(input)) return input
 
+  const explicitAlias = resolveExplicitCommandAlias(input, names)
+  if (explicitAlias) return explicitAlias
+
   const variants = new Set<string>()
   const addVariant = (value: string) => {
     const normalized = normalizeCommand(value)
@@ -823,6 +832,23 @@ function findCanonicalAlias(inputRaw: string, names: string[]): string | null {
   for (const variant of variants) {
     const mapped = normalizedNameMap.get(variant)
     if (mapped) return mapped
+  }
+
+  return null
+}
+
+function resolveExplicitCommandAlias(input: string, names: string[]): string | null {
+  const normalizedNameMap = new Map(names.map((name) => [normalizeCommand(name), name]))
+  const chooseFirstAvailable = (...candidates: string[]): string | null => {
+    for (const candidate of candidates) {
+      const mapped = normalizedNameMap.get(normalizeCommand(candidate))
+      if (mapped) return mapped
+    }
+    return null
+  }
+
+  if (input === 'get_notifications' || input === 'notifications' || input === 'get_events') {
+    return chooseFirstAvailable('get_location', 'get_cargo', 'get_status')
   }
 
   return null
@@ -984,7 +1010,7 @@ function parseNotification(n: unknown): { tag: string; text: string } | null {
   return { tag, text: annotateNotification(tag, message) }
 }
 
-function mergeGameStateSnapshot(
+export function mergeGameStateSnapshot(
   current: Record<string, unknown> | null | undefined,
   resp: CommandResult,
 ): Record<string, unknown> | null {
@@ -1239,6 +1265,11 @@ function normalizeCatalogArgs(
   const search = typeof next.search === 'string' ? next.search.trim().toLowerCase() : ''
 
   const inferredType =
+    category === 'skills' ||
+    search.includes('skill') ||
+    search.includes('train')
+      ? 'skills'
+      :
     category === 'refining' ||
     category === 'alloy' ||
     search.includes('recipe') ||

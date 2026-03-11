@@ -83,22 +83,6 @@ export class McpConnection implements GameConnection {
       return this.execute(command, args)
     }
 
-    // Poll notifications
-    try {
-      const notifResp = await this.callTool('get_notifications', {})
-      const notifResult = this.parseToolResult(notifResp.result)
-      if (notifResult?.notifications && Array.isArray(notifResult.notifications)) {
-        for (const n of notifResult.notifications) {
-          for (const handler of this.notificationHandlers) {
-            handler(n)
-          }
-        }
-        return { result, notifications: notifResult.notifications }
-      }
-    } catch {
-      // Notification polling is best-effort
-    }
-
     return { result }
   }
 
