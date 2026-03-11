@@ -2,6 +2,14 @@ import { lazy, Suspense, useState, useEffect, useCallback, useRef } from 'react'
 import { Settings, Sun, Moon, Github, AlertTriangle, CircleHelp, BarChart3, MessageSquare, X } from 'lucide-react'
 import { useSearchParams } from 'react-router'
 import type { Profile, Provider } from '@/types'
+import {
+  buildRuntimeStatuses,
+  extractSkills,
+  formatSkillLabel,
+  mergePlayerDataSnapshots,
+  mergeSkillsIntoPlayerData,
+  type RuntimeStatus,
+} from '@/fork'
 import { ProfileList } from './ProfileList'
 import { ProfileView } from './ProfileView'
 const NewProfileWizard = lazy(() => import('./NewProfileWizard').then((mod) => ({ default: mod.NewProfileWizard })))
@@ -16,26 +24,6 @@ interface Props {
   gameserverUrl: string
   onRefresh: () => void
   onShowProviders: () => void
-}
-
-type RuntimeStatus = {
-  connected: boolean
-  running: boolean
-  mutation_state?: 'idle' | 'mutation_pending' | 'navigation_pending' | 'local_stall'
-  mutation_state_detail?: string | null
-  navigation_state?: 'docked' | 'undocked' | 'at_resource_poi' | 'navigation_pending' | 'local_stall' | 'unknown'
-  navigation_state_detail?: string | null
-  adaptive_mode?: 'normal' | 'soft' | 'high' | 'critical'
-  effective_context_budget_ratio?: number | null
-  rate_risk?: {
-    level: 'LOW' | 'MEDIUM' | 'HIGH'
-    reason: string
-    recommendation: string
-    callsLast60s: number
-    errors429Last60s: number
-    errors429Last300s: number
-    failoverActivationsLast300s: number
-  } | null
 }
 
 type StatsSnapshot = {
@@ -57,8 +45,6 @@ const MODE_RANK: Record<'normal' | 'soft' | 'high' | 'critical', number> = {
   high: 2,
   critical: 3,
 }
-
-const WEBSOCKET_STATUS_GRACE_MS = 15_000
 
 export function Dashboard({ profiles: initialProfiles, providers, registrationCode, gameserverUrl, onRefresh, onShowProviders }: Props) {
   const [profiles, setProfiles] = useState(initialProfiles)
@@ -166,39 +152,11 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
         if (seq < appliedPollSeqRef.current) return
         appliedPollSeqRef.current = seq
 
-        const newStatuses: Record<string, RuntimeStatus> = {}
-        const newPlayerData: Record<string, Record<string, unknown>> = {}
-        const nextLastConnectedAt = { ...lastConnectedAtRef.current }
-        for (const p of data) {
-          const id = p.id as string
-          const rawConnected = !!p.connected
-          const connectionMode = typeof p.connection_mode === 'string' ? p.connection_mode : 'http'
-          const isWebSocketMode = connectionMode === 'websocket' || connectionMode === 'websocket_v2'
-          if (rawConnected) {
-            nextLastConnectedAt[id] = Date.now()
-          }
-          const withinGrace = isWebSocketMode
-            && !rawConnected
-            && typeof nextLastConnectedAt[id] === 'number'
-            && (Date.now() - nextLastConnectedAt[id]) < WEBSOCKET_STATUS_GRACE_MS
-
-          newStatuses[id] = {
-            connected: rawConnected || withinGrace,
-            running: !!p.running,
-            adaptive_mode: (p.adaptive_mode as RuntimeStatus['adaptive_mode']) || 'normal',
-            mutation_state: (p.mutation_state as RuntimeStatus['mutation_state']) || 'idle',
-            mutation_state_detail: typeof p.mutation_state_detail === 'string' ? p.mutation_state_detail : null,
-            navigation_state: (p.navigation_state as RuntimeStatus['navigation_state']) || 'unknown',
-            navigation_state_detail: typeof p.navigation_state_detail === 'string' ? p.navigation_state_detail : null,
-            effective_context_budget_ratio: typeof p.effective_context_budget_ratio === 'number'
-              ? p.effective_context_budget_ratio
-              : null,
-            rate_risk: (p.rate_risk as RuntimeStatus['rate_risk']) || null,
-          }
-          if (p.gameState && typeof p.gameState === 'object') {
-            newPlayerData[id] = p.gameState as Record<string, unknown>
-          }
-        }
+        const {
+          statuses: newStatuses,
+          playerData: newPlayerData,
+          nextLastConnectedAt,
+        } = buildRuntimeStatuses(data, lastConnectedAtRef.current)
         lastConnectedAtRef.current = nextLastConnectedAt
         setProfiles(data as unknown as Profile[])
         setStatuses(newStatuses)
@@ -208,18 +166,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
             setStatsDbSummary(summary)
           }
         }
-        setPlayerDataMap(prev => {
-          const next = { ...prev }
-          for (const [id, incoming] of Object.entries(newPlayerData)) {
-            const existing = next[id]
-            const existingHasFullStatus = !!(existing && typeof existing === 'object' && 'player' in existing)
-            const incomingHasFullStatus = !!(incoming && typeof incoming === 'object' && 'player' in incoming)
-            // Keep richer get_status payloads instead of replacing them with slim snapshots.
-            if (existingHasFullStatus && !incomingHasFullStatus) continue
-            next[id] = incoming
-          }
-          return next
-        })
+        setPlayerDataMap(prev => mergePlayerDataSnapshots(prev, newPlayerData))
       } catch (err) {
         const isAbort = err instanceof DOMException && err.name === 'AbortError'
         if (!isAbort) {
@@ -264,33 +211,10 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
     try {
       const resp = await fetch('/api/profiles')
       const data: Array<Record<string, unknown>> = await resp.json()
-      const newStatuses: Record<string, RuntimeStatus> = {}
-      const newPlayerData: Record<string, Record<string, unknown>> = {}
-      for (const p of data) {
-        const id = p.id as string
-        newStatuses[id] = {
-          connected: !!p.connected,
-          running: !!p.running,
-          adaptive_mode: (p.adaptive_mode as RuntimeStatus['adaptive_mode']) || 'normal',
-          effective_context_budget_ratio: typeof p.effective_context_budget_ratio === 'number' ? p.effective_context_budget_ratio : null,
-        }
-        if (p.gameState && typeof p.gameState === 'object') {
-          newPlayerData[id] = p.gameState as Record<string, unknown>
-        }
-      }
+      const { statuses: newStatuses, playerData: newPlayerData } = buildRuntimeStatuses(data, lastConnectedAtRef.current)
       setProfiles(data as unknown as Profile[])
       setStatuses(newStatuses)
-      setPlayerDataMap(prev => {
-        const next = { ...prev }
-        for (const [id, incoming] of Object.entries(newPlayerData)) {
-          const existing = next[id]
-          const existingHasFullStatus = !!(existing && typeof existing === 'object' && 'player' in existing)
-          const incomingHasFullStatus = !!(incoming && typeof incoming === 'object' && 'player' in incoming)
-          if (existingHasFullStatus && !incomingHasFullStatus) continue
-          next[id] = incoming
-        }
-        return next
-      })
+      setPlayerDataMap(prev => mergePlayerDataSnapshots(prev, newPlayerData))
     } catch {
       // ignore
     }
@@ -960,49 +884,6 @@ function ThemeToggle() {
       {dark ? <Sun size={13} /> : <Moon size={13} />}
     </button>
   )
-}
-
-function extractSkills(data: unknown): Record<string, number> | null {
-  if (!data || typeof data !== 'object') return null
-  const record = data as Record<string, unknown>
-  const direct = record.skills
-  const nested = record.result && typeof record.result === 'object'
-    ? (record.result as Record<string, unknown>).skills
-    : null
-  const raw = direct && typeof direct === 'object' ? direct : nested && typeof nested === 'object' ? nested : null
-  if (!raw) return null
-
-  const skills = Object.entries(raw as Record<string, unknown>)
-    .map(([skill, level]) => {
-      const numericLevel = typeof level === 'object' && level && 'level' in level
-        ? Number((level as Record<string, unknown>).level)
-        : Number(level)
-      return [skill, numericLevel] as const
-    })
-    .filter(([, level]) => Number.isFinite(level))
-  if (skills.length === 0) return null
-  return Object.fromEntries(skills)
-}
-
-function formatSkillLabel(skill: string): string {
-  return skill
-    .replace(/[_-]+/g, ' ')
-    .replace(/\b\w/g, (char) => char.toUpperCase())
-}
-
-function mergeSkillsIntoPlayerData(
-  existing: Record<string, unknown> | undefined,
-  skills: Record<string, number>
-): Record<string, unknown> {
-  return {
-    ...(existing || {}),
-    skills: {
-      ...((((existing || {}).skills) && typeof (existing || {}).skills === 'object')
-        ? ((existing || {}).skills as Record<string, unknown>)
-        : {}),
-      ...skills,
-    },
-  }
 }
 
 function parseSqliteUtcDate(ts: string): Date {

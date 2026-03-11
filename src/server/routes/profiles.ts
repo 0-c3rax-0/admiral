@@ -1,27 +1,16 @@
 import { Hono } from 'hono'
-import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile, getStatsDelta1h, upsertProfileSkills } from '../lib/db'
+import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile } from '../lib/db'
 import { overwriteProfileAgentsFromDirective } from '../lib/agent'
 import { agentManager } from '../lib/agent-manager'
-import type { CommandResult } from '../lib/connections/interface'
-import { is429PredictionEnabled, predict429Risk } from '../lib/loop'
-import { addMarketSnapshot, addTradeEvent } from '../lib/economy-db'
-import { getAgentRole, setAgentRole } from '../lib/agent-learning'
+import { setAgentRole } from '../lib/agent-learning'
+import { buildProfileResponse, handleProfileCommandSideEffects } from '../../fork/server'
 
 const profiles = new Hono()
 
-// GET /api/profiles
 profiles.get('/', (c) => {
-  const all = listProfiles()
-  return c.json(all.map(p => ({
-    ...p,
-    agent_role: getAgentRole(p.id),
-    ...agentManager.getStatus(p.id),
-    stats_delta_1h: getStatsDelta1h(p.id),
-    rate_risk: getRateRiskPayload(p.id),
-  })))
+  return c.json(listProfiles().map(buildProfileResponse))
 })
 
-// POST /api/profiles
 profiles.post('/', async (c) => {
   const body = await c.req.json()
   const { name, username, password, empire, provider, model, directive, connection_mode, server_url, context_budget } = body
@@ -46,7 +35,7 @@ profiles.post('/', async (c) => {
       autoconnect: true,
       enabled: true,
     })
-    return c.json(profile, 201)
+    return c.json(buildProfileResponse(profile), 201)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (msg.includes('UNIQUE constraint')) return c.json({ error: 'A profile with that name already exists' }, 409)
@@ -54,21 +43,12 @@ profiles.post('/', async (c) => {
   }
 })
 
-// GET /api/profiles/:id
 profiles.get('/:id', (c) => {
   const profile = getProfile(c.req.param('id'))
   if (!profile) return c.json({ error: 'Not found' }, 404)
-  const status = agentManager.getStatus(c.req.param('id'))
-  return c.json({
-    ...profile,
-    agent_role: getAgentRole(c.req.param('id')),
-    ...status,
-    stats_delta_1h: getStatsDelta1h(c.req.param('id')),
-    rate_risk: getRateRiskPayload(c.req.param('id')),
-  })
+  return c.json(buildProfileResponse(profile))
 })
 
-// PUT /api/profiles/:id
 profiles.put('/:id', async (c) => {
   const id = c.req.param('id')
   const body = await c.req.json()
@@ -83,10 +63,9 @@ profiles.put('/:id', async (c) => {
     console.log(`[profiles] Directive updated for "${profile.name}" (${id}) at ${tsUtc}; length=${(profile.directive || '').length}`)
     agentManager.restartTurn(id)
   }
-  return c.json(profile)
+  return c.json(buildProfileResponse(profile))
 })
 
-// DELETE /api/profiles/:id
 profiles.delete('/:id', async (c) => {
   const id = c.req.param('id')
   await agentManager.disconnect(id)
@@ -94,7 +73,6 @@ profiles.delete('/:id', async (c) => {
   return c.json({ ok: true })
 })
 
-// POST /api/profiles/:id/connect
 profiles.post('/:id/connect', async (c) => {
   const id = c.req.param('id')
   const body = await c.req.json().catch(() => ({}))
@@ -120,7 +98,6 @@ profiles.post('/:id/connect', async (c) => {
   }
 })
 
-// POST /api/profiles/:id/command
 profiles.post('/:id/command', async (c) => {
   const id = c.req.param('id')
   const { command, args } = await c.req.json()
@@ -129,21 +106,16 @@ profiles.post('/:id/command', async (c) => {
   if (!agent || !agent.isConnected) return c.json({ error: 'Agent not connected' }, 400)
   try {
     const result = await agent.executeCommand(command, args)
-    ingestEconomyData(id, command, args, result)
-    if (command === 'get_skills') {
-      const skills = extractSkillsFromCommandResult(result)
-      if (skills) upsertProfileSkills(id, skills)
-    }
+    handleProfileCommandSideEffects(id, command, args, result)
     return c.json(result)
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
   }
 })
 
-// POST /api/profiles/batch — batch connect/disconnect multiple agents
 profiles.post('/batch', async (c) => {
   const body = await c.req.json()
-  const action = body.action as string // 'connect_llm' | 'disconnect'
+  const action = body.action as string
   const profileIds = body.ids as string[] | undefined
   const group = body.group as string | undefined
 
@@ -182,7 +154,6 @@ profiles.post('/batch', async (c) => {
   return c.json({ action, count: results.length, results })
 })
 
-// POST /api/profiles/:id/nudge
 profiles.post('/:id/nudge', async (c) => {
   const id = c.req.param('id')
   const body = await c.req.json().catch(() => ({}))
@@ -194,25 +165,20 @@ profiles.post('/:id/nudge', async (c) => {
   return c.json({ ok: true })
 })
 
-// GET /api/profiles/:id/memory
 profiles.get('/:id/memory', (c) => {
   const id = c.req.param('id')
   const profile = getProfile(id)
   if (!profile) return c.json({ error: 'Profile not found' }, 404)
-  const content = agentManager.getMemory(id)
-  return c.json({ content })
+  return c.json({ content: agentManager.getMemory(id) })
 })
 
-// POST /api/profiles/:id/memory/save
 profiles.post('/:id/memory/save', (c) => {
   const id = c.req.param('id')
   const profile = getProfile(id)
   if (!profile) return c.json({ error: 'Profile not found' }, 404)
-  const saved = agentManager.saveMemory(id)
-  return c.json({ ok: true, saved })
+  return c.json({ ok: true, saved: agentManager.saveMemory(id) })
 })
 
-// DELETE /api/profiles/:id/memory
 profiles.delete('/:id/memory', (c) => {
   const id = c.req.param('id')
   const profile = getProfile(id)
@@ -222,231 +188,3 @@ profiles.delete('/:id/memory', (c) => {
 })
 
 export default profiles
-
-function getRateRiskPayload(profileId: string) {
-  if (!is429PredictionEnabled()) return null
-  const risk = predict429Risk(profileId)
-  return risk.level === 'LOW' ? null : risk
-}
-
-function extractSkillsFromCommandResult(result: CommandResult): Record<string, number> | null {
-  const data = result.structuredContent ?? result.result ?? result
-  if (!data || typeof data !== 'object') return null
-  const record = data as Record<string, unknown>
-  const candidates = [
-    record.skills,
-    record.player && typeof record.player === 'object'
-      ? (record.player as Record<string, unknown>).skills
-      : null,
-    record.result && typeof record.result === 'object'
-      ? (record.result as Record<string, unknown>).skills
-      : null,
-  ]
-  for (const candidate of candidates) {
-    if (!candidate || typeof candidate !== 'object') continue
-    const skills = Object.fromEntries(
-      Object.entries(candidate as Record<string, unknown>)
-        .map(([skill, level]) => {
-          const numericLevel = typeof level === 'object' && level && 'level' in level
-            ? Number((level as Record<string, unknown>).level)
-            : Number(level)
-          return [skill, numericLevel] as const
-        })
-        .filter(([, level]) => Number.isFinite(level))
-    )
-    if (Object.keys(skills).length > 0) return skills
-  }
-  return null
-}
-
-function ingestEconomyData(profileId: string, command: string, args: Record<string, unknown> | undefined, result: CommandResult): void {
-  try {
-    if (command === 'view_market') {
-      const category = typeof args?.category === 'string' && args.category.trim() ? args.category.trim().toLowerCase() : 'unknown'
-      const data = result.structuredContent ?? result.result ?? result
-      const entries = extractMarketEntries(data)
-      if (entries.length > 0) {
-        addMarketSnapshot({
-          profile_id: profileId,
-          category,
-          system_name: extractLocationName(data, 'system'),
-          poi_name: extractLocationName(data, 'poi'),
-          source: command,
-          entries,
-        })
-      }
-      return
-    }
-
-    if (command === 'buy' || command === 'sell') {
-      const trade = extractTradeEvent(profileId, command, result)
-      if (trade) addTradeEvent(trade)
-    }
-  } catch {
-    // Economy ingest is best-effort and must not break gameplay commands.
-  }
-}
-
-function extractTradeEvent(profileId: string, command: string, result: CommandResult) {
-  const data = result.structuredContent ?? result.result ?? result
-  if (!data || typeof data !== 'object') return null
-  const record = data as Record<string, unknown>
-  const quantity = toFiniteNumber(
-    record.quantity_sold ?? record.quantity_bought ?? record.quantity ?? record.filled_quantity ?? record.amount
-  )
-  if (quantity === null || quantity <= 0) return null
-
-  const itemName = String(
-    record.item_name ?? record.name ?? record.item_id ?? ((record.item as Record<string, unknown> | undefined)?.name) ?? ''
-  ).trim()
-  if (!itemName) return null
-
-  const unitPrice = toFiniteNumber(record.price_each ?? record.unit_price ?? record.price ?? record.executed_price)
-  const totalPrice = toFiniteNumber(record.total_earned ?? record.total_spent ?? record.total_price)
-
-  return {
-    profile_id: profileId,
-    trade_type: command as 'buy' | 'sell',
-    item_id: stringOrNull(record.item_id),
-    item_name: itemName,
-    quantity,
-    unit_price: unitPrice,
-    total_price: totalPrice ?? (unitPrice !== null ? unitPrice * quantity : null),
-    system_name: extractLocationName(data, 'system'),
-    poi_name: extractLocationName(data, 'poi'),
-    source_command: command,
-    raw_json: JSON.stringify(data),
-  }
-}
-
-function extractMarketEntries(data: unknown): Array<{
-  item_id: string | null
-  item_name: string
-  best_bid: number | null
-  best_ask: number | null
-  bid_volume: number | null
-  ask_volume: number | null
-}> {
-  if (!data || typeof data !== 'object') return []
-  const record = data as Record<string, unknown>
-  const candidates = [
-    record.items,
-    record.orders,
-    record.market,
-    record.entries,
-    record.listings,
-    record.result && typeof record.result === 'object' ? (record.result as Record<string, unknown>).items : null,
-    record.result && typeof record.result === 'object' ? (record.result as Record<string, unknown>).orders : null,
-    record.result && typeof record.result === 'object' ? (record.result as Record<string, unknown>).entries : null,
-    record.result && typeof record.result === 'object' ? (record.result as Record<string, unknown>).listings : null,
-    record.market && typeof record.market === 'object' ? (record.market as Record<string, unknown>).items : null,
-    record.market && typeof record.market === 'object' ? (record.market as Record<string, unknown>).orders : null,
-    record.market && typeof record.market === 'object' ? (record.market as Record<string, unknown>).entries : null,
-    record.market && typeof record.market === 'object' ? (record.market as Record<string, unknown>).listings : null,
-    record.result && typeof record.result === 'object' && (record.result as Record<string, unknown>).market && typeof (record.result as Record<string, unknown>).market === 'object'
-      ? ((record.result as Record<string, unknown>).market as Record<string, unknown>).items
-      : null,
-    record.result && typeof record.result === 'object' && (record.result as Record<string, unknown>).market && typeof (record.result as Record<string, unknown>).market === 'object'
-      ? ((record.result as Record<string, unknown>).market as Record<string, unknown>).orders
-      : null,
-    record.result && typeof record.result === 'object' && (record.result as Record<string, unknown>).market && typeof (record.result as Record<string, unknown>).market === 'object'
-      ? ((record.result as Record<string, unknown>).market as Record<string, unknown>).entries
-      : null,
-    record.result && typeof record.result === 'object' && (record.result as Record<string, unknown>).market && typeof (record.result as Record<string, unknown>).market === 'object'
-      ? ((record.result as Record<string, unknown>).market as Record<string, unknown>).listings
-      : null,
-  ]
-
-  for (const candidate of candidates) {
-    if (!Array.isArray(candidate)) continue
-    const entries = candidate
-      .map((item) => {
-        if (!item || typeof item !== 'object') return null
-        const row = item as Record<string, unknown>
-        const itemName = String(row.name ?? row.item_name ?? row.item_id ?? '').trim()
-        if (!itemName) return null
-        const directPrice = toFiniteNumber(
-          row.price ?? row.unit_price ?? row.market_price ?? row.avg_price ?? row.average_price ?? row.value
-        )
-        const nestedBid = bestOrderPrice(row.buy_orders, 'desc')
-        const nestedAsk = bestOrderPrice(row.sell_orders, 'asc')
-        const nestedBidVolume = sumOrderVolume(row.buy_orders)
-        const nestedAskVolume = sumOrderVolume(row.sell_orders)
-        return {
-          item_id: stringOrNull(row.item_id),
-          item_name: itemName,
-          best_bid: toFiniteNumber(
-            row.best_bid ?? row.bid_price ?? row.buy_price ?? row.highest_buy ?? row.bid ?? nestedBid ?? directPrice
-          ),
-          best_ask: toFiniteNumber(
-            row.best_ask ?? row.ask_price ?? row.sell_price ?? row.lowest_sell ?? row.ask ?? nestedAsk ?? directPrice
-          ),
-          bid_volume: toFiniteNumber(row.bid_volume ?? row.buy_volume ?? row.demand ?? row.quantity_buy ?? row.buy_quantity ?? nestedBidVolume),
-          ask_volume: toFiniteNumber(row.ask_volume ?? row.sell_volume ?? row.supply ?? row.quantity_sell ?? row.sell_quantity ?? nestedAskVolume ?? row.quantity),
-        }
-      })
-      .filter((entry): entry is {
-        item_id: string | null
-        item_name: string
-        best_bid: number | null
-        best_ask: number | null
-        bid_volume: number | null
-        ask_volume: number | null
-      } => Boolean(entry))
-    if (entries.length > 0) return entries
-  }
-
-  return []
-}
-
-function extractLocationName(data: unknown, type: 'system' | 'poi'): string | null {
-  if (!data || typeof data !== 'object') return null
-  const record = data as Record<string, unknown>
-  const player = record.player && typeof record.player === 'object' ? record.player as Record<string, unknown> : null
-  const location = record.location && typeof record.location === 'object' ? record.location as Record<string, unknown> : null
-  if (type === 'system') {
-    return stringOrNull(player?.current_system) ?? stringOrNull(location?.system_name)
-  }
-  return stringOrNull(player?.current_poi) ?? stringOrNull(location?.poi_name)
-}
-
-function toFiniteNumber(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) return value
-  if (typeof value === 'string' && value.trim() !== '') {
-    const parsed = Number(value)
-    return Number.isFinite(parsed) ? parsed : null
-  }
-  return null
-}
-
-function bestOrderPrice(orders: unknown, direction: 'asc' | 'desc'): number | null {
-  if (!Array.isArray(orders)) return null
-  let best: number | null = null
-  for (const order of orders) {
-    if (!order || typeof order !== 'object') continue
-    const record = order as Record<string, unknown>
-    const price = toFiniteNumber(record.price_each ?? record.price ?? record.unit_price ?? record.bid_price ?? record.ask_price)
-    if (price === null) continue
-    if (best === null || (direction === 'asc' ? price < best : price > best)) best = price
-  }
-  return best
-}
-
-function sumOrderVolume(orders: unknown): number | null {
-  if (!Array.isArray(orders)) return null
-  let total = 0
-  let found = false
-  for (const order of orders) {
-    if (!order || typeof order !== 'object') continue
-    const record = order as Record<string, unknown>
-    const volume = toFiniteNumber(record.quantity ?? record.remaining_quantity ?? record.volume ?? record.available)
-    if (volume === null) continue
-    total += volume
-    found = true
-  }
-  return found ? total : null
-}
-
-function stringOrNull(value: unknown): string | null {
-  return typeof value === 'string' && value.trim() ? value.trim() : null
-}

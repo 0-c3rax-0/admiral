@@ -9,14 +9,10 @@ import providers from './routes/providers'
 import models from './routes/models'
 import commands from './routes/commands'
 import preferences from './routes/preferences'
-import stats from './routes/stats'
-import map from './routes/map'
-import oauth from './routes/oauth'
-import economy from './routes/economy'
 import { addStatsEvent, addStatsSnapshot, getPreference, listProfiles, pruneOldRows } from './lib/db'
 import { pruneEconomyRows } from './lib/economy-db'
 import { agentManager } from './lib/agent-manager'
-import { fleetSupervisor } from './lib/supervisor'
+import { registerServerForkRoutes, startServerForkServices } from '../fork/server'
 
 const app = new Hono()
 app.use('*', cors())
@@ -31,10 +27,7 @@ app.route('/api/providers', providers)
 app.route('/api/models', models)
 app.route('/api/commands', commands)
 app.route('/api/preferences', preferences)
-app.route('/api/stats', stats)
-app.route('/api/map', map)
-app.route('/api/oauth', oauth)
-app.route('/api/economy', economy)
+registerServerForkRoutes(app)
 
 // Health check
 app.get('/api/health', (c) => c.json({ ok: true }))
@@ -173,7 +166,7 @@ function scheduleStatsSnapshots(): void {
 }
 
 scheduleStatsSnapshots()
-fleetSupervisor.start()
+startServerForkServices()
 
 function scheduleRetentionPrune(): void {
   const intervalMs = 15 * 60_000
