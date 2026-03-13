@@ -10,12 +10,17 @@ type KbPoiRecord = {
   kind: KbPoiKind
 }
 
+type KbCacheSnapshot = {
+  expiresAt: number
+  pois: KbPoiRecord[]
+}
+
 const KB_SYSTEMS_INDEX_URL = 'https://rsned.github.io/spacemolt-kb/systems/index.html'
 const KB_SYSTEMS_BASE_URL = 'https://rsned.github.io/spacemolt-kb/systems/'
 const KB_CACHE_TTL_MS = 6 * 60 * 60_000
 const KB_CACHE_PATH = path.join(process.cwd(), 'data', 'system-kb-cache.json')
 
-let kbCache: { expiresAt: number; pois: KbPoiRecord[] } | null = null
+let kbCache: KbCacheSnapshot | null = null
 let kbInFlight: Promise<KbPoiRecord[]> | null = null
 
 function decodeHtml(text: string): string {
@@ -62,30 +67,38 @@ function extractSystemName(html: string, link: string): string {
   return link.replace(/\.html$/i, '')
 }
 
-function readPersistentCache(): KbPoiRecord[] | null {
+function parseCachePois(rawPois: unknown): KbPoiRecord[] {
+  if (!Array.isArray(rawPois)) return []
+  return rawPois
+    .filter((entry): entry is KbPoiRecord =>
+      Boolean(
+        entry &&
+        typeof entry === 'object' &&
+        typeof (entry as KbPoiRecord).systemPage === 'string' &&
+        typeof (entry as KbPoiRecord).systemName === 'string' &&
+        typeof (entry as KbPoiRecord).poiName === 'string' &&
+        ['station', 'ore', 'ice', 'gas'].includes(String((entry as KbPoiRecord).kind)),
+      ))
+}
+
+function readRawPersistentCache(): KbCacheSnapshot | null {
   try {
     const raw = fs.readFileSync(KB_CACHE_PATH, 'utf-8')
     const parsed = JSON.parse(raw) as { expiresAt?: unknown; pois?: unknown }
     const expiresAt = typeof parsed.expiresAt === 'number' ? parsed.expiresAt : 0
-    if (expiresAt <= Date.now()) return null
-    if (!Array.isArray(parsed.pois)) return null
-
-    const pois = parsed.pois
-      .filter((entry): entry is KbPoiRecord =>
-        Boolean(
-          entry &&
-          typeof entry === 'object' &&
-          typeof (entry as KbPoiRecord).systemPage === 'string' &&
-          typeof (entry as KbPoiRecord).systemName === 'string' &&
-          typeof (entry as KbPoiRecord).poiName === 'string' &&
-          ['station', 'ore', 'ice', 'gas'].includes(String((entry as KbPoiRecord).kind)),
-        ))
-    if (pois.length === 0) return null
-    kbCache = { expiresAt, pois }
-    return pois
+    const pois = parseCachePois(parsed.pois)
+    if (expiresAt <= 0 || pois.length === 0) return null
+    return { expiresAt, pois }
   } catch {
     return null
   }
+}
+
+function readPersistentCache(): KbPoiRecord[] | null {
+  const snapshot = readRawPersistentCache()
+  if (!snapshot || snapshot.expiresAt <= Date.now()) return null
+  kbCache = snapshot
+  return snapshot.pois
 }
 
 function writePersistentCache(pois: KbPoiRecord[]): void {
@@ -101,6 +114,36 @@ function writePersistentCache(pois: KbPoiRecord[]): void {
   }
 }
 
+async function fetchKbPois(): Promise<KbPoiRecord[]> {
+  const indexResp = await fetch(KB_SYSTEMS_INDEX_URL, {
+    headers: { 'User-Agent': 'SpaceMolt-Admiral' },
+    signal: AbortSignal.timeout(20_000),
+  })
+  if (!indexResp.ok) throw new Error(`KB index failed: HTTP ${indexResp.status}`)
+  const indexHtml = await indexResp.text()
+  const links = Array.from(new Set(Array.from(indexHtml.matchAll(/href="([a-z0-9_-]+\.html)"/gi), (m) => m[1])))
+    .filter((link) => link !== 'index.html')
+
+  const pois: KbPoiRecord[] = []
+  for (const link of links) {
+    const resp = await fetch(`${KB_SYSTEMS_BASE_URL}${link}`, {
+      headers: { 'User-Agent': 'SpaceMolt-Admiral' },
+      signal: AbortSignal.timeout(20_000),
+    })
+    if (!resp.ok) continue
+    const html = await resp.text()
+    const systemName = extractSystemName(html, link)
+    for (const row of html.matchAll(/<tr>\s*<td[^>]*>.*?<\/td>\s*<td>(.*?)<\/td>\s*<td>(.*?)<\/td>\s*<td>(.*?)<\/td>\s*<\/tr>/gis)) {
+      const poiName = stripTags(row[1] || '')
+      const rawType = stripTags(row[2] || '')
+      const kind = classifyKbPoiType(rawType)
+      if (!poiName || !kind) continue
+      pois.push({ systemPage: link, systemName, poiName, kind })
+    }
+  }
+  return pois
+}
+
 async function loadKbPois(): Promise<KbPoiRecord[]> {
   if (kbCache && kbCache.expiresAt > Date.now()) return kbCache.pois
   const persisted = readPersistentCache()
@@ -108,33 +151,7 @@ async function loadKbPois(): Promise<KbPoiRecord[]> {
   if (kbInFlight) return kbInFlight
 
   kbInFlight = (async () => {
-    const indexResp = await fetch(KB_SYSTEMS_INDEX_URL, {
-      headers: { 'User-Agent': 'SpaceMolt-Admiral' },
-      signal: AbortSignal.timeout(20_000),
-    })
-    if (!indexResp.ok) throw new Error(`KB index failed: HTTP ${indexResp.status}`)
-    const indexHtml = await indexResp.text()
-    const links = Array.from(new Set(Array.from(indexHtml.matchAll(/href="([a-z0-9_-]+\.html)"/gi), (m) => m[1])))
-      .filter((link) => link !== 'index.html')
-
-    const pois: KbPoiRecord[] = []
-    for (const link of links) {
-      const resp = await fetch(`${KB_SYSTEMS_BASE_URL}${link}`, {
-        headers: { 'User-Agent': 'SpaceMolt-Admiral' },
-        signal: AbortSignal.timeout(20_000),
-      })
-      if (!resp.ok) continue
-      const html = await resp.text()
-      const systemName = extractSystemName(html, link)
-      for (const row of html.matchAll(/<tr>\s*<td[^>]*>.*?<\/td>\s*<td>(.*?)<\/td>\s*<td>(.*?)<\/td>\s*<td>(.*?)<\/td>\s*<\/tr>/gis)) {
-        const poiName = stripTags(row[1] || '')
-        const rawType = stripTags(row[2] || '')
-        const kind = classifyKbPoiType(rawType)
-        if (!poiName || !kind) continue
-        pois.push({ systemPage: link, systemName, poiName, kind })
-      }
-    }
-
+    const pois = await fetchKbPois()
     kbCache = { expiresAt: Date.now() + KB_CACHE_TTL_MS, pois }
     writePersistentCache(pois)
     kbInFlight = null
@@ -145,6 +162,22 @@ async function loadKbPois(): Promise<KbPoiRecord[]> {
   })
 
   return kbInFlight
+}
+
+export async function syncSystemKbCacheOnStartup(): Promise<void> {
+  const previous = readRawPersistentCache()
+  const previousCount = previous?.pois.length ?? 0
+  const nextPois = await fetchKbPois()
+  if (nextPois.length === 0) {
+    throw new Error('KB sync returned no POIs')
+  }
+
+  kbCache = { expiresAt: Date.now() + KB_CACHE_TTL_MS, pois: nextPois }
+  writePersistentCache(nextPois)
+
+  const delta = nextPois.length - previousCount
+  const qualifier = previous ? (delta === 0 ? 'unchanged count' : `delta ${delta >= 0 ? '+' : ''}${delta}`) : 'initialized'
+  console.log(`[startup] System KB cache synced: ${nextPois.length} POIs (${qualifier})`)
 }
 
 export async function lookupKbPoiKind(target: string): Promise<KbPoiKind | null> {

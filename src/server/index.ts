@@ -12,6 +12,8 @@ import preferences from './routes/preferences'
 import { addStatsEvent, addStatsSnapshot, getPreference, listProfiles, pruneOldRows } from './lib/db'
 import { pruneEconomyRows } from './lib/economy-db'
 import { agentManager } from './lib/agent-manager'
+import { syncKbMirrorOnStartup } from './lib/kb-mirror'
+import { syncSystemKbCacheOnStartup } from './lib/system-kb'
 import { registerServerForkRoutes, startServerForkServices } from '../fork/server'
 
 const app = new Hono()
@@ -68,6 +70,16 @@ if (isDev) {
 
 const port = parseInt(process.env.PORT || '3031')
 console.log(`Admiral listening on http://0.0.0.0:${port}`)
+
+void syncKbMirrorOnStartup().catch((err) => {
+  const msg = err instanceof Error ? err.message : String(err)
+  console.error(`[startup] KB mirror sync failed: ${msg}`)
+})
+
+void syncSystemKbCacheOnStartup().catch((err) => {
+  const msg = err instanceof Error ? err.message : String(err)
+  console.error(`[startup] System KB sync failed: ${msg}`)
+})
 
 function parsePositiveInt(value: string | null, fallback: number): number {
   if (!value) return fallback

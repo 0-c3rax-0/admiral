@@ -44,9 +44,31 @@ Do not rely on ad-hoc background starts when the systemd service is the intended
 
 - `data/admiral.db`
 - `data/memory/`
+- `data/spacemolt-kb/`
+- `data/spacemolt-kb/manifest.json`
+- `data/system-kb-cache.json`
 - `/etc/systemd/system/admiral.service`
 - `/etc/systemd/system/admiral-healthcheck.service`
 - `/etc/systemd/system/admiral-healthcheck.timer`
+
+## KB Mirror
+
+This fork keeps a local mirror of the public SpaceMolt KB published at:
+
+- `https://rsned.github.io/spacemolt-kb/`
+
+Startup behavior:
+
+- Admiral fetches `diffs/index.html` on startup
+- if no local KB manifest exists yet, Admiral performs a full initial mirror
+- if new diff pages exist, Admiral refreshes only the changed sections
+- mirrored content is written under `data/spacemolt-kb/`
+- the structured POI helper cache is refreshed separately into `data/system-kb-cache.json`
+
+Operational note:
+
+- KB mirror failures are logged, but they do not intentionally block the main server from starting
+- successful syncs log a startup summary with mode, latest diff date, refreshed sections, and local file count
 
 ## Recommended Defaults
 

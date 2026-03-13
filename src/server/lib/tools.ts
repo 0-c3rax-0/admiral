@@ -542,8 +542,9 @@ function rerouteSellToOrder(
   }
 
   const market = getMarketSnapshot(profileId, locationKey, itemId)
+  const zeroFillBlocked = shouldBlockZeroFillSell(profileId, itemId, locationKey)
   if (!market) return { changed: false, command, args, message: '' }
-  if ((market.bidVolume ?? 0) > 0 && (market.bestBid ?? 0) > 0) {
+  if (!zeroFillBlocked && (market.bidVolume ?? 0) > 0 && (market.bestBid ?? 0) > 0) {
     return { changed: false, command, args, message: '' }
   }
 
@@ -558,7 +559,9 @@ function rerouteSellToOrder(
       quantity,
       price_each: suggestedPrice,
     },
-    message: `Rerouted sell -> create_sell_order for ${itemId} at ${locationKey}: no recent instant-buy liquidity, using price_each=${suggestedPrice}`,
+    message: zeroFillBlocked
+      ? `Rerouted sell -> create_sell_order for ${itemId} at ${locationKey}: recent instant sell attempts produced zero fill, using price_each=${suggestedPrice}`
+      : `Rerouted sell -> create_sell_order for ${itemId} at ${locationKey}: no recent instant-buy liquidity, using price_each=${suggestedPrice}`,
   }
 }
 
@@ -793,7 +796,7 @@ function normalizeCommand(value: string): string {
   return value.trim().toLowerCase().replace(/[\s-]+/g, '_')
 }
 
-function findCanonicalAlias(inputRaw: string, names: string[]): string | null {
+export function findCanonicalAlias(inputRaw: string, names: string[]): string | null {
   const input = normalizeCommand(inputRaw)
   if (!input) return null
   if (names.includes(inputRaw)) return inputRaw
@@ -836,7 +839,7 @@ function findCanonicalAlias(inputRaw: string, names: string[]): string | null {
   return null
 }
 
-function resolveExplicitCommandAlias(input: string, names: string[]): string | null {
+export function resolveExplicitCommandAlias(input: string, names: string[]): string | null {
   const normalizedNameMap = new Map(names.map((name) => [normalizeCommand(name), name]))
   const chooseFirstAvailable = (...candidates: string[]): string | null => {
     for (const candidate of candidates) {
@@ -848,6 +851,10 @@ function resolveExplicitCommandAlias(input: string, names: string[]): string | n
 
   if (input === 'get_notifications' || input === 'notifications' || input === 'get_events') {
     return chooseFirstAvailable('get_location', 'get_cargo', 'get_status')
+  }
+
+  if (input === 'cancel_mission') {
+    return chooseFirstAvailable('abandon_mission')
   }
 
   return null
@@ -1193,7 +1200,7 @@ function formatCommandError(command: string, code: string, message: string): str
   }
 
   if (normalized === 'cargo_full') {
-    return `${prefix}\nInterpretation: cargo is full. Stop repeating resource-gathering actions. Refresh with get_status or get_cargo and switch to selling, transferring, refining, or another cargo-clearing step.`
+    return `${prefix}\nInterpretation: cargo is full. Stop repeating resource-gathering actions. Refresh with get_status or get_cargo and switch to selling, transferring, crafting, or another cargo-clearing step.`
   }
 
   if (normalized === 'not_enough_fuel') {

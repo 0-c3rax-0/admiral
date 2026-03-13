@@ -6,6 +6,7 @@ import { detectImmediateRecoveryHint, executeTool } from './tools'
 import {
   buildImmediateRecoveryMessage,
   buildToolResultMessage,
+  extractFallbackToolCalls,
   extractReasoningSummary,
   fingerprintResult,
   fingerprintToolCall,
@@ -44,6 +45,9 @@ const ADAPTIVE_RSS_CRITICAL_BYTES = 3_500_000_000
 const REQUEST_OUTPUT_TOKEN_RESERVE = 4096
 const REQUEST_TOOL_TOKEN_RESERVE = 512
 const REQUEST_TOKEN_SAFETY_MARGIN = 512
+const MAX_UNINTERPRETABLE_RESPONSE_RETRIES = 1
+const OPENROUTER_FREE_SOFT_COMPACTION_TOKENS = 40_000
+const OPENROUTER_FREE_HARD_COMPACTION_TOKENS = 55_000
 
 export interface LoopOptions {
   signal?: AbortSignal
@@ -90,6 +94,7 @@ export async function runAgentTurn(
   let activeModel = model
   let activeApiKey = options?.apiKey
   let rounds = 0
+  let uninterpretableResponseRetries = 0
   let advisorState: AdvisorStallState = {
     repeatedRoundSignatureCount: 0,
     stalledErrorRounds: 0,
@@ -194,10 +199,31 @@ export async function runAgentTurn(
     context.messages.push(response)
 
     const toolCalls = response.content.filter((c): c is ToolCall => c.type === 'toolCall')
+    const fallbackToolCalls = extractFallbackToolCalls(response)
+      .filter((fallback) => !toolCalls.some((call) =>
+        call.name === fallback.name &&
+        JSON.stringify(call.arguments || {}) === JSON.stringify(fallback.arguments || {}),
+      ))
+    const effectiveToolCalls = [...toolCalls, ...fallbackToolCalls]
 
     const reasoning = extractReasoningSummary(response)
 
-    if (toolCalls.length === 0) {
+    if (effectiveToolCalls.length === 0) {
+      if (shouldRetryUninterpretableResponse(response) && uninterpretableResponseRetries < MAX_UNINTERPRETABLE_RESPONSE_RETRIES) {
+        uninterpretableResponseRetries++
+        log('system', 'LLM response was not interpretable; requesting one formatted retry')
+        context.messages.push({
+          role: 'user',
+          content: [
+            'Your previous response could not be interpreted reliably.',
+            'Retry once now.',
+            'If you need a tool, emit a valid tool call only.',
+            'If no tool is needed, answer in plain text with one concrete next step.',
+          ].join(' '),
+          timestamp: Date.now(),
+        })
+        continue
+      }
       if (reasoning) log('llm_thought', reasoning)
       return
     }
@@ -219,7 +245,7 @@ export async function runAgentTurn(
     let roundErrorCount = 0
 
     let showedReason = false
-    for (const toolCall of toolCalls) {
+    for (const toolCall of effectiveToolCalls) {
       if (options?.signal?.aborted) return
 
       options?.onActivity?.(`Executing tool: ${toolCall.name}`)
@@ -286,6 +312,31 @@ function describeAdvisorTrigger(state: AdvisorStallState): string {
   if (state.repeatedRoundSignatureCount >= 2) return `repeated command loop (${state.repeatedRoundSignatureCount + 1} similar rounds)`
   if (state.stagnantRounds >= 3) return `stagnant results (${state.stagnantRounds + 1} rounds)`
   return 'stall detection'
+}
+
+export function shouldRetryUninterpretableResponse(response: AssistantMessage): boolean {
+  const text = response.content
+    .filter((block: any) => block.type === 'text' || block.type === 'thinking')
+    .map((block: any) => {
+      if (typeof block.text === 'string') return block.text
+      if (typeof block.thinking === 'string') return block.thinking
+      return ''
+    })
+    .join('\n')
+    .trim()
+
+  if (!text) return true
+
+  const malformedToolPatterns = [
+    /<tool_call>/i,
+    /<function=/i,
+    /"name"\s*:\s*"[a-z0-9_:-]+"/i,
+    /"arguments"\s*:/i,
+  ]
+  const plainText = text.replace(/<[^>]+>/g, ' ').replace(/[{}[\]"]/g, ' ').replace(/\s+/g, ' ').trim()
+  const looksLikeBrokenToolOutput = malformedToolPatterns.some((pattern) => pattern.test(text))
+
+  return looksLikeBrokenToolOutput && plainText.length < 80
 }
 
 function enforceContextMessageCap(context: Context): void {
@@ -431,11 +482,23 @@ async function compactContext(
   options?.onAdaptiveContext?.({ mode: adaptive.mode, effectiveRatio: adaptive.ratio, rssBytes: adaptive.rssBytes })
   const ratio = adaptive.ratio
   const effectiveLimit = getEffectiveContextLimit(model)
+  const fixedCompactionThresholds = getFixedCompactionThresholds(model)
   const budget = Math.floor(effectiveLimit * ratio)
   const currentTokens = totalMessageTokens(context.messages)
   const estimatedRequestTokens = estimateRequestTokens(context)
 
-  if (!force && currentTokens < budget && estimatedRequestTokens < effectiveLimit - REQUEST_TOKEN_SAFETY_MARGIN) return
+  const hitSoftThreshold = fixedCompactionThresholds !== null
+    && (currentTokens >= fixedCompactionThresholds.soft || estimatedRequestTokens >= fixedCompactionThresholds.soft)
+  const hitHardThreshold = fixedCompactionThresholds !== null
+    && estimatedRequestTokens >= fixedCompactionThresholds.hard
+
+  if (
+    !force &&
+    !hitSoftThreshold &&
+    !hitHardThreshold &&
+    currentTokens < budget &&
+    estimatedRequestTokens < effectiveLimit - REQUEST_TOKEN_SAFETY_MARGIN
+  ) return
 
   const recentBudget = Math.floor(budget * 0.6)
   let recentTokens = 0
@@ -732,7 +795,10 @@ async function completeWithRetry(
       if (options?.compactInputEnabled) {
         const beforeEstimatedRequestTokens = estimateRequestTokens(context)
         const effectiveLimit = getEffectiveContextLimit(model)
-        if (beforeEstimatedRequestTokens >= effectiveLimit - REQUEST_TOKEN_SAFETY_MARGIN) {
+        const fixedCompactionThresholds = getFixedCompactionThresholds(model)
+        const shouldCompactForFixedThreshold = fixedCompactionThresholds !== null
+          && beforeEstimatedRequestTokens >= fixedCompactionThresholds.soft
+        if (shouldCompactForFixedThreshold || beforeEstimatedRequestTokens >= effectiveLimit - REQUEST_TOKEN_SAFETY_MARGIN) {
           const beforeCount = context.messages.length
           const beforeTokens = totalMessageTokens(context.messages)
           await compactContext(model, context, compaction, options, log, true)
@@ -1290,4 +1356,18 @@ function getEffectiveContextLimit(model: Model<any>): number {
   }
 
   return configured
+}
+
+function getFixedCompactionThresholds(model: Model<any>): { soft: number; hard: number } | null {
+  const provider = resolveProviderName(model).toLowerCase()
+  const modelName = (((model as any).name as string | undefined) || ((model as any).id as string | undefined) || '').toLowerCase()
+
+  if (provider === 'openrouter' && (modelName.includes('free models router') || modelName.includes('openrouter/free'))) {
+    return {
+      soft: OPENROUTER_FREE_SOFT_COMPACTION_TOKENS,
+      hard: OPENROUTER_FREE_HARD_COMPACTION_TOKENS,
+    }
+  }
+
+  return null
 }

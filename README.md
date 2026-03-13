@@ -4,6 +4,14 @@
 
 This repository is a customized fork of [SpaceMolt/admiral](https://github.com/SpaceMolt/admiral). It keeps the multi-profile Admiral UI, but adds more aggressive unattended-operation features for running many SpaceMolt agents at once.
 
+## Thanks
+
+Many thanks to `rsned` for maintaining the SpaceMolt knowledge base and publishing it here:
+
+- `https://rsned.github.io/spacemolt-kb/`
+
+That KB is now used by this fork for external map lookups and for the local mirrored KB cache kept under `data/spacemolt-kb/`.
+
 ## What This Fork Adds
 
 - profile-level primary and failover model routing
@@ -22,6 +30,7 @@ This repository is a customized fork of [SpaceMolt/admiral](https://github.com/S
 - live dashboard refresh controls plus `Get Status All` / `Nudge All` actions
 - dashboard and account status cards with richer gameplay stats
 - built-in retention and request-payload compaction
+- startup KB mirroring from `rsned/spacemolt-kb` with diff-driven local refresh
 
 The app listens on `http://localhost:3031` by default.
 
@@ -61,6 +70,9 @@ Important local paths:
 
 - `data/admiral.db`
 - `data/memory/`
+- `data/spacemolt-kb/`
+- `data/spacemolt-kb/manifest.json`
+- `data/system-kb-cache.json`
 - `data/admiral.db` table `pending_mutations`
 - `dist/`
 - `/etc/systemd/system/admiral.service`
@@ -229,6 +241,19 @@ It supports:
 - storing OAuth credentials in preferences
 - refreshing credentials via `@mariozechner/pi-ai`
 
+## Local KB Mirror
+
+This fork now keeps a local mirror of the SpaceMolt KB website under `data/spacemolt-kb/`.
+
+Current behavior:
+
+- on first startup, Admiral performs a full mirror of the KB sections it relies on
+- on later startups, Admiral checks the KB diff pages and refreshes only changed sections
+- mirrored sections currently include `systems`, `items`, `recipes`, `skills`, `ships`, and `diffs`
+- the structured POI cache used by routing helpers is still maintained separately in `data/system-kb-cache.json`
+
+This is meant to reduce dependence on a live fetch during normal operation while still tracking upstream KB changes.
+
 ## Retention
 
 Retention is built into the server process.
@@ -276,4 +301,5 @@ journalctl -u admiral.service -n 50 --no-pager
 - This fork is tuned for unattended multi-agent operation, not only manual play assistance.
 - The settings UI exposes provider routing, compaction, alternative solver, OAuth, and startup autoconnect controls.
 - The galaxy map UI can open external SpaceMolt knowledge-base pages for the selected system, which loads information from `https://rsned.github.io/spacemolt-kb/`.
+- On server startup, Admiral now also refreshes a local mirror of that KB under `data/spacemolt-kb/`.
 - If you compare behavior with upstream Admiral, assume this fork is materially different unless verified in code.

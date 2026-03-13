@@ -430,7 +430,7 @@ class FleetSupervisor {
   }
 }
 
-function buildRecentSignals(summaries: string[]): string[] {
+export function buildRecentSignals(summaries: string[]): string[] {
   const signals: string[] = []
   const add = (label: string) => {
     if (!signals.includes(label)) signals.push(label)
@@ -448,6 +448,9 @@ function buildRecentSignals(summaries: string[]): string[] {
     if (lower.includes('error: [no_resources]') && lower.includes('nothing to mine here')) add('mine location mismatch observed recently')
     if (lower.includes('error: [no_equipment]') && lower.includes('ice harvester')) add('mine equipment mismatch observed recently')
     if (lower.includes('error: [invalid_payload]') && lower.includes('quantity must be greater than 0')) add('sell quantity zero error observed recently')
+    if (lower.includes('produced zero fill') || (lower.includes('"command":"sell"') && lower.includes('"quantity_sold":0'))) {
+      add('sell zero fill observed recently')
+    }
     if (lower.includes('[action_result]')) add('recent action_result observed')
     if (lower.includes('"action":"jumped"')) add('recent jumped confirmation observed')
     if (lower.includes('pending action accepted')) add('recent mutation accepted as pending')
@@ -721,6 +724,22 @@ function buildAdviceSignals(
       recommendedChecks: ['get_cargo'],
       recommendedActions: ['sell'],
       whyNow: 'the sell plan is malformed, not just temporarily blocked',
+    })
+  }
+
+  if (recentSignals.includes('sell zero fill observed recently')) {
+    signals.push({
+      kind: 'sell_zero_fill_replan',
+      priority: 82,
+      summary: 'Recent instant sells filled nothing; stop retrying sell and switch to a priced sell order or a better market.',
+      evidence: [
+        'recent sell zero fill observed',
+        ...(poi ? [`poi=${poi}`] : []),
+        ...(cargoItems.length > 0 ? [`cargo_items=${cargoItems.slice(0, 4).join(', ')}`] : ['cargo_items=unknown']),
+      ],
+      recommendedChecks: ['view_market', 'get_cargo'],
+      recommendedActions: ['create_sell_order'],
+      whyNow: 'repeating the same instant sell is consuming turns without generating credits',
     })
   }
 

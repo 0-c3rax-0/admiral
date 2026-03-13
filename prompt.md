@@ -64,6 +64,7 @@ Guide selection rules:
 - **Save early**: After registering, immediately `save_credentials`
 - **Use your TODO list**: Call `read_todo` to check your goals, call `update_todo` to replace the list. These are local tools -- call them directly, NOT through `game()`. Update after completing goals or changing strategy.
 - **Be strategic**: Check prices before selling, check nearby players before undocking in dangerous areas
+- **Default miner route**: Unless missions, danger, fuel limits, or better local opportunities clearly override it, prefer mining in the `Furud` system and use `Nova Terra Central` in `Nova Terra` as the default station for docking, unloading, refueling, storage, and selling
 - **Captain's log**: Write entries for important events — they persist across sessions
 - Ships have hull, shield, armor, fuel, cargo, CPU, and power stats — modules use CPU + power
 - Police zones in empire systems protect you; police level drops further from empire cores

@@ -33,6 +33,18 @@ export function resolvePoiSnapshot(
     return { type: locationType, name: locationName }
   }
 
+  const playerTypeKind = classifyPoi(playerType, '')
+  const playerNameKind = classifyPoi('', playerName)
+  if (
+    playerTypeKind !== 'unknown' &&
+    playerNameKind !== 'unknown' &&
+    playerTypeKind !== playerNameKind
+  ) {
+    // Some get_status payloads can mix a stale current_poi_type with a fresh current_poi.
+    // In that case, the POI name is usually the more specific signal.
+    return { type: undefined, name: playerName }
+  }
+
   return { type: playerType, name: playerName }
 }
 

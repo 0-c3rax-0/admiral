@@ -26,6 +26,54 @@ export function extractReasoningSummary(response: AssistantMessage): string {
   return reasoning
 }
 
+export function extractFallbackToolCalls(response: AssistantMessage): ToolCall[] {
+  const text = response.content
+    .filter((b: any) => (b.type === 'text' || b.type === 'thinking') && (b.text?.trim() || b.thinking?.trim()))
+    .map((b: any) => (typeof b.text === 'string' ? b.text : b.thinking).trim())
+    .join('\n')
+
+  if (!text) return []
+
+  const discovered: ToolCall[] = []
+  const seen = new Set<string>()
+  let syntheticId = 0
+
+  const addCall = (name: string, args: Record<string, unknown>) => {
+    const normalizedName = name.trim()
+    if (!normalizedName) return
+    const fingerprint = `${normalizedName}:${stableStringify(normalizeValue(args))}`
+    if (seen.has(fingerprint)) return
+    seen.add(fingerprint)
+    discovered.push({
+      type: 'toolCall',
+      id: `fallback-tool-${++syntheticId}`,
+      name: normalizedName,
+      arguments: args,
+    })
+  }
+
+  const xmlFunctionRegex = /<function=([a-zA-Z0-9_:-]+)>\s*<\/function>/g
+  for (const match of text.matchAll(xmlFunctionRegex)) {
+    addCall(match[1], {})
+  }
+
+  const xmlToolJsonRegex = /<tool_call>\s*(\{[\s\S]*?"name"\s*:\s*"[^"]+"[\s\S]*?\})\s*<\/tool_call>/g
+  for (const match of text.matchAll(xmlToolJsonRegex)) {
+    try {
+      const parsed = JSON.parse(match[1]) as { name?: unknown; arguments?: unknown }
+      if (typeof parsed.name !== 'string') continue
+      const args = parsed.arguments && typeof parsed.arguments === 'object'
+        ? parsed.arguments as Record<string, unknown>
+        : {}
+      addCall(parsed.name, args)
+    } catch {
+      // Ignore malformed JSON fragments; this parser is best-effort.
+    }
+  }
+
+  return discovered
+}
+
 export function shortenReasoning(reasoning: string): string | undefined {
   if (!reasoning) return undefined
   return reasoning.length > 180 ? reasoning.slice(0, 177) + '...' : reasoning

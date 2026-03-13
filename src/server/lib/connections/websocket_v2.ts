@@ -9,9 +9,9 @@ const CONNECT_TIMEOUT = 10_000
 const COMMAND_TIMEOUT = 30_000
 const HEARTBEAT_INTERVAL = 15_000
 const HEARTBEAT_INTERVAL_BUSY = 5_000
-const HEARTBEAT_TIMEOUT = 45_000
+const HEARTBEAT_TIMEOUT = 60_000
 const HEARTBEAT_MISSES_BEFORE_TERMINATE = 2
-const PENDING_ACTIVITY_STALE_MS = 8_000
+const PENDING_ACTIVITY_STALE_MS = 20_000
 const MAX_PENDING_COMMANDS = 32
 
 const RESPONSE_TYPES = new Set([
@@ -46,12 +46,16 @@ export class WebSocketV2Connection implements GameConnection {
   private reauthInFlight: Promise<boolean> | null = null
   private reconnectInFlight: Promise<boolean> | null = null
   private lastPongAt = 0
+  private lastMessageAt = 0
   private lastActivityAt = 0
+  private lastHeartbeatSentAt = 0
   private heartbeatMisses = 0
+  private heartbeatFallbackPending = false
   private transportLog: ((type: 'info' | 'warn' | 'error', msg: string) => void) | null = null
   private onPong = () => {
     this.lastPongAt = Date.now()
     this.lastActivityAt = this.lastPongAt
+    this.heartbeatFallbackPending = false
     this.heartbeatMisses = 0
   }
 
@@ -87,8 +91,11 @@ export class WebSocketV2Connection implements GameConnection {
           this.connected = true
           this.reconnectAttempt = 0
           this.lastPongAt = Date.now()
+          this.lastMessageAt = this.lastPongAt
           this.lastActivityAt = this.lastPongAt
+          this.lastHeartbeatSentAt = 0
           this.heartbeatMisses = 0
+          this.heartbeatFallbackPending = false
           this.startHeartbeat()
           this.logTransport('info', `WebSocket opened: ${this.wsUrl}`)
           settled = true
@@ -98,7 +105,10 @@ export class WebSocketV2Connection implements GameConnection {
         }
 
         this.ws.onmessage = (event) => {
-          this.lastActivityAt = Date.now()
+          this.lastMessageAt = Date.now()
+          this.lastActivityAt = this.lastMessageAt
+          this.heartbeatFallbackPending = false
+          this.heartbeatMisses = 0
           const raw = String(event.data)
           const lines = raw.split('\n').filter(l => l.trim())
           for (const line of lines) {
@@ -402,27 +412,55 @@ export class WebSocketV2Connection implements GameConnection {
     this.heartbeatTimer = setInterval(() => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
       const now = Date.now()
+      const lastInboundAt = Math.max(this.lastMessageAt, this.lastPongAt)
+      const heartbeatInterval = this.pendingQueue.length > 0 ? HEARTBEAT_INTERVAL_BUSY : HEARTBEAT_INTERVAL
       if (this.pendingQueue.length > 0 && now - this.lastActivityAt > PENDING_ACTIVITY_STALE_MS) {
         this.logTransport('warn', `Terminating stale WebSocket after ${now - this.lastActivityAt}ms with ${this.pendingQueue.length} pending command(s)`)
         this.ws.terminate()
         return
       }
-      if (Date.now() - this.lastPongAt > HEARTBEAT_TIMEOUT) {
+      if (now - lastInboundAt > HEARTBEAT_TIMEOUT) {
+        if (!this.heartbeatFallbackPending) {
+          this.heartbeatFallbackPending = true
+          this.lastHeartbeatSentAt = now
+          this.logTransport('warn', `No inbound WebSocket activity for ${now - lastInboundAt}ms; sending empty-message heartbeat fallback`)
+          try {
+            this.ws.send('')
+          } catch (err) {
+            this.logTransport('error', `WebSocket fallback heartbeat failed: ${err instanceof Error ? err.message : String(err)}`)
+            this.ws.terminate()
+          }
+          return
+        }
         this.heartbeatMisses++
         if (this.heartbeatMisses >= HEARTBEAT_MISSES_BEFORE_TERMINATE) {
-          this.logTransport('warn', `Heartbeat timeout after ${Date.now() - this.lastPongAt}ms; terminating socket`)
+          this.logTransport('warn', `Heartbeat timeout after ${now - lastInboundAt}ms; terminating socket`)
           this.ws.terminate()
         }
         return
       }
+      if (now - lastInboundAt < HEARTBEAT_TIMEOUT) {
+        this.heartbeatFallbackPending = false
+      }
       this.heartbeatMisses = 0
+      if (now - lastInboundAt < heartbeatInterval || now - this.lastHeartbeatSentAt < heartbeatInterval) {
+        return
+      }
       try {
+        this.lastHeartbeatSentAt = now
         this.ws.ping()
       } catch (err) {
         this.logTransport('error', `WebSocket ping failed: ${err instanceof Error ? err.message : String(err)}`)
-        this.ws.terminate()
+        try {
+          this.lastHeartbeatSentAt = now
+          this.heartbeatFallbackPending = true
+          this.ws.send('')
+        } catch (fallbackErr) {
+          this.logTransport('error', `WebSocket fallback heartbeat failed: ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`)
+          this.ws.terminate()
+        }
       }
-    }, this.pendingQueue.length > 0 ? HEARTBEAT_INTERVAL_BUSY : HEARTBEAT_INTERVAL)
+    }, HEARTBEAT_INTERVAL_BUSY)
   }
 
   private stopHeartbeat(): void {

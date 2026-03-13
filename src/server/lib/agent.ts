@@ -63,6 +63,9 @@ const MARKET_TELEMETRY_INTERVAL = 3
 const SHIP_TELEMETRY_INTERVAL = 8
 const MUTATION_STALL_NUDGE_THRESHOLD = 4
 const LOCAL_MUTATION_STUCK_THRESHOLD = 6
+const PENDING_WAIT_SLEEP_MS = 1500
+const PENDING_RECOVERY_VERIFY_COOLDOWN_MS = 8000
+const PENDING_RECOVERY_MAX_WAIT_MS = 25_000
 const HTTP_V2_FALLBACK_QUERY_COMMANDS = new Set([
   'get_status', 'get_location', 'get_system', 'get_poi', 'get_cargo', 'get_ship', 'get_skills',
   'get_missions', 'get_active_missions', 'get_nearby', 'get_action_log', 'view_market', 'analyze_market',
@@ -110,6 +113,11 @@ export class Agent {
   private learningContextDirty = false
   private lastLearningContextInjectedAt = 0
   private lastRateRiskLevel: 'LOW' | 'MEDIUM' | 'HIGH' | null = null
+  private lastMutationCommand: string | null = null
+  private lastMutationAt = 0
+  private pendingWaitStartedAt = 0
+  private lastPendingVerificationAt = 0
+  private pendingRecoveryReason: string | null = null
   constructor(profileId: string) {
     this.profileId = profileId
   }
@@ -216,6 +224,145 @@ export class Agent {
     }
   }
 
+  private resetPendingMutationTracking(): void {
+    this.pendingMutationObserved = false
+    this.loopsSincePendingMutation = 0
+    this.loopsSinceActionResult = 0
+    this.localMutationStuckReported = false
+    this.pendingWaitStartedAt = 0
+    this.lastPendingVerificationAt = 0
+    this.pendingRecoveryReason = null
+  }
+
+  private notePendingMutationObserved(reason?: string): void {
+    this.pendingMutationObserved = true
+    this.loopsSincePendingMutation = 0
+    this.localMutationStuckReported = false
+    if (!this.pendingWaitStartedAt) this.pendingWaitStartedAt = Date.now()
+    if (reason) this.pendingRecoveryReason = reason
+  }
+
+  private hasPendingServerResolution(): boolean {
+    return this.pendingMutationObserved || !!getPendingNavigation(this.profileId)
+  }
+
+  private noteCommandOutcome(command: string, result: CommandResult): void {
+    if (command === 'undock' || command === 'dock' || command === 'travel' || command === 'jump' || command === 'mine' || command === 'sell' || command === 'refuel' || command === 'repair') {
+      this.lastMutationCommand = command
+      this.lastMutationAt = Date.now()
+    }
+
+    if (command === 'undock' && !result.error && (result.meta?.pending || (result.result && typeof result.result === 'object' && (result.result as Record<string, unknown>).pending === true))) {
+      this.notePendingMutationObserved('undock pending; waiting for state change')
+    }
+  }
+
+  private async maybeRunDockedRecoveryAction(): Promise<boolean> {
+    if (!this.connection) return false
+    if (this.commandResultStillPending({ result: this._gameState || {} })) return false
+    if (Date.now() - this.lastMutationAt > 2 * 60_000) return false
+
+    const docked = this.isLikelyDocked()
+
+    if (docked && this.lastMutationCommand === 'undock') {
+      this.log('system', 'Verified docked state after unresolved undock flow; issuing one automatic undock recovery action')
+      this.log('tool_call', 'auto_recovery: game(undock)')
+      const resp = await this.connection.execute('undock')
+      this.cacheGameState(resp)
+      this.noteCommandOutcome('undock', resp)
+
+      const resultText = resp.error
+        ? `Automatic undock recovery failed: ${resp.error.code}: ${resp.error.message}`
+        : 'Automatic undock recovery sent.'
+      this.log('tool_result', resultText, JSON.stringify(resp, null, 2))
+      return !resp.error
+    }
+
+    if (!docked && this.lastMutationCommand === 'dock') {
+      this.log('system', 'Verified undocked state after unresolved dock flow; issuing one automatic dock recovery action')
+      this.log('tool_call', 'auto_recovery: game(dock)')
+      const resp = await this.connection.execute('dock')
+      this.cacheGameState(resp)
+      this.noteCommandOutcome('dock', resp)
+
+      const resultText = resp.error
+        ? `Automatic dock recovery failed: ${resp.error.code}: ${resp.error.message}`
+        : 'Automatic dock recovery sent.'
+      this.log('tool_result', resultText, JSON.stringify(resp, null, 2))
+      return !resp.error
+    }
+
+    return false
+  }
+
+  private commandResultStillPending(result: CommandResult | null): boolean {
+    const data = ((result?.structuredContent ?? result?.result) as Record<string, unknown> | undefined) || {}
+    const queue = (data.queue as Record<string, unknown> | undefined) || {}
+    const location = (data.location as Record<string, unknown> | undefined) || {}
+    if (queue.has_pending === true) return true
+    if (location.in_transit === true) return true
+    if (toFiniteNumber(location.transit_arrival_tick) !== null) return true
+    if (toFiniteNumber(data.arrival_tick) !== null) return true
+    return false
+  }
+
+  private async maybeHandlePendingServerResolution(context: Context): Promise<boolean> {
+    if (!this.abortController?.signal || !this.hasPendingServerResolution()) return false
+
+    const now = Date.now()
+    const waitMs = this.pendingWaitStartedAt > 0 ? now - this.pendingWaitStartedAt : 0
+    const needsVerification = Boolean(this.pendingRecoveryReason)
+      || waitMs >= PENDING_RECOVERY_MAX_WAIT_MS
+      || this.loopsSincePendingMutation >= MUTATION_STALL_NUDGE_THRESHOLD
+
+    if (!needsVerification) {
+      this.setActivity('Waiting for server tick/action result...')
+      await abortableSleep(PENDING_WAIT_SLEEP_MS, this.abortController.signal)
+      return true
+    }
+
+    if (now - this.lastPendingVerificationAt < PENDING_RECOVERY_VERIFY_COOLDOWN_MS) {
+      this.setActivity('Waiting before next pending-state verification...')
+      await abortableSleep(PENDING_WAIT_SLEEP_MS, this.abortController.signal)
+      return true
+    }
+
+    this.lastPendingVerificationAt = now
+    const recoveryReason = this.pendingRecoveryReason || 'pending action exceeded local wait threshold'
+    this.setActivity('Verifying pending server state...')
+
+    const statusResp = await this.executeSilentQuery('get_status')
+    if (statusResp) this.cacheGameState(statusResp)
+    const hasPendingNavigation = !!getPendingNavigation(this.profileId)
+    const locationResp = hasPendingNavigation ? await this.executeSilentQuery('get_location') : null
+    if (locationResp) this.cacheGameState(locationResp)
+
+    const stillPending = this.commandResultStillPending(statusResp) || this.commandResultStillPending(locationResp)
+    if (stillPending) {
+      this.notePendingMutationObserved()
+      this.pendingRecoveryReason = null
+      this.log('system', `Pending action still unresolved after recovery check: ${recoveryReason}`)
+      await abortableSleep(PENDING_WAIT_SLEEP_MS, this.abortController.signal)
+      return true
+    }
+
+    this.resetPendingMutationTracking()
+    if (await this.maybeRunDockedRecoveryAction()) {
+      return true
+    }
+    context.messages.push({
+      role: 'user' as const,
+      content: [
+        '## Pending Action Recovery',
+        `Admiral locally re-verified state after waiting because: ${recoveryReason}.`,
+        'Fresh state was fetched directly from the server. Reassess from the latest verified state before issuing any new mutation.',
+      ].join('\n\n'),
+      timestamp: Date.now(),
+    })
+    this.log('system', `Pending action resolved or invalidated after recovery check: ${recoveryReason}`)
+    return false
+  }
+
   private getCargoUsage(): { used: number | null; capacity: number | null } {
     const ship = (this._gameState?.ship as Record<string, unknown> | undefined) || {}
     return {
@@ -296,9 +443,10 @@ export class Agent {
   }
 
   private async collectMarketTelemetry(): Promise<string | null> {
-    const [marketResp, personalOrdersResp] = await Promise.all([
+    const [marketResp, personalOrdersResp, bestSellSummary] = await Promise.all([
       this.executeSilentQuery('view_market', { category: 'ore' }),
       this.executeSilentQuery('view_orders', { scope: 'personal', order_type: 'sell', sort_by: 'price_asc', page: 1, page_size: 20 }),
+      this.fetchBestSellSummary('ore'),
     ])
 
     const sections: string[] = []
@@ -314,7 +462,32 @@ export class Agent {
       if (summary) sections.push(`Personal sell orders:\n${summary}`)
     }
 
+    if (bestSellSummary) {
+      sections.push(`Best sell hints:\n${bestSellSummary}`)
+    }
+
     return sections.length > 0 ? sections.join('\n\n') : null
+  }
+
+  private async fetchBestSellSummary(category: string): Promise<string | null> {
+    const stationId = getCurrentStationId(this._gameState)
+    if (!stationId) return null
+    const port = process.env.PORT || '3031'
+    const baseUrl = `http://127.0.0.1:${port}`
+
+    try {
+      const resp = await fetch(`${baseUrl}/api/economy/market/best-sell?station_id=${encodeURIComponent(stationId)}&category=${encodeURIComponent(category)}&limit=3`)
+      if (!resp.ok) return null
+      const data = await resp.json() as { best?: Array<{ summary?: string | null }> }
+      const lines = Array.isArray(data.best)
+        ? data.best
+          .map((entry) => typeof entry.summary === 'string' ? entry.summary.trim() : '')
+          .filter((entry) => entry.length > 0)
+        : []
+      return lines.length > 0 ? lines.join('\n') : null
+    } catch {
+      return null
+    }
   }
 
   private async collectShipTelemetry(): Promise<string | null> {
@@ -384,6 +557,14 @@ export class Agent {
     }
     if (this.connection instanceof WebSocketV2Connection) {
       this.connection.setTransportLog((type, msg) => {
+        if (this.hasPendingServerResolution()) {
+          const lower = msg.toLowerCase()
+          if (lower.includes('closed') || lower.includes('error')) {
+            this.pendingRecoveryReason = 'connection interruption while awaiting server resolution'
+          } else if (lower.includes('opened')) {
+            this.pendingRecoveryReason = 'connection recovered while awaiting server resolution'
+          }
+        }
         this.log(type === 'error' ? 'error' : 'connection', msg)
       })
     }
@@ -404,6 +585,9 @@ export class Agent {
       ingestRuntimeNotification(this.profileId, n)
       ingestTradeNotification(this.profileId, n, this._gameState)
       if (isReconnectNotification(n)) {
+        if (this.hasPendingServerResolution()) {
+          this.pendingRecoveryReason = 'server reconnect notification during pending action'
+        }
         const detail = formatReconnectDetail(n)
         this.log('connection', formatNotificationSummary(n), detail ?? JSON.stringify(n, null, 2))
         void Promise.all([
@@ -567,7 +751,7 @@ export class Agent {
 
     const compaction: CompactionState = { summary: this.memorySummary }
     const todo = { value: profile.todo || '' }
-    let idleLoopCount = 0
+      let idleLoopCount = 0
 
     while (this.running) {
       // Reset abort controller if it was used (e.g. by a nudge wakeup)
@@ -594,6 +778,12 @@ export class Agent {
       }
 
       try {
+        if (await this.maybeHandlePendingServerResolution(context)) {
+          if (!this.running) break
+          if (this.restartRequested) continue
+          continue
+        }
+
         if (is429PredictionEnabled()) {
           const rateRisk = predict429Risk(this.profileId)
           if (rateRisk.level !== this.lastRateRiskLevel) {
@@ -697,6 +887,7 @@ export class Agent {
               this._effectiveContextBudgetRatio = info.effectiveRatio
             },
             onGameCommandResult: (command, args, result) => {
+              this.noteCommandOutcome(command, result)
               const changed = recordCommandOutcome(this.profileId, command, args, result, this._gameState)
               if (changed) {
                 this.refreshLearningContext()
@@ -735,18 +926,13 @@ export class Agent {
         const sawActionResult = notifications.some((n) => isActionResultNotification(n))
         const sawPendingMutation = notifications.some((n) => isPendingMutationNotification(n))
         if (sawActionResult) {
-          this.pendingMutationObserved = false
-          this.loopsSincePendingMutation = 0
-          this.loopsSinceActionResult = 0
-          this.localMutationStuckReported = false
+          this.resetPendingMutationTracking()
         } else if (this.pendingMutationObserved) {
           this.loopsSincePendingMutation++
           this.loopsSinceActionResult++
         }
         if (sawPendingMutation) {
-          this.pendingMutationObserved = true
-          this.loopsSincePendingMutation = 0
-          this.localMutationStuckReported = false
+          this.notePendingMutationObserved()
         }
         if (notifications.length > 0) {
           pendingEvents = notifications
@@ -1237,6 +1423,7 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - If you hit errors like \`already_in_system\`, \`cargo_full\`, \`not_enough_fuel\`, \`invalid_payload\` for a zero-quantity sell, or a market/sell rejection, treat them as planning feedback. Verify state, change strategy, and avoid repeating the same blocked action.
 - Before every \`sell\` mutation, run a fresh \`get_status\` and verify that you are docked at a valid base/station and that the cargo quantity you plan to sell is still present. Do not rely on stale docked/cargo assumptions.
 - Use a strict selling workflow: \`get_status\` -> confirm docked -> inspect market/orderbook -> decide price/quantity -> \`sell\` once -> verify the result. If any step is ambiguous, refresh instead of submitting the sell.
+- If Admiral provides a \`Best sell hints\` block, treat it as a compact station-local pricing aid built from current bids plus recent fills. Prefer it when choosing whether to instant-sell, hold, or list near market, but still sanity-check against fresh cargo quantity and current docked station before submitting the mutation.
 - Read the market sides correctly: instant \`sell\` fills against existing buy orders and therefore depends on the bid/buy side, not the listed \`sell_orders\`. \`sell_orders\` are the ask side and only describe competing sellers unless you create your own sell order.
 - Use a strict cargo-unload fallback when docked with sale inventory: first try to sell directly only if the local market has real bid-side liquidity and the instant sale is acceptable; if immediate sale is not realistically possible or would be obviously bad, move the cargo into the station's local storage before doing anything else with it.
 - If the market has no meaningful buy orders or bid-side depth, do not dump cargo into a bad or empty instant market. Prefer putting the goods into local station storage first so the ship can resume work with free cargo space, then batch inventory and decide whether to create a well-placed sell order from that station later.
@@ -1260,6 +1447,12 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - Existing ships may have new speed values after a server restart. Do not rely on stale assumptions about jump duration, travel duration, or fuel burn from earlier runs.
 - If attacked by NPC pirates and escape is legal, \`jump\` or \`travel\` can be a valid recovery option. Treat navigation as a possible escape tool when combat pressure is non-player and leaving is feasible.
 - Mining loops should be practical: mine until cargo is near full (roughly 80-90%), but stop early if yields fail, the location lacks resources, the node mismatches the current mining fit, cargo is full, or a better unload/travel opportunity appears.
+- Prefer a stable default miner route when no stronger local constraint applies: mine in the Furud system, and use Nova Terra / Nova Terra Central as the default unload, storage, refuel, and market station.
+- If the ship is already running a normal ore-mining loop and no mission, fuel, cargo, combat, or market constraint overrides it, bias route planning back toward Furud belts for mining and Nova Terra Central for docking/selling.
+- Use a structured ore-mining loop when applicable: if undocked with an ore-mining fit and cargo is below 15%, prefer traveling to a known compatible ore belt and starting the loop there.
+- If already at a compatible ore belt and cargo is below 85%, keep mining unless the location is depleted, yields collapse, cargo is full, no resources are available, or the current fit does not match the node.
+- If cargo reaches roughly 85-90%, stop mining, return to a known unload station, dock, refuel when needed, unload, and only craft items when a supported crafting action is actually available and worthwhile.
+- If docked with cargo above 15%, process cargo before leaving again: refuel when needed, unload, only craft items when a supported crafting action is actually available and worthwhile, then choose direct sell for small stacks or strong buy-side liquidity; otherwise prefer \`create_sell_order\` once quantity or expected sale value is above your configured threshold.
 - Do not hoard ore blindly. When docked with valuable raw materials, inspect the market before selling. Avoid dumping into obviously bad instant bids; prefer corrected pricing or listing behavior when needed.
 - Periodically check for practical ship upgrades when docked at a shipyard or base. Favor upgrades that materially improve cargo, mining throughput, survivability, or travel efficiency and are affordable without stalling progress.
 - Keep a wallet reserve of at least 10000 credits. Do not spend below that floor on ship purchases, fitting, or optional upgrades unless explicit human guidance overrides it.
@@ -1442,6 +1635,24 @@ function extractActiveOrders(data: Record<string, unknown>): Array<{ name: strin
   }
 
   return []
+}
+
+function getCurrentStationId(gameState: Record<string, unknown> | null): string | null {
+  const location = (gameState?.location as Record<string, unknown> | undefined) || {}
+  const candidates = [
+    location.docked_at,
+    location.poi_id,
+    location.station_id,
+    location.base_id,
+  ]
+
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue
+    const normalized = candidate.trim().toLowerCase()
+    if (normalized) return normalized
+  }
+
+  return null
 }
 
 type MarketEntry = {

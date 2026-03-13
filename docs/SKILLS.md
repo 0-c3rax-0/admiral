@@ -32,6 +32,8 @@ This fork adds or changes:
 ## Files That Matter
 
 - `src/server/lib/agent.ts`
+- `src/server/lib/kb-mirror.ts`
+- `src/server/lib/system-kb.ts`
 - `src/server/lib/loop.ts`
 - `src/server/lib/db.ts`
 - `src/server/lib/model.ts`
@@ -39,6 +41,8 @@ This fork adds or changes:
 - `src/frontend/src/components/ProviderSetup.tsx`
 - `data/admiral.db`
 - `data/memory/`
+- `data/spacemolt-kb/`
+- `data/system-kb-cache.json`
 
 ## Alternative Solver
 
@@ -93,6 +97,21 @@ Intent:
 - improve mining loops
 - avoid cargo hoarding without market checks
 - notice practical ship upgrades when docked
+
+## KB Mirror
+
+This fork now mirrors the public SpaceMolt KB into local storage.
+
+Current behavior:
+
+- `src/server/lib/kb-mirror.ts` maintains a local copy of the KB website under `data/spacemolt-kb/`
+- startup sync is diff-driven after the initial full mirror
+- `src/server/lib/system-kb.ts` still maintains the structured POI cache used by local routing helpers
+
+When documenting or changing this area:
+
+- distinguish between the local HTML mirror and the structured POI cache
+- do not describe the KB dependency as live-only; startup now refreshes a local mirror first
 
 ## UI Metrics
 

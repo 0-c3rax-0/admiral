@@ -130,6 +130,9 @@ const ROLE_PRESETS: Record<AgentRole, RolePreset> = {
       'Prefer mining belts and reliable unload stations.',
       'Do not travel to a resource node that the current loadout cannot actually mine.',
       'Optimize credits per tick through steady extraction and clean sell cycles.',
+      'If undocked with an ore fit and cargo below 15%, prefer returning to a known compatible ore belt and restarting the mining loop.',
+      'If already at a compatible ore belt and cargo is below 85%, keep mining unless the location is depleted, yields collapse, cargo is full, or the fit does not match the node.',
+      'If cargo reaches roughly 85-90%, return to a known unload station, dock, refuel when needed, unload, and only craft items when a supported crafting action is actually available and worthwhile before leaving again.',
     ],
   },
   trader: {
@@ -143,6 +146,8 @@ const ROLE_PRESETS: Record<AgentRole, RolePreset> = {
     playstyle: [
       'Prefer stations, market reads, and profitable sell/buy timing.',
       'Treat cargo as inventory capital, not something to dump blindly.',
+      'When docked with cargo above 15%, process it before leaving again: refuel when needed, unload, only craft items when a supported crafting action is actually available and worthwhile, then choose direct sell versus sell order based on stack size and liquidity.',
+      'Prefer direct sell for small stacks or strong buy-side liquidity; prefer create_sell_order for larger stacks or better delayed execution once a configurable quantity or value threshold is reached.',
     ],
   },
   scout: {
@@ -176,12 +181,13 @@ const ROLE_PRESETS: Record<AgentRole, RolePreset> = {
     priorities: { profit: 0.85, survival: 0.8, exploration: 0.2, social: 0.2 },
     constraints: [
       'Prefer production chains with measurable margin.',
-      'Check recipe and market viability before crafting or refining.',
+      'Check recipe and market viability before crafting or other recipe-based processing.',
     ],
     development_focus: ['market_timing', 'inventory_discipline', 'mission_selection', 'query_discipline'],
     playstyle: [
-      'Prefer refining, crafting, and ship/equipment progression.',
+      'Prefer recipe-based processing, crafting, and ship/equipment progression.',
       'Think in value chains instead of only raw ore liquidation.',
+      'When docked with cargo above 15%, process it before leaving again: refuel when needed, unload, only craft items when a supported crafting action is actually available and worthwhile, then sell or list based on stack size, fees, and liquidity.',
     ],
   },
   generalist: {
@@ -193,6 +199,7 @@ const ROLE_PRESETS: Record<AgentRole, RolePreset> = {
     development_focus: ['route_planning', 'market_timing', 'risk_management', 'decision_efficiency'],
     playstyle: [
       'Blend mining, travel, trading, and missions based on current opportunity.',
+      'Use a practical mining loop when it is the best current option: start from low cargo, mine a compatible belt, return near 85-90% cargo, then process and sell efficiently while docked.',
     ],
   },
 }

@@ -32,6 +32,7 @@ export {
 export {
   buildImmediateRecoveryMessage,
   buildToolResultMessage,
+  extractFallbackToolCalls,
   extractReasoningSummary,
   fingerprintResult,
   fingerprintToolCall,
