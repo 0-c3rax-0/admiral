@@ -100,6 +100,15 @@ export async function executeTool(
   ctx: ToolContext,
   reason?: string,
 ): Promise<string> {
+  const normalizedToolArgs = normalizeToolArgs(args)
+  if (!normalizedToolArgs.ok) {
+    const errMsg = `Error: invalid tool arguments for '${name}'. ${normalizedToolArgs.error}`
+    ctx.log('error', errMsg)
+    return errMsg
+  }
+
+  args = normalizedToolArgs.value
+
   if (LOCAL_TOOLS.has(name)) {
     ctx.log('tool_call', `${name}(${formatArgs(args)})`)
     return executeLocalTool(name, args, ctx)
@@ -107,11 +116,25 @@ export async function executeTool(
 
   let command: string
   let commandArgs: Record<string, unknown> | undefined
+  let originalCommand: string | null = null
   if (name === 'game') {
     command = String(args.command || '')
-    commandArgs = args.args as Record<string, unknown> | undefined
+    const normalizedCommandArgs = normalizeOptionalArgsRecord(args.args)
+    if (!normalizedCommandArgs.ok) {
+      const errMsg = `Error: invalid 'args' payload for game(${command || 'unknown'}). ${normalizedCommandArgs.error}`
+      ctx.log('error', errMsg)
+      return errMsg
+    }
+    commandArgs = normalizedCommandArgs.value
     command = sanitizeCommandName(command)
+    originalCommand = command
     if (!command) return 'Error: missing \'command\' argument'
+    if (LOCAL_TOOLS.has(command)) {
+      const errMsg = `Error: '${command}' is a local Admiral tool, not a game API command. Call ${command}(${formatArgs(commandArgs || {})}) directly instead of game(command=\"${command}\").`
+      ctx.log('system', `Blocked local tool wrapped in game(): ${command}`)
+      ctx.log('tool_result', errMsg)
+      return errMsg
+    }
     if (isBlockedGameCommand(command)) {
       const errMsg = `Error: blocked unsafe command '${command}'. Irreversible self-destruction or account-reset actions are never allowed.`
       ctx.log('error', errMsg)
@@ -126,6 +149,12 @@ export async function executeTool(
     if (resolved !== command) {
       ctx.log('system', `Adjusted command: ${command} -> ${resolved}`)
       command = resolved
+    }
+    const groupedRewrite = rewriteGroupedCommandInvocation(originalCommand, command, commandArgs)
+    if (groupedRewrite.changed) {
+      command = groupedRewrite.command
+      commandArgs = groupedRewrite.args
+      ctx.log('system', groupedRewrite.message)
     }
     const verifiedCommandError = await validateVerifiedGameCommand(ctx.profileId, command, ctx.connection)
     if (verifiedCommandError) {
@@ -700,6 +729,32 @@ async function getAvailableCommandNames(profileId: string, connection: GameConne
   return names
 }
 
+function rewriteGroupedCommandInvocation(
+  originalCommand: string | null,
+  resolvedCommand: string,
+  args: Record<string, unknown> | undefined,
+): { changed: boolean; command: string; args: Record<string, unknown> | undefined; message: string } {
+  const original = normalizeCommand(originalCommand || '')
+  if (resolvedCommand !== 'storage') {
+    return { changed: false, command: resolvedCommand, args, message: '' }
+  }
+  if (!original.startsWith('storage_')) {
+    return { changed: false, command: resolvedCommand, args, message: '' }
+  }
+
+  const action = original.slice('storage_'.length)
+  if (!action || (args && typeof args.action === 'string' && args.action.trim())) {
+    return { changed: false, command: resolvedCommand, args, message: '' }
+  }
+
+  return {
+    changed: true,
+    command: resolvedCommand,
+    args: { ...(args || {}), action },
+    message: `Expanded grouped command alias: ${original} -> storage(action=${action})`,
+  }
+}
+
 async function fetchAvailableCommands(connection: GameConnection, serverUrl: string, apiVersion: 'v1' | 'v2'): Promise<Array<{ name: string }>> {
   if (connection.mode === 'websocket' || connection.mode === 'websocket_v2') {
     try {
@@ -857,6 +912,10 @@ export function resolveExplicitCommandAlias(input: string, names: string[]): str
     return chooseFirstAvailable('abandon_mission')
   }
 
+  if (input === 'storage_deposit' || input === 'storage_withdraw' || input === 'storage_view') {
+    return chooseFirstAvailable(input, 'storage')
+  }
+
   return null
 }
 
@@ -946,6 +1005,44 @@ function truncateResultForLog(text: string): string {
 }
 
 const REDACTED_KEYS = new Set(['password', 'token', 'secret', 'api_key'])
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null) return false
+  const proto = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}
+
+function normalizeJsonObjectString(value: string): { ok: true; value: Record<string, unknown> } | { ok: false; error: string } {
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (!isPlainObject(parsed)) {
+      return { ok: false, error: 'Expected a JSON object.' }
+    }
+    return { ok: true, value: parsed }
+  } catch {
+    return { ok: false, error: 'Expected an object or a JSON object string.' }
+  }
+}
+
+function normalizeToolArgs(value: unknown): { ok: true; value: Record<string, unknown> } | { ok: false; error: string } {
+  if (isPlainObject(value)) return { ok: true, value }
+  if (typeof value === 'string') return normalizeJsonObjectString(value)
+  return { ok: false, error: 'Expected an object payload.' }
+}
+
+function normalizeOptionalArgsRecord(value: unknown): { ok: true; value: Record<string, unknown> | undefined } | { ok: false; error: string } {
+  if (value === undefined || value === null) return { ok: true, value: undefined }
+  if (isPlainObject(value)) return { ok: true, value }
+  if (typeof value === 'string') {
+    if (value.trim() === '') return { ok: true, value: undefined }
+    const parsed = normalizeJsonObjectString(value)
+    if (!parsed.ok) {
+      return { ok: false, error: `'args' must be an object, not a character string payload.` }
+    }
+    return parsed
+  }
+  return { ok: false, error: `'args' must be an object.` }
+}
 
 function formatArgs(args: Record<string, unknown>): string {
   const parts: string[] = []
@@ -1265,23 +1362,23 @@ function normalizeNavigationArgs(
   const changes: string[] = []
 
   if (command === 'travel') {
-    const targetPoi = pickFirstStringArg(next.target_poi, next.poi_id, next.poi, next.poi_name, next.destination, next.target)
+    const targetPoi = pickFirstStringArg(next.target_poi, next.poi_id, next.destination_id, next.poi, next.poi_name, next.destination, next.target, next.id, next.text)
     if (targetPoi && next.target_poi !== targetPoi) {
       next.target_poi = targetPoi
       changes.push(`target_poi=${targetPoi}`)
     }
-    for (const key of ['poi_id', 'poi', 'poi_name', 'destination', 'target'] as const) {
+    for (const key of ['poi_id', 'destination_id', 'poi', 'poi_name', 'destination', 'target', 'id', 'text'] as const) {
       if (key in next) delete next[key]
     }
   }
 
   if (command === 'jump') {
-    const targetSystem = pickFirstStringArg(next.target_system, next.system_id, next.system, next.system_name, next.destination, next.target)
+    const targetSystem = pickFirstStringArg(next.target_system, next.system_id, next.destination_id, next.system, next.system_name, next.destination, next.target, next.id, next.text)
     if (targetSystem && next.target_system !== targetSystem) {
       next.target_system = targetSystem
       changes.push(`target_system=${targetSystem}`)
     }
-    for (const key of ['system_id', 'system', 'system_name', 'destination', 'target'] as const) {
+    for (const key of ['system_id', 'destination_id', 'system', 'system_name', 'destination', 'target', 'id', 'text'] as const) {
       if (key in next) delete next[key]
     }
   }

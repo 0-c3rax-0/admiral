@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { ChevronDown, ChevronRight, Coins, RefreshCw, X } from 'lucide-react'
 import type { Profile } from '@/types'
 import { Button } from '@/components/ui/button'
+import { Select } from '@/components/ui/select'
 
 type OverviewTrade = {
   id: number
@@ -47,6 +48,36 @@ type RecipeEconomics = {
   estimated_profit: number | null
 }
 
+type LiveMarketTrade = {
+  id: string
+  timestamp: string
+  item_id: string
+  item_name: string
+  station_id: string
+  station_name: string
+  quantity: number
+  price_each: number
+  total: number
+  buyer_name: string
+  seller_name: string
+  order_type: string
+}
+
+const MARKET_CATEGORIES = [
+  { id: 'ore', label: 'Ore' },
+  { id: 'ice', label: 'Ice' },
+  { id: 'gas', label: 'Gas' },
+]
+
+const MARKET_STATIONS = [
+  { id: 'nova_terra_central', label: 'Nova Terra Central' },
+  { id: 'central_nexus', label: 'Central Nexus' },
+  { id: 'grand_exchange_station', label: 'Grand Exchange Station' },
+  { id: 'confederacy_central_command', label: 'Confederacy Central Command' },
+  { id: 'crimson_war_citadel', label: 'Crimson War Citadel' },
+  { id: 'node_beta_industrial_station', label: 'Node Beta Industrial Station' },
+]
+
 interface Props {
   open: boolean
   onClose: () => void
@@ -61,15 +92,19 @@ export function EconomyOverviewModal({ open, onClose, profiles, activeProfileId 
   const [profitHints, setProfitHints] = useState<ProfitHint[]>([])
   const [recipeEconomics, setRecipeEconomics] = useState<RecipeEconomics[]>([])
   const [expandedProfiles, setExpandedProfiles] = useState<Record<string, boolean>>({})
+  const [selectedCategory, setSelectedCategory] = useState('ore')
+  const [selectedStation, setSelectedStation] = useState('nova_terra_central')
+  const [liveTrades, setLiveTrades] = useState<LiveMarketTrade[]>([])
   const selectedProfileId = activeProfileId || profiles[0]?.id || ''
 
-  async function loadData(profileId: string) {
+  async function loadData(profileId: string, stationId = selectedStation, category = selectedCategory) {
     setLoading(true)
     try {
-      const [overviewResp, hintsResp, recipesResp] = await Promise.all([
+      const [overviewResp, hintsResp, recipesResp, liveTradesResp] = await Promise.all([
         fetch('/api/economy/overview?trade_limit=120&item_limit=40'),
         profileId ? fetch(`/api/economy/profiles/${profileId}/profit-hints?limit=20`) : Promise.resolve(null),
         fetch('/api/economy/recipes?limit=40'),
+        fetch(`/api/economy/market/fills?station_id=${encodeURIComponent(stationId)}&category=${encodeURIComponent(category)}&limit=100`),
       ])
 
       if (overviewResp.ok) {
@@ -92,10 +127,18 @@ export function EconomyOverviewModal({ open, onClose, profiles, activeProfileId 
       } else {
         setRecipeEconomics([])
       }
+
+      if (liveTradesResp.ok) {
+        const data = await liveTradesResp.json()
+        setLiveTrades(Array.isArray(data.fills) ? data.fills : [])
+      } else {
+        setLiveTrades([])
+      }
     } catch {
       setOverview({ recent_trades: [], item_summaries: [] })
       setProfitHints([])
       setRecipeEconomics([])
+      setLiveTrades([])
     } finally {
       setLoading(false)
     }
@@ -114,8 +157,8 @@ export function EconomyOverviewModal({ open, onClose, profiles, activeProfileId 
 
   useEffect(() => {
     if (!open) return
-    loadData(selectedProfileId)
-  }, [open, selectedProfileId])
+    loadData(selectedProfileId, selectedStation, selectedCategory)
+  }, [open, selectedProfileId, selectedStation, selectedCategory])
 
   const selectedProfileName = useMemo(
     () => profiles.find((profile) => profile.id === selectedProfileId)?.name || 'Account',
@@ -145,7 +188,7 @@ export function EconomyOverviewModal({ open, onClose, profiles, activeProfileId 
               <span className="font-jetbrains text-xs font-semibold tracking-[1.5px] text-primary uppercase">Economy Overview</span>
             </div>
             <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" onClick={() => loadData(selectedProfileId)} disabled={loading} className="gap-1.5">
+              <Button variant="outline" size="sm" onClick={() => loadData(selectedProfileId, selectedStation, selectedCategory)} disabled={loading} className="gap-1.5">
                 <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
                 Reload
               </Button>
@@ -211,6 +254,71 @@ export function EconomyOverviewModal({ open, onClose, profiles, activeProfileId 
             </section>
 
             <div className="space-y-4">
+              <section className="border border-border bg-background/30">
+                <div className="px-4 py-2.5 border-b border-border flex flex-wrap items-center justify-between gap-3">
+                  <span className="text-[11px] uppercase tracking-[1.2px] text-muted-foreground">Live Station Trades</span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex items-center gap-1">
+                      {MARKET_CATEGORIES.map((item) => (
+                        <Button
+                          key={item.id}
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setSelectedCategory(item.id)}
+                          className={selectedCategory === item.id ? 'border-primary/50 text-primary bg-primary/10' : 'text-muted-foreground'}
+                        >
+                          {item.label}
+                        </Button>
+                      ))}
+                    </div>
+                    <Select
+                      value={selectedStation}
+                      onChange={(e) => setSelectedStation(e.target.value)}
+                      className="h-8 w-full min-w-[220px] text-xs"
+                    >
+                      {MARKET_STATIONS.map((station) => (
+                        <option key={station.id} value={station.id}>
+                          {station.label}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+                </div>
+                <div className="overflow-auto">
+                  <table className="w-full text-xs">
+                    <thead className="bg-card/70">
+                      <tr className="border-b border-border text-muted-foreground uppercase tracking-[1.2px]">
+                        <th className="text-left px-4 py-2 font-medium">Zeit</th>
+                        <th className="text-left px-4 py-2 font-medium">Item</th>
+                        <th className="text-right px-4 py-2 font-medium">Menge</th>
+                        <th className="text-right px-4 py-2 font-medium">Preis</th>
+                        <th className="text-right px-4 py-2 font-medium">Total</th>
+                        <th className="text-left px-4 py-2 font-medium">Kaeufer</th>
+                        <th className="text-left px-4 py-2 font-medium">Verkaeufer</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {liveTrades.map((trade) => (
+                        <tr key={trade.id} className="border-b border-border/50 last:border-b-0">
+                          <td className="px-4 py-2 text-muted-foreground">{formatDateTime(trade.timestamp)}</td>
+                          <td className="px-4 py-2">{trade.item_name}</td>
+                          <td className="px-4 py-2 text-right tabular-nums">{formatNumber(trade.quantity)}</td>
+                          <td className="px-4 py-2 text-right tabular-nums">{formatNumber(trade.price_each)}</td>
+                          <td className="px-4 py-2 text-right tabular-nums">{formatNumber(trade.total)}</td>
+                          <td className="px-4 py-2 text-muted-foreground">{trade.buyer_name}</td>
+                          <td className="px-4 py-2 text-muted-foreground">{trade.seller_name}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {liveTrades.length === 0 && (
+                    <div className="px-4 py-4 text-sm text-muted-foreground">
+                      Keine Live-Trades fuer diese Station und Kategorie gefunden.
+                    </div>
+                  )}
+                </div>
+              </section>
+
               <section className="border border-border bg-background/30">
                 <div className="px-4 py-2.5 border-b border-border">
                   <span className="text-[11px] uppercase tracking-[1.2px] text-muted-foreground">Trade Profitability for {selectedProfileName}</span>

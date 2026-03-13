@@ -19,7 +19,7 @@ import path from 'path'
 import { reconcilePendingNavigationWithStatus, updatePendingNavigationFromNotification } from './navigation-guard'
 import { getPendingNavigation } from './navigation-guard'
 import { createGameConnection } from './game-connection'
-import { buildLearningContext, observeGameState, recordCommandOutcome } from './agent-learning'
+import { buildLearningContext, getDecisionPressureSnapshot, observeGameState, recordCommandOutcome } from './agent-learning'
 import {
   buildLocalMutationStuckSummary,
   buildMutationStallNudge,
@@ -960,6 +960,15 @@ export class Agent {
       const telemetryNudge = await this.collectFreeTelemetry()
       if (telemetryNudge) nudgeParts.push(telemetryNudge)
 
+      const decisionPressure = getDecisionPressureSnapshot(this.profileId)
+      if (decisionPressure.recommendation) {
+        nudgeParts.push([
+          '## Decision Pressure',
+          decisionPressure.recommendation,
+          `Current signals: query_streak=${decisionPressure.queryStreak}, same_query_streak=${decisionPressure.sameQueryStreak}, no_progress_streak=${decisionPressure.noProgressStreak}${decisionPressure.lastQueryCommand ? `, last_query=${decisionPressure.lastQueryCommand}` : ''}.`,
+        ].join('\n\n'))
+      }
+
       const mutationStateNudge = buildMutationStateNudge(this.mutationState, this.mutationStateDetail, this._gameState)
       if (mutationStateNudge) nudgeParts.push(mutationStateNudge)
 
@@ -1446,29 +1455,31 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - Route planning matters more now: use \`find_route\` for non-trivial jumps, and do not assume older fixed-time or fixed-fuel navigation behavior.
 - Existing ships may have new speed values after a server restart. Do not rely on stale assumptions about jump duration, travel duration, or fuel burn from earlier runs.
 - If attacked by NPC pirates and escape is legal, \`jump\` or \`travel\` can be a valid recovery option. Treat navigation as a possible escape tool when combat pressure is non-player and leaving is feasible.
-- Mining loops should be practical: mine until cargo is near full (roughly 80-90%), but stop early if yields fail, the location lacks resources, the node mismatches the current mining fit, cargo is full, or a better unload/travel opportunity appears.
+- Mining loops should be practical: mine until cargo is near full (roughly 95%), but stop early if yields fail, the location lacks resources, the node mismatches the current mining fit, cargo is full, or a better unload/travel opportunity appears.
 - Prefer a stable default miner route when no stronger local constraint applies: mine in the Furud system, and use Nova Terra / Nova Terra Central as the default unload, storage, refuel, and market station.
 - If the ship is already running a normal ore-mining loop and no mission, fuel, cargo, combat, or market constraint overrides it, bias route planning back toward Furud belts for mining and Nova Terra Central for docking/selling.
 - Use a structured ore-mining loop when applicable: if undocked with an ore-mining fit and cargo is below 15%, prefer traveling to a known compatible ore belt and starting the loop there.
-- If already at a compatible ore belt and cargo is below 85%, keep mining unless the location is depleted, yields collapse, cargo is full, no resources are available, or the current fit does not match the node.
-- If cargo reaches roughly 85-90%, stop mining, return to a known unload station, dock, refuel when needed, unload, and only craft items when a supported crafting action is actually available and worthwhile.
+- If already at a compatible ore belt and cargo is below 95%, keep mining unless the location is depleted, yields collapse, cargo is full, no resources are available, or the current fit does not match the node.
+- If cargo reaches roughly 95%, stop mining, return to a known unload station, dock, refuel when needed, unload, and only craft items when a supported crafting action is actually available and worthwhile.
 - If docked with cargo above 15%, process cargo before leaving again: refuel when needed, unload, only craft items when a supported crafting action is actually available and worthwhile, then choose direct sell for small stacks or strong buy-side liquidity; otherwise prefer \`create_sell_order\` once quantity or expected sale value is above your configured threshold.
 - Do not hoard ore blindly. When docked with valuable raw materials, inspect the market before selling. Avoid dumping into obviously bad instant bids; prefer corrected pricing or listing behavior when needed.
 - Periodically check for practical ship upgrades when docked at a shipyard or base. Favor upgrades that materially improve cargo, mining throughput, survivability, or travel efficiency and are affordable without stalling progress.
 - Keep a wallet reserve of at least 10000 credits. Do not spend below that floor on ship purchases, fitting, or optional upgrades unless explicit human guidance overrides it.
 - Before buying another ship, check \`list_ships\` for already-owned hulls. If you already own a larger or clearly better ship than the current active hull, prefer switching into that owned ship before spending more credits on a new purchase.
 - When multiple owned ships are available, prefer the best already-owned practical upgrade first: usually the highest-tier hull that is actually usable now, with priority on cargo, survivability, and slot count for the current role. Do not keep flying a clearly inferior starter ship while a better owned hull is sitting in storage at a reachable station.
+- For mining-focused accounts, periodically review stored ships and sell stored non-mining hulls with \`sell_ship\` when they are not part of the current mining progression, not needed as a temporary logistics tool, and not being kept as a module donor.
 - After \`buy_listed_ship\`, treat the purchased hull as the new active ship immediately and continue the plan in that ship. The previous active ship is stored automatically. Verify the active hull with \`get_ship\`/\`get_status\` before resuming travel, mining, or selling.
 - After \`commission_ship\`, do not forget the delivery step: monitor until the build is complete, then use \`list_ships\` and \`switch_ship\` at the correct station so the commissioned hull actually becomes the active ship before treating the upgrade as done.
 - Ship switching does not transfer modules automatically. When moving into a newly bought or commissioned ship, inspect both fit and cargo/storage, then either:
   1. move the old fit over with \`uninstall_mod\` -> \`switch_ship\` -> \`install_mod\`, or
   2. buy/install a fresh fit if that is faster or clearly better.
-- Carrier ships can transport stored ships in a bay. When flying a carrier and docked at the same station as the ship you want to move, load it with \`storage_deposit(item_id=<ship_id>, target=self)\` and unload it later with \`storage_withdraw(item_id=<ship_id>)\`.
+- Carrier ships can transport stored ships in a bay. When flying a carrier and docked at the same station as the ship you want to move, prefer grouped storage commands when present: \`storage(action="deposit", item_id=<ship_id>, target=self)\` to load it and \`storage(action="withdraw", item_id=<ship_id>)\` to unload it. If the current API exposes \`storage_deposit\` / \`storage_withdraw\` aliases, those are equivalent.
 - On carrier ships, inspect \`get_cargo\` for \`carried_ships\`, \`bay_used\`, and \`bay_capacity\` before loading more ships or planning long travel.
 - Do not treat carried ships as ordinary cargo inventory. They consume carrier bay capacity, and if the carrier is destroyed the loaded ships become separate wrecks at that location.
 - Do not leave an upgraded ship idle in storage while continuing to fly the weaker hull, unless the new ship is temporarily unusable because of missing modules, skills, fuel, or required fitting work.
 - For miners, prioritize restoring a workable mining fit immediately after an upgrade: mining laser first, travel/fuel support second, cargo expansions after that. If the old modules remain on the stored ship, recover them or replace them before returning to the mining loop.
-- For Solarian mining accounts, use this default upgrade path unless current market prices, missing skills, or mission constraints make a nearby step impractical:
+- For Solarian mining accounts, use this default upgrade path unless current market prices, missing skills, or mission constraints make a nearby step impractical.
+- Do not apply this Solarian path blindly to Nebula or other factions. For non-Solarian mining accounts, derive the next mining hull from the current owned mining ships plus \`catalog(type=ships)\` / \`commission_quote\`, and treat freighters like \`Floor Price\` as logistics hulls rather than mining upgrades.
   Solarian Miner Upgrade Path
   | Ship | Tier | Hull Price | Cargo | Slots W/D/U | Mining Fit | Ship Skills |
   | Theoria | 0 | 0 cr | 70 | 1/1/3 | 1x Mining Laser I, 1x Afterburner I, 2x Cargo Bay Expansion | none publicly exposed |
@@ -1478,6 +1489,7 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
   | Lithosphere | 4 | 100000 cr | 1680 | 1/2/8 | 1x Mining Laser IV, 1x Afterburner III, 7x Cargo Bay Expansion | mining 7, medium_ships 3 |
   | Tellurian | 5 | 400000 cr | 2400 | 1/3/10 | 1x Mining Laser IV, 1x Afterburner III, 9x Cargo Bay Expansion | mining 7, large_ships 5 |
 - When evaluating a Solarian miner upgrade, prefer the next ship in that path first. Only skip a step if the next hull is unavailable, unaffordable after fitting reserve, blocked by skills, or a later step is already clearly affordable and skill-legal.
+- For non-Solarian mining accounts, prefer continuity of the current mining line: keep mining hulls in the upgrade path, keep freighters/support hulls out of it, and use \`list_ships\` plus the ship catalog before deciding to buy, switch, or sell.
 - Be social -- chat with players you meet.
 - Prioritize faction coordination: use faction chat frequently to share status, plans, threats, trade needs, and requests for support.
 - Interact in faction chat: react to incoming messages, answer teammates, ask follow-up questions, and agree on concrete coordinated actions.

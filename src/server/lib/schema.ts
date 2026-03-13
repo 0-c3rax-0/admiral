@@ -371,8 +371,8 @@ export async function fetchGameCommands(baseUrl: string, log?: SpecLogFn): Promi
  * Format a single command as a compact signature line for the system prompt.
  * Examples:
  *   mine -- Mine resources at current location
- *   storage_deposit(item_id, quantity, target?) -- Move items from cargo to station storage or into a carrier bay when target=self
- *   storage_view(station_id?) -- View your storage at a station
+ *   storage(action="deposit", item_id, quantity?, target?) -- Move items from cargo to station storage or into a carrier bay when target=self
+ *   storage(action="view", station_id?) -- View your storage at a station
  */
 function formatCommandSignature(cmd: GameCommandInfo): string {
   let sig = cmd.name

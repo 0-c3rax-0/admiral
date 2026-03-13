@@ -47,6 +47,7 @@ Do not rely on ad-hoc background starts when the systemd service is the intended
 - `data/spacemolt-kb/`
 - `data/spacemolt-kb/manifest.json`
 - `data/system-kb-cache.json`
+- `data/ship-kb-cache.json`
 - `/etc/systemd/system/admiral.service`
 - `/etc/systemd/system/admiral-healthcheck.service`
 - `/etc/systemd/system/admiral-healthcheck.timer`
@@ -64,6 +65,7 @@ Startup behavior:
 - if new diff pages exist, Admiral refreshes only the changed sections
 - mirrored content is written under `data/spacemolt-kb/`
 - the structured POI helper cache is refreshed separately into `data/system-kb-cache.json`
+- the structured ship-role cache is refreshed from the mirrored `ships/index.html` into `data/ship-kb-cache.json`
 
 Operational note:
 

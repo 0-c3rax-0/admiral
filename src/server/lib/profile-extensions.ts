@@ -1,6 +1,6 @@
 import type { Profile } from '../../shared/types'
 import { getStatsDelta1h, upsertProfileSkills } from './db'
-import { addMarketSnapshot, addTradeEvent } from './economy-db'
+import { addLedgerEvent, addMarketSnapshot, addTradeEvent } from './economy-db'
 import { getAgentRole } from './agent-learning'
 import type { CommandResult } from './connections/interface'
 import { is429PredictionEnabled, predict429Risk } from './loop'
@@ -87,6 +87,14 @@ function ingestEconomyData(profileId: string, command: string, args: Record<stri
     if (command === 'buy' || command === 'sell') {
       const trade = extractTradeEvent(profileId, command, result)
       if (trade) addTradeEvent(trade)
+      return
+    }
+
+    if (command === 'get_action_log') {
+      const data = result.structuredContent ?? result.result ?? result
+      const { trades, ledger } = extractActionLogEconomyEvents(profileId, data)
+      for (const trade of trades) addTradeEvent(trade)
+      for (const entry of ledger) addLedgerEvent(entry)
     }
   } catch {
     // Economy ingest is best-effort and must not break gameplay commands.
@@ -123,6 +131,152 @@ function extractTradeEvent(profileId: string, command: string, result: CommandRe
     source_command: command,
     raw_json: JSON.stringify(data),
   }
+}
+
+function extractActionLogEconomyEvents(profileId: string, data: unknown): {
+  trades: Array<Parameters<typeof addTradeEvent>[0]>
+  ledger: Array<Parameters<typeof addLedgerEvent>[0]>
+} {
+  const entries = extractActionLogEntries(data)
+  const trades: Array<Parameters<typeof addTradeEvent>[0]> = []
+  const ledger: Array<Parameters<typeof addLedgerEvent>[0]> = []
+
+  for (const entry of entries) {
+    const trade = extractTradeEventFromActionLog(profileId, entry)
+    if (trade) trades.push(trade)
+
+    const ledgerEvent = extractLedgerEventFromActionLog(profileId, entry)
+    if (ledgerEvent) ledger.push(ledgerEvent)
+  }
+
+  return { trades, ledger }
+}
+
+type ActionLogEntry = {
+  id: number | null
+  category: string
+  eventType: string
+  summary: string
+  createdAt: string | null
+  data: Record<string, unknown>
+}
+
+function extractActionLogEntries(data: unknown): ActionLogEntry[] {
+  if (!data || typeof data !== 'object') return []
+  const record = data as Record<string, unknown>
+  const entries = Array.isArray(record.entries)
+    ? record.entries
+    : Array.isArray((record.result as Record<string, unknown> | undefined)?.entries)
+      ? (record.result as Record<string, unknown>).entries as unknown[]
+      : []
+
+  return entries
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return null
+      const row = entry as Record<string, unknown>
+      return {
+        id: toFiniteNumber(row.id),
+        category: String(row.category ?? '').trim().toLowerCase(),
+        eventType: String(row.event_type ?? row.type ?? '').trim().toLowerCase(),
+        summary: String(row.summary ?? '').trim(),
+        createdAt: stringOrNull(row.created_at),
+        data: row.data && typeof row.data === 'object' ? row.data as Record<string, unknown> : {},
+      }
+    })
+    .filter((entry): entry is ActionLogEntry => entry !== null && Boolean(entry.eventType))
+}
+
+function extractTradeEventFromActionLog(profileId: string, entry: ActionLogEntry) {
+  const lowerType = entry.eventType
+  const lowerSummary = entry.summary.toLowerCase()
+  const side = inferTradeSide(entry.data, lowerType, lowerSummary)
+  if (!side) return null
+
+  const quantity = toFiniteNumber(
+    entry.data.quantity ?? entry.data.filled_quantity ?? entry.data.amount ?? entry.data.units ?? entry.data.order_quantity
+  )
+  if (quantity === null || quantity <= 0) return null
+
+  const itemName = String(
+    entry.data.item_name ?? entry.data.item ?? entry.data.resource_name ?? entry.data.good ?? entry.data.market_item_name ?? entry.data.item_id ?? ''
+  ).trim()
+  if (!itemName) return null
+
+  const unitPrice = toFiniteNumber(
+    entry.data.unit_price ?? entry.data.price_each ?? entry.data.price ?? entry.data.executed_price ?? entry.data.avg_fill_price
+  )
+  const totalPrice = toFiniteNumber(
+    entry.data.total_price ?? entry.data.total_earned ?? entry.data.total_spent ?? entry.data.value ?? entry.data.filled_total
+  )
+
+  return {
+    profile_id: profileId,
+    trade_type: side,
+    item_id: stringOrNull(entry.data.item_id),
+    item_name: itemName,
+    quantity,
+    unit_price: unitPrice,
+    total_price: totalPrice ?? (unitPrice !== null ? unitPrice * quantity : null),
+    system_name: stringOrNull(entry.data.system_name),
+    poi_name: stringOrNull(entry.data.poi_name ?? entry.data.station_name),
+    source_command: 'get_action_log',
+    source_event_id: entry.id,
+    source_event_type: entry.eventType,
+    raw_json: JSON.stringify(entry),
+  }
+}
+
+function extractLedgerEventFromActionLog(profileId: string, entry: ActionLogEntry) {
+  const eventType = entry.eventType
+  let amount: number | null = null
+
+  if (eventType === 'mission.rescue_payment_received') {
+    amount = toFiniteNumber(entry.data.amount ?? entry.data.credits ?? entry.data.payment)
+  } else if (eventType === 'mission.rescue_payment_sent') {
+    const value = toFiniteNumber(entry.data.amount ?? entry.data.credits ?? entry.data.payment)
+    amount = value === null ? null : -Math.abs(value)
+  } else if (eventType === 'combat.ship_destroyed') {
+    const fee = toFiniteNumber(entry.data.self_destruct_fee)
+    if (fee === null) return null
+    amount = -Math.abs(fee)
+  } else if (eventType === 'faction.mission_escrowed') {
+    const value = toFiniteNumber(entry.data.amount ?? entry.data.credits ?? entry.data.escrow_amount)
+    amount = value === null ? null : -Math.abs(value)
+  } else if (eventType === 'faction.mission_escrow_refunded') {
+    amount = toFiniteNumber(entry.data.amount ?? entry.data.credits ?? entry.data.escrow_amount)
+  } else {
+    return null
+  }
+
+  return {
+    profile_id: profileId,
+    category: entry.category || inferLedgerCategory(eventType),
+    event_type: eventType,
+    amount,
+    system_name: stringOrNull(entry.data.system_name),
+    poi_name: stringOrNull(entry.data.poi_name ?? entry.data.station_name),
+    source_command: 'get_action_log',
+    source_event_id: entry.id,
+    summary: entry.summary || null,
+    raw_json: JSON.stringify(entry),
+  }
+}
+
+function inferTradeSide(data: Record<string, unknown>, eventType: string, summary: string): 'buy' | 'sell' | null {
+  const explicit = String(data.trade_type ?? data.side ?? data.order_side ?? '').trim().toLowerCase()
+  if (explicit === 'buy' || explicit === 'sell') return explicit
+  if (eventType.includes('buy')) return 'buy'
+  if (eventType.includes('sell')) return 'sell'
+  if (summary.includes(' bought ') || summary.startsWith('bought ')) return 'buy'
+  if (summary.includes(' sold ') || summary.startsWith('sold ')) return 'sell'
+  return null
+}
+
+function inferLedgerCategory(eventType: string): string {
+  if (eventType.startsWith('mission.')) return 'mission'
+  if (eventType.startsWith('faction.')) return 'faction'
+  if (eventType.startsWith('combat.')) return 'combat'
+  return 'other'
 }
 
 function extractMarketEntries(data: unknown): Array<{

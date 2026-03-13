@@ -19,6 +19,21 @@ export interface TradeEventInput {
   system_name?: string | null
   poi_name?: string | null
   source_command?: string | null
+  source_event_id?: number | null
+  source_event_type?: string | null
+  raw_json?: string | null
+}
+
+export interface LedgerEventInput {
+  profile_id: string
+  category: string
+  event_type: string
+  amount: number | null
+  system_name?: string | null
+  poi_name?: string | null
+  source_command?: string | null
+  source_event_id?: number | null
+  summary?: string | null
   raw_json?: string | null
 }
 
@@ -52,6 +67,22 @@ export interface TradeEventRow {
   system_name: string | null
   poi_name: string | null
   source_command: string | null
+  source_event_id: number | null
+  source_event_type: string | null
+  occurred_at: string
+}
+
+export interface LedgerEventRow {
+  id: number
+  profile_id: string
+  category: string
+  event_type: string
+  amount: number | null
+  system_name: string | null
+  poi_name: string | null
+  source_command: string | null
+  source_event_id: number | null
+  summary: string | null
   occurred_at: string
 }
 
@@ -150,12 +181,36 @@ function migrate(db: Database): void {
       system_name TEXT,
       poi_name TEXT,
       source_command TEXT,
+      source_event_id INTEGER,
+      source_event_type TEXT,
       raw_json TEXT,
       occurred_at TEXT DEFAULT (datetime('now'))
     );
 
     CREATE INDEX IF NOT EXISTS idx_trade_events_profile_time ON trade_events(profile_id, occurred_at DESC);
     CREATE INDEX IF NOT EXISTS idx_trade_events_item_time ON trade_events(item_name, occurred_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_events_action_log_dedupe
+      ON trade_events(profile_id, source_command, source_event_id, trade_type, item_name, quantity, total_price);
+
+    CREATE TABLE IF NOT EXISTS ledger_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      profile_id TEXT NOT NULL,
+      category TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      amount REAL,
+      system_name TEXT,
+      poi_name TEXT,
+      source_command TEXT,
+      source_event_id INTEGER,
+      summary TEXT,
+      raw_json TEXT,
+      occurred_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_ledger_events_profile_time ON ledger_events(profile_id, occurred_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_ledger_events_event_type_time ON ledger_events(event_type, occurred_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_events_action_log_dedupe
+      ON ledger_events(profile_id, source_command, source_event_id, event_type, amount);
 
     CREATE TABLE IF NOT EXISTS market_snapshots (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -202,14 +257,23 @@ function migrate(db: Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_recipes_output_item ON recipes(output_item_name);
   `)
+
+  const tradeCols = db.query("PRAGMA table_info(trade_events)").all() as Array<{ name: string }>
+  if (!tradeCols.some(c => c.name === 'source_event_id')) {
+    db.exec('ALTER TABLE trade_events ADD COLUMN source_event_id INTEGER')
+  }
+  if (!tradeCols.some(c => c.name === 'source_event_type')) {
+    db.exec('ALTER TABLE trade_events ADD COLUMN source_event_type TEXT')
+  }
 }
 
 export function addTradeEvent(input: TradeEventInput): number {
   const result = getEconomyDb().query(
     `INSERT INTO trade_events (
       profile_id, trade_type, item_id, item_name, quantity, unit_price, total_price,
-      system_name, poi_name, source_command, raw_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      system_name, poi_name, source_command, source_event_id, source_event_type, raw_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT DO NOTHING`
   ).run(
     input.profile_id,
     input.trade_type,
@@ -221,6 +285,30 @@ export function addTradeEvent(input: TradeEventInput): number {
     input.system_name ?? null,
     input.poi_name ?? null,
     input.source_command ?? null,
+    input.source_event_id ?? null,
+    input.source_event_type ?? null,
+    input.raw_json ?? null,
+  )
+  return Number(result.lastInsertRowid)
+}
+
+export function addLedgerEvent(input: LedgerEventInput): number {
+  const result = getEconomyDb().query(
+    `INSERT INTO ledger_events (
+      profile_id, category, event_type, amount, system_name, poi_name, source_command,
+      source_event_id, summary, raw_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT DO NOTHING`
+  ).run(
+    input.profile_id,
+    input.category,
+    input.event_type,
+    input.amount ?? null,
+    input.system_name ?? null,
+    input.poi_name ?? null,
+    input.source_command ?? null,
+    input.source_event_id ?? null,
+    input.summary ?? null,
     input.raw_json ?? null,
   )
   return Number(result.lastInsertRowid)
@@ -268,12 +356,23 @@ export function addMarketSnapshot(input: MarketSnapshotInput): number {
 export function listTradeEvents(profileId: string, limit: number = 100): TradeEventRow[] {
   return getEconomyDb().query(
     `SELECT id, profile_id, trade_type, item_id, item_name, quantity, unit_price, total_price,
-            system_name, poi_name, source_command, occurred_at
+            system_name, poi_name, source_command, source_event_id, source_event_type, occurred_at
      FROM trade_events
      WHERE profile_id = ?
      ORDER BY occurred_at DESC, id DESC
      LIMIT ?`
   ).all(profileId, limit) as TradeEventRow[]
+}
+
+export function listLedgerEvents(profileId: string, limit: number = 100): LedgerEventRow[] {
+  return getEconomyDb().query(
+    `SELECT id, profile_id, category, event_type, amount, system_name, poi_name,
+            source_command, source_event_id, summary, occurred_at
+     FROM ledger_events
+     WHERE profile_id = ?
+     ORDER BY occurred_at DESC, id DESC
+     LIMIT ?`
+  ).all(profileId, limit) as LedgerEventRow[]
 }
 
 export function getLatestMarketSnapshot(profileId: string, category: string): { snapshot: MarketSnapshotRow; entries: MarketSnapshotEntryRow[] } | null {
@@ -333,7 +432,7 @@ export function getKnownPrice(itemName: string, profileId?: string): KnownPriceR
 export function listRecentTradesAllProfiles(limit: number = 200): TradeEventRow[] {
   return getEconomyDb().query(
     `SELECT id, profile_id, trade_type, item_id, item_name, quantity, unit_price, total_price,
-            system_name, poi_name, source_command, occurred_at
+            system_name, poi_name, source_command, source_event_id, source_event_type, occurred_at
      FROM trade_events
      ORDER BY occurred_at DESC, id DESC
      LIMIT ?`
@@ -533,5 +632,10 @@ export function pruneEconomyRows(): void {
   database.query(
     `DELETE FROM market_snapshots
      WHERE captured_at < datetime('now', ?)`
+  ).run(cutoffModifier)
+
+  database.query(
+    `DELETE FROM ledger_events
+     WHERE occurred_at < datetime('now', ?)`
   ).run(cutoffModifier)
 }

@@ -25,6 +25,7 @@ import {
   type ShipOffer as CatalogShipOffer,
   type SkillMap,
 } from './catalog'
+import { lookupShipKbRecord } from './ship-kb'
 
 const DEFAULT_INTERVAL_SEC = 45
 const MAX_CANDIDATES = 5
@@ -47,6 +48,7 @@ type Candidate = {
   routeSignals: string[]
   shipUpgradeSignals: string[]
   ownedShipSignals: string[]
+  fleetCleanupSignals: string[]
   adviceSignals: AdviceSignal[]
 }
 
@@ -134,6 +136,7 @@ class FleetSupervisor {
   private lastNudgeTextByProfile = new Map<string, string>()
   private shipUpgradeSignalsCache = new Map<string, { expiresAt: number; signals: string[] }>()
   private ownedShipSignalsCache = new Map<string, { expiresAt: number; signals: string[] }>()
+  private fleetCleanupSignalsCache = new Map<string, { expiresAt: number; signals: string[] }>()
   private verifiedCommandsCache = new Map<string, { expiresAt: number; commands: VerifiedCommands | null }>()
 
   start(): void {
@@ -261,9 +264,10 @@ class FleetSupervisor {
       const routeSignals = await this.buildRouteSignals(profile.server_url, status)
       const shipUpgradeSignals = await this.buildShipUpgradeSignals(profile, status)
       const ownedShipSignals = await this.buildOwnedShipSignals(profile, status)
+      const fleetCleanupSignals = await this.buildFleetCleanupSignals(profile, status)
       const verifiedCommands = await this.getVerifiedCommands(profile)
       const commandHintSignals = buildCommandHintSignals(logs, verifiedCommands)
-      const adviceSignals = buildAdviceSignals(status, recentSignals, routeSignals, shipUpgradeSignals, ownedShipSignals, verifiedCommands, loopSignal, commandHintSignals)
+      const adviceSignals = buildAdviceSignals(status, recentSignals, routeSignals, shipUpgradeSignals, ownedShipSignals, fleetCleanupSignals, verifiedCommands, loopSignal, commandHintSignals)
       const noisyState =
         status.mutation_state !== 'idle' ||
         recentSignals.length > 0 ||
@@ -271,6 +275,7 @@ class FleetSupervisor {
         routeSignals.length > 0 ||
         shipUpgradeSignals.length > 0 ||
         ownedShipSignals.length > 0 ||
+        fleetCleanupSignals.length > 0 ||
         adviceSignals.length > 0
       if (!noisyState) continue
 
@@ -286,6 +291,7 @@ class FleetSupervisor {
         routeSignals,
         shipUpgradeSignals,
         ownedShipSignals,
+        fleetCleanupSignals,
         adviceSignals,
       })
 
@@ -323,6 +329,23 @@ class FleetSupervisor {
 
     const signals = await computeOwnedShipSignals(profile, status)
     this.ownedShipSignalsCache.set(profile.id, {
+      expiresAt: Date.now() + SHIP_UPGRADE_CACHE_TTL_MS,
+      signals,
+    })
+    return signals
+  }
+
+  private async buildFleetCleanupSignals(
+    profile: Profile,
+    status: ReturnType<typeof agentManager.getStatus>,
+  ): Promise<string[]> {
+    const cached = this.fleetCleanupSignalsCache.get(profile.id)
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.signals
+    }
+
+    const signals = await computeFleetCleanupSignals(profile, status)
+    this.fleetCleanupSignalsCache.set(profile.id, {
       expiresAt: Date.now() + SHIP_UPGRADE_CACHE_TTL_MS,
       signals,
     })
@@ -570,6 +593,7 @@ function buildAdviceSignals(
   routeSignals: string[],
   shipUpgradeSignals: string[],
   ownedShipSignals: string[],
+  fleetCleanupSignals: string[],
   verifiedCommands: VerifiedCommands | null,
   loopSignal: LoopSignal,
   commandHintSignals: CommandHintSignal[],
@@ -787,6 +811,18 @@ function buildAdviceSignals(
       recommendedChecks: ['list_ships', 'get_ship'],
       recommendedActions: ['switch_ship'],
       whyNow: 'a stronger owned hull is already available and should be used first',
+    })
+  }
+
+  if (fleetCleanupSignals.length > 0) {
+    signals.push({
+      kind: 'sell_non_mining_ship',
+      priority: 71,
+      summary: 'Stored non-mining hulls are tying up value; sell the redundant ship once it is confirmed unnecessary for the mining plan.',
+      evidence: fleetCleanupSignals.slice(0, 1),
+      recommendedChecks: ['list_ships', 'get_ship'],
+      recommendedActions: ['sell_ship'],
+      whyNow: 'excess non-mining hulls can be converted into mining capital or fitting budget',
     })
   }
 
@@ -1087,6 +1123,57 @@ async function computeOwnedShipSignals(
   }
 }
 
+async function computeFleetCleanupSignals(
+  profile: Profile,
+  status: ReturnType<typeof agentManager.getStatus>,
+): Promise<string[]> {
+  if (!profile.username || !profile.password) return []
+  if (!isMiningFocusedProfile(profile)) return []
+
+  const connection = createGameConnection(profile)
+  try {
+    await connection.connect()
+    const login = await connection.login(profile.username || '', profile.password || '')
+    if (!login.success) return []
+
+    const resp = await connection.execute('list_ships', {})
+    if (resp.error) return []
+    const data = ((resp.structuredContent ?? resp.result) as Record<string, unknown> | undefined) || {}
+    const ships = Array.isArray(data.ships) ? data.ships : []
+
+    const candidates: Array<{ name: string; purpose: string; location: string | null; shipId: string }> = []
+    for (const item of ships) {
+      if (!item || typeof item !== 'object') continue
+      const record = item as Record<string, unknown>
+      if (record.is_active === true) continue
+
+      const name = stringifyShipValue(record.custom_name) || stringifyShipValue(record.class_name) || stringifyShipValue(record.class_id)
+      if (!name) continue
+      const kb = lookupShipKbRecord(name)
+      if (!kb || kb.purpose === 'mining') continue
+
+      candidates.push({
+        name,
+        purpose: kb.purpose,
+        location: stringifyShipValue(record.location) || stringifyShipValue(record.location_base_id),
+        shipId: stringifyShipValue(record.ship_id) || stringifyShipValue(record.id),
+      })
+    }
+
+    candidates.sort((a, b) => a.name.localeCompare(b.name))
+    const target = candidates[0]
+    if (!target) return []
+
+    return [
+      `stored non-mining ship can likely be liquidated: ${target.name}${target.location ? ` at ${target.location}` : ''}; purpose=${target.purpose}${target.shipId ? `; ship_id=${target.shipId}` : ''}`,
+    ]
+  } catch {
+    return []
+  } finally {
+    await connection.disconnect().catch(() => {})
+  }
+}
+
 async function pickUpgradeOffer(
   currentShip: ShipCatalogEntry,
   offers: ShipOffer[],
@@ -1218,6 +1305,11 @@ function parseShipCatalog(html: string): Map<string, ShipCatalogEntry> {
 
 function normalizeShipKey(value: string): string {
   return normalizeCatalogKey(value)
+}
+
+function isMiningFocusedProfile(profile: Profile): boolean {
+  const text = `${profile.name || ''}\n${profile.directive || ''}`.toLowerCase()
+  return /\bmine\b|\bmining\b|\bminer\b|\bore\b/.test(text)
 }
 
 function stringifyShipValue(value: unknown): string {

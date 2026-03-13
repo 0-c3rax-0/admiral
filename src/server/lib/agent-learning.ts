@@ -94,8 +94,20 @@ interface LastActionSnapshot {
 
 interface DecisionTelemetry {
   query_streak: number
+  same_query_streak: number
+  no_progress_streak: number
+  last_query_command: string | null
+  last_progress_at: string | null
   last_query_at: string | null
   last_mutation_at: string | null
+}
+
+export interface DecisionPressureSnapshot {
+  queryStreak: number
+  sameQueryStreak: number
+  noProgressStreak: number
+  lastQueryCommand: string | null
+  recommendation: string | null
 }
 
 export interface StructuredAgentMemory {
@@ -131,8 +143,8 @@ const ROLE_PRESETS: Record<AgentRole, RolePreset> = {
       'Do not travel to a resource node that the current loadout cannot actually mine.',
       'Optimize credits per tick through steady extraction and clean sell cycles.',
       'If undocked with an ore fit and cargo below 15%, prefer returning to a known compatible ore belt and restarting the mining loop.',
-      'If already at a compatible ore belt and cargo is below 85%, keep mining unless the location is depleted, yields collapse, cargo is full, or the fit does not match the node.',
-      'If cargo reaches roughly 85-90%, return to a known unload station, dock, refuel when needed, unload, and only craft items when a supported crafting action is actually available and worthwhile before leaving again.',
+      'If already at a compatible ore belt and cargo is below 95%, keep mining unless the location is depleted, yields collapse, cargo is full, or the fit does not match the node.',
+      'If cargo reaches roughly 95%, return to a known unload station, dock, refuel when needed, unload, and only craft items when a supported crafting action is actually available and worthwhile before leaving again.',
     ],
   },
   trader: {
@@ -199,7 +211,7 @@ const ROLE_PRESETS: Record<AgentRole, RolePreset> = {
     development_focus: ['route_planning', 'market_timing', 'risk_management', 'decision_efficiency'],
     playstyle: [
       'Blend mining, travel, trading, and missions based on current opportunity.',
-      'Use a practical mining loop when it is the best current option: start from low cargo, mine a compatible belt, return near 85-90% cargo, then process and sell efficiently while docked.',
+      'Use a practical mining loop when it is the best current option: start from low cargo, mine a compatible belt, return near 95% cargo, then process and sell efficiently while docked.',
     ],
   },
 }
@@ -368,7 +380,12 @@ export function recordCommandOutcome(
 
   if (isQuery) {
     memory.decision.query_streak += 1
+    memory.decision.same_query_streak = memory.decision.last_query_command === normalized
+      ? memory.decision.same_query_streak + 1
+      : 1
+    memory.decision.last_query_command = normalized
     memory.decision.last_query_at = ts
+    memory.decision.no_progress_streak += 1
     if (memory.decision.query_streak >= 3) {
       skillsChanged = adjustSkill(skills, 'query_discipline', -0.35 * memory.decision.query_streak) || skillsChanged
       skillsChanged = adjustSkill(skills, 'decision_efficiency', -0.25 * memory.decision.query_streak) || skillsChanged
@@ -379,6 +396,16 @@ export function recordCommandOutcome(
         ts,
       ) || changed
     }
+    if (memory.decision.same_query_streak >= 3) {
+      skillsChanged = adjustSkill(skills, 'query_discipline', -0.45 * memory.decision.same_query_streak) || skillsChanged
+      skillsChanged = adjustSkill(skills, 'decision_efficiency', -0.3 * memory.decision.same_query_streak) || skillsChanged
+      changed = confirmFailure(
+        memory,
+        `same_query_loop:${normalized}`,
+        `Stop repeating ${normalized}; switch to a narrower or more action-oriented next step.`,
+        ts,
+      ) || changed
+    }
   }
 
   if (isMutation) {
@@ -386,6 +413,8 @@ export function recordCommandOutcome(
     const prevMutationAt = memory.decision.last_mutation_at
     const secondsSinceMutation = prevMutationAt ? Math.max(0, (Date.parse(ts) - Date.parse(prevMutationAt)) / 1000) : null
     memory.decision.query_streak = 0
+    memory.decision.same_query_streak = 0
+    memory.decision.last_query_command = null
     memory.decision.last_mutation_at = ts
 
     if (queryStreak <= 2) {
@@ -457,6 +486,8 @@ export function recordCommandOutcome(
       success: true,
       ts,
     }
+    memory.decision.no_progress_streak = 0
+    memory.decision.last_progress_at = ts
     const location = deriveLocation(gameState)
     if (normalized === 'sell') {
       changed = pushEpisode(memory, {
@@ -495,11 +526,48 @@ export function recordCommandOutcome(
     }
   }
 
+  if (isMutation && !result.error && result.meta?.pending !== true) {
+    memory.decision.no_progress_streak = 0
+    memory.decision.last_progress_at = ts
+  }
+
+  if (memory.decision.no_progress_streak >= 4) {
+    skillsChanged = adjustSkill(skills, 'decision_efficiency', -0.35 * memory.decision.no_progress_streak) || skillsChanged
+    changed = confirmFailure(
+      memory,
+      'no_progress_query_chain',
+      'Break the query chain: verify the narrowest blocker once, then commit to one mutation or end the turn.',
+      ts,
+    ) || changed
+  }
+
   saveStructuredMemory(profileId, memory)
   if (skillsChanged) {
     upsertProfileSkills(profileId, skills)
   }
   return changed || skillsChanged
+}
+
+export function getDecisionPressureSnapshot(profileId: string): DecisionPressureSnapshot {
+  const memory = loadStructuredMemory(profileId)
+  const decision = memory.decision
+  let recommendation: string | null = null
+
+  if (decision.same_query_streak >= 3 && decision.last_query_command) {
+    recommendation = `Repeated ${decision.last_query_command} queries detected; avoid another broad refresh and switch to one narrower check or one concrete action.`
+  } else if (decision.no_progress_streak >= 4) {
+    recommendation = 'Several query steps produced no visible progress; stop gathering context and either execute one fitting mutation or wait for new state.'
+  } else if (decision.query_streak >= 4) {
+    recommendation = 'Query chain is growing; prefer one concrete next action instead of another routine status check.'
+  }
+
+  return {
+    queryStreak: decision.query_streak,
+    sameQueryStreak: decision.same_query_streak,
+    noProgressStreak: decision.no_progress_streak,
+    lastQueryCommand: decision.last_query_command,
+    recommendation,
+  }
 }
 
 function ensureAgentIdentity(profileId: string): AgentIdentity {
@@ -559,7 +627,15 @@ function loadStructuredMemory(profileId: string): StructuredAgentMemory {
         failures: Array.isArray(parsed.failures) ? parsed.failures.slice(0, MAX_FAILURES) : [],
         last_status: parsed.last_status || null,
         last_action: parsed.last_action || null,
-        decision: parsed.decision || { query_streak: 0, last_query_at: null, last_mutation_at: null },
+        decision: {
+          query_streak: parsed.decision?.query_streak || 0,
+          same_query_streak: parsed.decision?.same_query_streak || 0,
+          no_progress_streak: parsed.decision?.no_progress_streak || 0,
+          last_query_command: parsed.decision?.last_query_command || null,
+          last_progress_at: parsed.decision?.last_progress_at || null,
+          last_query_at: parsed.decision?.last_query_at || null,
+          last_mutation_at: parsed.decision?.last_mutation_at || null,
+        },
       }
     }
   } catch {
@@ -572,7 +648,15 @@ function loadStructuredMemory(profileId: string): StructuredAgentMemory {
     failures: [],
     last_status: null,
     last_action: null,
-    decision: { query_streak: 0, last_query_at: null, last_mutation_at: null },
+    decision: {
+      query_streak: 0,
+      same_query_streak: 0,
+      no_progress_streak: 0,
+      last_query_command: null,
+      last_progress_at: null,
+      last_query_at: null,
+      last_mutation_at: null,
+    },
   }
 }
 

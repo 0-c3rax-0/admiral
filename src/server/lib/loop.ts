@@ -634,16 +634,23 @@ async function summarizeViaLLM(
 
     const normalizedText = text.trim() || extractFallbackSummaryText(resp.content)
     if (!normalizedText) {
+      const reusedPreviousSummary = Boolean(previousSummary?.trim())
       const heuristic = buildHeuristicSummary(oldMessages, previousSummary)
       log?.(
         'system',
-        'Compaction summarizer returned empty output; reusing heuristic summary',
+        reusedPreviousSummary
+          ? 'Compaction summarizer returned empty output; reusing previous summary'
+          : 'Compaction summarizer returned empty output; reusing heuristic summary',
         JSON.stringify({
           phase: 'compaction_empty_summary',
           model: resp.model,
           provider: resp.provider,
-          previousSummaryAvailable: Boolean(previousSummary?.trim()),
+          previousSummaryAvailable: reusedPreviousSummary,
+          reusedPreviousSummary,
           heuristicLength: heuristic.length,
+          stopReason: resp.stopReason,
+          usage: resp.usage,
+          responseDiagnostics: extractCompactionResponseDiagnostics(resp.content),
         }, null, 2),
       )
       return heuristic
@@ -679,7 +686,7 @@ async function summarizeViaLLM(
   }
 }
 
-function extractFallbackSummaryText(content: AssistantMessage['content']): string {
+export function extractFallbackSummaryText(content: AssistantMessage['content']): string {
   const parts: string[] = []
   for (const block of content as any[]) {
     if (typeof block?.thinking === 'string' && block.thinking.trim()) {
@@ -724,11 +731,8 @@ function buildHeuristicSummary(oldMessages: Message[], previousSummary?: string)
   return lines.slice(-6).join('\n')
 }
 
-function extractCompactionErrorDiagnostics(err: unknown): Record<string, unknown> | null {
-  const anyErr = err as any
-  const resp = anyErr?.response || anyErr?.resp || anyErr?.result
-  const content = Array.isArray(resp?.content) ? resp.content : Array.isArray(anyErr?.content) ? anyErr.content : null
-  if (!content) return null
+export function extractCompactionResponseDiagnostics(content: AssistantMessage['content']): Record<string, unknown> | null {
+  if (!Array.isArray(content) || content.length === 0) return null
 
   return {
     blockCount: content.length,
@@ -742,6 +746,13 @@ function extractCompactionErrorDiagnostics(err: unknown): Record<string, unknown
       hasToolName: typeof block?.name === 'string' && block.name.trim().length > 0,
     })),
   }
+}
+
+function extractCompactionErrorDiagnostics(err: unknown): Record<string, unknown> | null {
+  const anyErr = err as any
+  const resp = anyErr?.response || anyErr?.resp || anyErr?.result
+  const content = Array.isArray(resp?.content) ? resp.content : Array.isArray(anyErr?.content) ? anyErr.content : null
+  return extractCompactionResponseDiagnostics(content)
 }
 
 function inferBlockType(block: any): string {

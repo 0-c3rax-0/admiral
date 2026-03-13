@@ -13,6 +13,7 @@ import { addStatsEvent, addStatsSnapshot, getPreference, listProfiles, pruneOldR
 import { pruneEconomyRows } from './lib/economy-db'
 import { agentManager } from './lib/agent-manager'
 import { syncKbMirrorOnStartup } from './lib/kb-mirror'
+import { syncShipKbCacheOnStartup } from './lib/ship-kb'
 import { syncSystemKbCacheOnStartup } from './lib/system-kb'
 import { registerServerForkRoutes, startServerForkServices } from '../fork/server'
 
@@ -71,10 +72,12 @@ if (isDev) {
 const port = parseInt(process.env.PORT || '3031')
 console.log(`Admiral listening on http://0.0.0.0:${port}`)
 
-void syncKbMirrorOnStartup().catch((err) => {
-  const msg = err instanceof Error ? err.message : String(err)
-  console.error(`[startup] KB mirror sync failed: ${msg}`)
-})
+void syncKbMirrorOnStartup()
+  .then(() => syncShipKbCacheOnStartup())
+  .catch((err) => {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(`[startup] KB mirror sync failed: ${msg}`)
+  })
 
 void syncSystemKbCacheOnStartup().catch((err) => {
   const msg = err instanceof Error ? err.message : String(err)
