@@ -5,6 +5,7 @@ import { normalizeCommandResult } from './command-meta'
 
 const RECONNECT_BASE_DELAY = 1000
 const RECONNECT_MAX_DELAY = 30_000
+const HANDSHAKE_FAILURE_BACKOFF_MS = 60_000
 const CONNECT_TIMEOUT = 10_000
 const COMMAND_TIMEOUT = 30_000
 const HEARTBEAT_INTERVAL = 15_000
@@ -45,6 +46,7 @@ export class WebSocketV2Connection implements GameConnection {
   private shouldReconnect = true
   private reauthInFlight: Promise<boolean> | null = null
   private reconnectInFlight: Promise<boolean> | null = null
+  private handshakeBackoffUntil = 0
   private lastPongAt = 0
   private lastMessageAt = 0
   private lastActivityAt = 0
@@ -67,29 +69,39 @@ export class WebSocketV2Connection implements GameConnection {
 
   async connect(): Promise<void> {
     this.shouldReconnect = true
+    if (Date.now() < this.handshakeBackoffUntil) {
+      throw new Error(`WebSocket handshake backoff active for ${Math.ceil((this.handshakeBackoffUntil - Date.now()) / 1000)}s`)
+    }
     return new Promise((resolve, reject) => {
+      const currentWs = this.ws = new WebSocket(this.wsUrl, { headers: { 'User-Agent': USER_AGENT } })
       let settled = false
       let connectTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
         if (settled) return
         settled = true
-        try { this.ws?.terminate() } catch { /* ignore */ }
+        try { currentWs.terminate() } catch { /* ignore */ }
         reject(new Error('WebSocket connection timed out during open handshake'))
       }, CONNECT_TIMEOUT)
       try {
-        this.ws = new WebSocket(this.wsUrl, { headers: { 'User-Agent': USER_AGENT } })
-        this.ws.on('unexpected-response', (_req, res) => {
+        currentWs.on('unexpected-response', (_req, res) => {
           if (!this.connected && !settled) {
             settled = true
             if (connectTimer) clearTimeout(connectTimer)
+            this.noteHandshakeFailure(`HTTP ${res.statusCode}`)
             reject(new Error(`WebSocket handshake failed: HTTP ${res.statusCode}`))
           }
         })
 
-        this.ws.onopen = () => {
-          const socket = (this.ws as WebSocket & { _socket?: { setNoDelay?: (noDelay?: boolean) => void } } | null)?._socket
+        currentWs.onopen = () => {
+          if (this.ws !== currentWs) return
+          const socket = (currentWs as WebSocket & { _socket?: { setNoDelay?: (noDelay?: boolean) => void } } | null)?._socket
           socket?.setNoDelay?.(true)
           this.connected = true
+          this.handshakeBackoffUntil = 0
           this.reconnectAttempt = 0
+          if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer)
+            this.reconnectTimer = null
+          }
           this.lastPongAt = Date.now()
           this.lastMessageAt = this.lastPongAt
           this.lastActivityAt = this.lastPongAt
@@ -104,7 +116,8 @@ export class WebSocketV2Connection implements GameConnection {
           resolve()
         }
 
-        this.ws.onmessage = (event) => {
+        currentWs.onmessage = (event) => {
+          if (this.ws !== currentWs) return
           this.lastMessageAt = Date.now()
           this.lastActivityAt = this.lastMessageAt
           this.heartbeatFallbackPending = false
@@ -121,9 +134,10 @@ export class WebSocketV2Connection implements GameConnection {
           }
         }
 
-        this.ws.on('pong', this.onPong)
+        currentWs.on('pong', this.onPong)
 
-        this.ws.onclose = (event) => {
+        currentWs.onclose = (event) => {
+          if (this.ws !== currentWs) return
           this.connected = false
           this.stopHeartbeat()
           const reason = event.reason ? `: ${event.reason}` : ''
@@ -132,18 +146,25 @@ export class WebSocketV2Connection implements GameConnection {
           if (!settled) {
             settled = true
             if (connectTimer) clearTimeout(connectTimer)
+            if (event.code === 1002 && String(event.reason || '').includes('Expected 101 status code')) {
+              this.noteHandshakeFailure(`close code ${event.code}`)
+            }
             reject(new Error(`WebSocket connection closed before open (code ${event.code}${reason})`))
           }
-          if (this.shouldReconnect) {
+          if (this.shouldReconnect && !this.reconnectInFlight) {
             this.scheduleReconnect()
           }
         }
 
-        this.ws.onerror = (err) => {
+        currentWs.onerror = (err) => {
+          if (this.ws !== currentWs) return
           this.logTransport('error', `WebSocket error: ${err.message}`)
           if (!this.connected && !settled) {
             settled = true
             if (connectTimer) clearTimeout(connectTimer)
+            if (err.message.includes('Expected 101 status code')) {
+              this.noteHandshakeFailure('Expected 101 status code')
+            }
             reject(new Error(`WebSocket connection failed: ${err.message}`))
           }
         }
@@ -374,7 +395,18 @@ export class WebSocketV2Connection implements GameConnection {
   }
 
   private scheduleReconnect(): void {
-    if (this.reconnectTimer) {
+    if (this.reconnectTimer || this.reconnectInFlight || !this.shouldReconnect) {
+      return
+    }
+
+    const now = Date.now()
+    if (now < this.handshakeBackoffUntil) {
+      const delay = Math.max(this.handshakeBackoffUntil - now, RECONNECT_BASE_DELAY)
+      this.logTransport('warn', `Handshake backoff active; delaying reconnect for ${delay}ms`)
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = null
+        this.scheduleReconnect()
+      }, delay)
       return
     }
 
@@ -461,6 +493,13 @@ export class WebSocketV2Connection implements GameConnection {
         }
       }
     }, HEARTBEAT_INTERVAL_BUSY)
+  }
+
+  private noteHandshakeFailure(reason: string): void {
+    const until = Date.now() + HANDSHAKE_FAILURE_BACKOFF_MS
+    if (until <= this.handshakeBackoffUntil) return
+    this.handshakeBackoffUntil = until
+    this.logTransport('warn', `WebSocket handshake instability detected (${reason}); backing off reconnects for ${Math.round(HANDSHAKE_FAILURE_BACKOFF_MS / 1000)}s`)
   }
 
   private stopHeartbeat(): void {

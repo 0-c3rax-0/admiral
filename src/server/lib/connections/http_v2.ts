@@ -243,14 +243,6 @@ export class HttpV2Connection implements GameConnection {
     return this.connected && !!this.session && !this.isSessionExpiring()
   }
 
-  /** Returns the v1 base URL when the v2 route map is unavailable. */
-  private get effectiveBaseUrl(): string {
-    if (this.commandRouteMap.size === 0) {
-      return this.baseUrl.replace(/\/api\/v2$/, '/api/v1')
-    }
-    return this.baseUrl
-  }
-
   private async ensureSession(): Promise<void> {
     if (this.session && !this.isSessionExpiring()) return
 
@@ -269,7 +261,7 @@ export class HttpV2Connection implements GameConnection {
     let lastError: Error | null = null
     for (let attempt = 0; attempt < MAX_RECONNECT_ATTEMPTS; attempt++) {
       try {
-        const resp = await fetch(`${this.effectiveBaseUrl}/session`, {
+        const resp = await fetch(`${this.baseUrl}/session`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
         })
@@ -306,16 +298,20 @@ export class HttpV2Connection implements GameConnection {
   }
 
   private async doRequest(command: string, payload?: Record<string, unknown>): Promise<CommandResult> {
-    const base = this.effectiveBaseUrl
     const route = this.commandRouteMap.get(command)
-    // v2: POST /api/v2/{tool}/{action}
-    // v1 fallback for unknown commands: POST /api/v1/{command}
-    const v1Base = this.baseUrl.replace(/\/api\/v2$/, '/api/v1')
-    const url = route ? `${base}/${route}` : `${v1Base}/${command}`
-    if (base !== this.baseUrl && !this.v1FallbackLogged) {
-      this.specLog?.('warn', 'v2 route map unavailable, falling back to v1 API endpoints')
-      this.v1FallbackLogged = true
+    if (!route) {
+      if (!this.v1FallbackLogged) {
+        this.specLog?.('warn', `Command '${command}' is not present in the v2 OpenAPI route map`)
+        this.v1FallbackLogged = true
+      }
+      return {
+        error: {
+          code: 'unknown_command',
+          message: `Command '${command}' is not available in the v2 OpenAPI command set.`,
+        },
+      }
     }
+    const url = `${this.baseUrl}/${route}`
     const headers: Record<string, string> = { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT }
     if (this.session) headers['X-Session-Id'] = this.session.id
 

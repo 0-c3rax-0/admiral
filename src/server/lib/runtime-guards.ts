@@ -22,6 +22,7 @@ type ProfileRuntimeState = {
   marketByLocationAndItem: Map<string, MarketSnapshotEntry>
   pendingBudget: PendingBudgetState | null
   blockedCommands: Map<string, number>
+  requireNavigationRefresh: boolean
 }
 
 const ZERO_FILL_TTL_MS = 15 * 60_000
@@ -40,6 +41,7 @@ function getState(profileId: string): ProfileRuntimeState {
       marketByLocationAndItem: new Map(),
       pendingBudget: null,
       blockedCommands: new Map(),
+      requireNavigationRefresh: false,
     }
     stateByProfile.set(profileId, state)
   }
@@ -123,6 +125,18 @@ export function clearPendingMutationSeen(profileId: string): void {
   getState(profileId).pendingBudget = null
 }
 
+export function markNavigationRefreshRequired(profileId: string): void {
+  getState(profileId).requireNavigationRefresh = true
+}
+
+export function clearNavigationRefreshRequired(profileId: string): void {
+  getState(profileId).requireNavigationRefresh = false
+}
+
+export function requiresNavigationRefresh(profileId: string): boolean {
+  return getState(profileId).requireNavigationRefresh
+}
+
 export function shouldThrottlePendingVerification(profileId: string, command: string): boolean {
   const normalized = normalize(command)
   if (normalized !== 'get_status' && normalized !== 'get_location') return false
@@ -155,6 +169,9 @@ export function ingestRuntimeNotification(profileId: string, notification: unkno
     const command = normalize(payload?.command)
     if (!payload) return
     clearPendingMutationSeen(profileId)
+    if (command === 'jump') {
+      markNavigationRefreshRequired(profileId)
+    }
     if (command === 'sell') {
       const quantitySold = Number(payload.result && typeof payload.result === 'object' ? (payload.result as Record<string, unknown>).quantity_sold ?? 0 : 0)
       const itemId = payload.result && typeof payload.result === 'object' ? String((payload.result as Record<string, unknown>).item_id ?? '') : ''

@@ -35,6 +35,17 @@ export interface Profile {
     trades_completed: number
     systems_explored: number
   } | null
+  last_storage_snapshot?: {
+    ts: string
+    station_id: string | null
+    station_name: string | null
+    wallet_credits: number | null
+    storage_credits: number | null
+    items: Array<{
+      item_id: string
+      quantity: number | null
+    }>
+  } | null
 }
 
 export interface LogEntry {

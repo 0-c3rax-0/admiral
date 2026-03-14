@@ -5,9 +5,20 @@ const LS_KEY = 'admiral-status-compact'
 
 interface Props {
   data: Record<string, unknown> | null
+  storage?: {
+    ts: string
+    station_id: string | null
+    station_name: string | null
+    wallet_credits: number | null
+    storage_credits: number | null
+    items: Array<{
+      item_id: string
+      quantity: number | null
+    }>
+  } | null
 }
 
-export function PlayerStatus({ data }: Props) {
+export function PlayerStatus({ data, storage = null }: Props) {
   const [compact, setCompact] = useState(() => {
     try { return localStorage.getItem(LS_KEY) === '1' } catch { return false }
   })
@@ -49,10 +60,23 @@ export function PlayerStatus({ data }: Props) {
       return itemId !== '' && !itemId.includes('ore') && !itemId.includes('ice') && !itemId.includes('gas')
     })
     .reduce((sum, item) => sum + toNum(item.quantity), 0)
+  const topStoredItem = storage?.items
+    ?.filter((item) => (item.quantity ?? 0) > 0)
+    .sort((a, b) => (b.quantity ?? 0) - (a.quantity ?? 0))[0] || null
+  const storedUnits = storage?.items.reduce((sum, item) => sum + toNum(item.quantity), 0) || 0
 
   const stats: { icon: React.ReactNode; label: string; value: string; sub?: string; color?: string }[] = [
     { icon: <MapPin size={12} />, label: 'Location', value: `${systemName}`, sub: String(poiName) },
     { icon: <DollarSign size={12} />, label: 'Credits', value: Number(player.credits || 0).toLocaleString(), color: 'var(--smui-yellow)' },
+    {
+      icon: <Package size={12} />,
+      label: 'Storage',
+      value: storage ? storedUnits.toLocaleString() : '-',
+      sub: storage
+        ? `${storage.station_name || storage.station_id || 'unknown'}${topStoredItem ? ` | ${topStoredItem.item_id} x${toNum(topStoredItem.quantity)}` : ''}`
+        : 'no snapshot',
+      color: 'var(--smui-frost-2)',
+    },
     { icon: <Heart size={12} />, label: 'Hull', value: `${ship.hull || 0}/${ship.max_hull || 0}`, color: 'var(--destructive)' },
     { icon: <Shield size={12} />, label: 'Shield', value: `${ship.shield || 0}/${ship.max_shield || 0}`, color: 'var(--primary)' },
     { icon: <Fuel size={12} />, label: 'Fuel', value: `${ship.fuel || 0}/${ship.max_fuel || 0}`, color: 'var(--smui-orange)' },
@@ -82,7 +106,7 @@ export function PlayerStatus({ data }: Props) {
 
   return (
     <div
-      className="group/status grid grid-cols-3 md:grid-cols-4 xl:grid-cols-6 2xl:grid-cols-11 gap-[1px] bg-border border-b border-border cursor-pointer hover:opacity-80 transition-opacity"
+      className="group/status flex items-stretch gap-[1px] bg-border border-b border-border cursor-pointer hover:opacity-80 transition-opacity overflow-x-auto"
       onClick={toggle}
     >
       {stats.map(s => <StatCard key={s.label} {...s} />)}
@@ -92,18 +116,18 @@ export function PlayerStatus({ data }: Props) {
 
 function StatCard({ icon, label, value, sub, color }: { icon: React.ReactNode; label: string; value: string; sub?: string; color?: string }) {
   return (
-    <div className="bg-card p-2.5 px-3">
-      <div className="flex items-center gap-1.5 mb-1">
+    <div className="bg-card p-2 px-2.5 min-w-[112px] shrink-0">
+      <div className="flex items-center gap-1 mb-0.5">
         <span style={color ? { color: `hsl(${color})` } : undefined} className={color ? '' : 'text-muted-foreground'}>{icon}</span>
-        <span className="text-[11px] text-muted-foreground tracking-[1.5px] uppercase">{label}</span>
+        <span className="text-[10px] text-muted-foreground tracking-[1.2px] uppercase">{label}</span>
       </div>
       <span
-        className="text-lg font-medium tracking-tight block"
+        className="text-[15px] leading-tight font-medium tracking-tight block"
         style={color ? { color: `hsl(${color})` } : undefined}
       >
         {value}
       </span>
-      {sub && <span className="text-[10px] text-muted-foreground mt-0.5 block truncate">{sub}</span>}
+      {sub && <span className="text-[9px] text-muted-foreground mt-0.5 block truncate">{sub}</span>}
     </div>
   )
 }

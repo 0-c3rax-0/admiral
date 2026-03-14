@@ -249,7 +249,7 @@ All fields admiral reads are confirmed correct against Go structs (handlers/info
 ## V1 vs V2 Notable Differences (from spec)
 
 - `name_ship` (v1) → `spacemolt_ship/rename_ship` (v2)
-- `deposit_credits` / `withdraw_credits` (v1) → need to locate in v2
+- `deposit_credits` / `withdraw_credits` (v1) → deprecated; no v2 equivalent because personal credits now live only in wallet
 - `buy_insurance` (v1) → `spacemolt_salvage/insure` (v2)
 - `get_insurance_quote` (v1) → `spacemolt_salvage/quote` (v2)
 - V2 adds `get_player`, `get_queue`, `get_state`, `get_version`, `get_ships`

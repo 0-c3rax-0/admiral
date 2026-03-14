@@ -115,7 +115,6 @@ export function getOpenApiSpecUrls(baseUrl: string): string[] {
 
   if (/\/api\/v2$/.test(normalizedBaseUrl)) {
     addUrl(`${normalizedBaseUrl}/openapi.json`)
-    addUrl(normalizedBaseUrl.replace(/\/api\/v2$/, '/api/openapi.json'))
     addUrl(CANONICAL_V2_SPEC_URL)
     return urls
   }
@@ -124,9 +123,8 @@ export function getOpenApiSpecUrls(baseUrl: string): string[] {
     const versionedSpecUrl = `${normalizedBaseUrl}/openapi.json`
     if (/\/api\/v1$/.test(normalizedBaseUrl)) {
       addUrl(normalizedBaseUrl.replace(/\/api\/v1$/, '/api/v2/openapi.json'))
-      addUrl(versionedSpecUrl)
-      addUrl(normalizedBaseUrl.replace(/\/api\/v1$/, '/api/openapi.json'))
       addUrl(CANONICAL_V2_SPEC_URL)
+      addUrl(versionedSpecUrl)
       return urls
     }
     addUrl(versionedSpecUrl)
@@ -140,9 +138,8 @@ export function getOpenApiSpecUrls(baseUrl: string): string[] {
   }
 
   addUrl(`${normalizedBaseUrl}/api/v2/openapi.json`)
-  addUrl(`${normalizedBaseUrl}/api/openapi.json`)
-  addUrl(`${normalizedBaseUrl}/openapi.json`)
   addUrl(CANONICAL_V2_SPEC_URL)
+  addUrl(`${normalizedBaseUrl}/openapi.json`)
   return urls
 }
 

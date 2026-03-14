@@ -15411,7 +15411,7 @@
     },
     "/create_sell_order": {
       "post": {
-        "description": "1% listing fee on the portion that goes on the order book. Instant fills incur no fee. Items escrowed from cargo first, then station storage. Accepts item_id or item name (e.g. 'Iron Ore'). Bulk mode: pass 'orders' array of {item_id, quantity, price_each} to create up to 50 orders in one call.\n\n**Example:** `{\"type\": \"create_sell_order\", \"payload\": {\"item_id\": \"iron_ore\", \"quantity\": 100, \"price_each\": 6}}`\n\n**Rate limited:** This is a mutation command (1 per tick / 10 seconds).",
+        "description": "1% listing fee on the portion that goes on the order book. Instant fills incur no fee. Items escrowed from cargo first, then station storage. Credits from filled sell orders are deposited directly to your wallet. Accepts item_id or item name (e.g. 'Iron Ore'). Bulk mode: pass 'orders' array of {item_id, quantity, price_each} to create up to 50 orders in one call.\n\n**Example:** `{\"type\": \"create_sell_order\", \"payload\": {\"item_id\": \"iron_ore\", \"quantity\": 100, \"price_each\": 6}}`\n\n**Rate limited:** This is a mutation command (1 per tick / 10 seconds).",
         "operationId": "create_sell_order",
         "requestBody": {
           "content": {
@@ -15592,7 +15592,7 @@
     },
     "/deposit_credits": {
       "post": {
-        "description": "Credits are removed from your wallet and stored at this station. Must be docked at a base with storage service.\n\n**Example:** `{\"type\": \"deposit_credits\", \"payload\": {\"amount\": 1000}}`\n\n**Rate limited:** This is a mutation command (1 per tick / 10 seconds).",
+        "description": "Deprecated. Personal credits now live exclusively in your wallet and are available everywhere. Station credit storage no longer exists, so this command returns an error.\n\n**Example:** `{\"type\": \"deposit_credits\", \"payload\": {\"amount\": 1000}}`\n\n**Rate limited:** This is a mutation command (1 per tick / 10 seconds).",
         "operationId": "deposit_credits",
         "requestBody": {
           "content": {
@@ -15659,7 +15659,7 @@
             "SessionId": []
           }
         ],
-        "summary": "Move credits from wallet to station storage",
+        "summary": "Deprecated: station credit deposits are no longer supported",
         "tags": [
           "storage"
         ],
@@ -15749,7 +15749,7 @@
     },
     "/distress_signal": {
       "post": {
-        "description": "Posts rescue missions at all stations in the nearest reachable system. Reward = fuel needed (1cr/unit) + jump bonus (500cr/jump). The reward is deducted from your wallet on rescue completion, falling back to station storage credits. You must be able to afford the rescue before the signal is accepted. Rescuers need a Refueling Pump module. Cannot be used while docked or when tank is full. Only one active distress signal at a time. Missions expire in 2 hours.\n\n**Example:** `{\"type\": \"distress_signal\"}`\n\n**Rate limited:** This is a mutation command (1 per tick / 10 seconds).",
+        "description": "Posts rescue missions at all stations in the nearest reachable system. Reward = fuel needed (1cr/unit) + jump bonus (500cr/jump). The reward is deducted from your wallet on rescue completion. You must be able to afford the rescue before the signal is accepted. Rescuers need a Refueling Pump module. Cannot be used while docked or when tank is full. Only one active distress signal at a time. Missions expire in 2 hours.\n\n**Example:** `{\"type\": \"distress_signal\"}`\n\n**Rate limited:** This is a mutation command (1 per tick / 10 seconds).",
         "operationId": "distress_signal",
         "responses": {
           "200": {
@@ -16811,7 +16811,7 @@
     },
     "/faction_deposit_credits": {
       "post": {
-        "description": "Any faction member can deposit credits. Tracked in the audit log.\n\n**Example:** `{\"type\": \"faction_deposit_credits\", \"payload\": {\"amount\": 1000}}`\n\n**Rate limited:** This is a mutation command (1 per tick / 10 seconds).",
+        "description": "Any faction member can deposit credits into the faction's global treasury. The balance is shared across all faction bases. Tracked in the audit log.\n\n**Example:** `{\"type\": \"faction_deposit_credits\", \"payload\": {\"amount\": 1000}}`\n\n**Rate limited:** This is a mutation command (1 per tick / 10 seconds).",
         "operationId": "faction_deposit_credits",
         "requestBody": {
           "content": {
@@ -16878,7 +16878,7 @@
             "SessionId": []
           }
         ],
-        "summary": "Transfer credits from your wallet to faction storage",
+        "summary": "Transfer credits from your wallet to the faction's global treasury",
         "tags": [
           "faction"
         ],
@@ -18583,7 +18583,7 @@
     },
     "/faction_withdraw_credits": {
       "post": {
-        "description": "Requires 'manage_treasury' permission. Tracked in the audit log.\n\n**Example:** `{\"type\": \"faction_withdraw_credits\", \"payload\": {\"amount\": 1000}}`\n\n**Rate limited:** This is a mutation command (1 per tick / 10 seconds).",
+        "description": "Requires 'manage_treasury' permission. Withdraws credits from the faction's global treasury, which is shared across all faction bases. Tracked in the audit log.\n\n**Example:** `{\"type\": \"faction_withdraw_credits\", \"payload\": {\"amount\": 1000}}`\n\n**Rate limited:** This is a mutation command (1 per tick / 10 seconds).",
         "operationId": "faction_withdraw_credits",
         "requestBody": {
           "content": {
@@ -18650,7 +18650,7 @@
             "SessionId": []
           }
         ],
-        "summary": "Transfer credits from faction storage to your wallet",
+        "summary": "Transfer credits from the faction's global treasury to your wallet",
         "tags": [
           "faction"
         ],
@@ -24714,7 +24714,7 @@
     },
     "/withdraw_credits": {
       "post": {
-        "description": "Credits are removed from storage and added to your wallet. Must be docked at a base with storage service.\n\n**Example:** `{\"type\": \"withdraw_credits\", \"payload\": {\"amount\": 1000}}`\n\n**Rate limited:** This is a mutation command (1 per tick / 10 seconds).",
+        "description": "Deprecated. Personal credits now live exclusively in your wallet and are available everywhere. Station credit storage no longer exists, so this command returns an error.\n\n**Example:** `{\"type\": \"withdraw_credits\", \"payload\": {\"amount\": 1000}}`\n\n**Rate limited:** This is a mutation command (1 per tick / 10 seconds).",
         "operationId": "withdraw_credits",
         "requestBody": {
           "content": {
@@ -24781,7 +24781,7 @@
             "SessionId": []
           }
         ],
-        "summary": "Move credits from station storage to wallet",
+        "summary": "Deprecated: station credit withdrawals are no longer supported",
         "tags": [
           "storage"
         ],

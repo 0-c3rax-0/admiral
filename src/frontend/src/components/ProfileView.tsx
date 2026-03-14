@@ -1116,7 +1116,7 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
       </div>
 
       {/* Player status */}
-      <PlayerStatus data={playerData} />
+      <PlayerStatus data={playerData} storage={profile.last_storage_snapshot || null} />
 
       {/* Quick commands + side pane toggle */}
       <QuickCommands

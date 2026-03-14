@@ -41,6 +41,7 @@ import {
 } from '../../fork/server'
 import { isDockedPoi, isResourcePoi, resolvePoiSnapshot } from './poi'
 import { ingestRuntimeNotification } from './runtime-guards'
+import { classifyMiningFit } from './mining-fit'
 import {
   applyCommissionQuotes,
   dedupeShipOffers,
@@ -66,6 +67,9 @@ const LOCAL_MUTATION_STUCK_THRESHOLD = 6
 const PENDING_WAIT_SLEEP_MS = 1500
 const PENDING_RECOVERY_VERIFY_COOLDOWN_MS = 8000
 const PENDING_RECOVERY_MAX_WAIT_MS = 25_000
+const RECONNECT_STORM_WINDOW_MS = 10 * 60_000
+const RECONNECT_STORM_THRESHOLD = 3
+const RECONNECT_STORM_COOLDOWN_MS = 60_000
 const HTTP_V2_FALLBACK_QUERY_COMMANDS = new Set([
   'get_status', 'get_location', 'get_system', 'get_poi', 'get_cargo', 'get_ship', 'get_skills',
   'get_missions', 'get_active_missions', 'get_nearby', 'get_action_log', 'view_market', 'analyze_market',
@@ -118,6 +122,11 @@ export class Agent {
   private pendingWaitStartedAt = 0
   private lastPendingVerificationAt = 0
   private pendingRecoveryReason: string | null = null
+  private recentReconnectAt: number[] = []
+  private reconnectStormCooldownUntil = 0
+  private miningAutopilotArmed = false
+  private miningAutopilotRunning = false
+  private miningAutopilotChainCount = 0
   constructor(profileId: string) {
     this.profileId = profileId
   }
@@ -242,6 +251,41 @@ export class Agent {
     if (reason) this.pendingRecoveryReason = reason
   }
 
+  private noteReconnectDuringPendingResolution(): void {
+    const now = Date.now()
+    this.recentReconnectAt = this.recentReconnectAt.filter((ts) => now - ts <= RECONNECT_STORM_WINDOW_MS)
+    this.recentReconnectAt.push(now)
+    if (this.recentReconnectAt.length < RECONNECT_STORM_THRESHOLD) return
+    const nextCooldownUntil = now + RECONNECT_STORM_COOLDOWN_MS
+    if (nextCooldownUntil <= this.reconnectStormCooldownUntil) return
+    this.reconnectStormCooldownUntil = nextCooldownUntil
+    this.log(
+      'system',
+      `Reconnect storm detected during pending action (${this.recentReconnectAt.length} reconnects in ${Math.round(RECONNECT_STORM_WINDOW_MS / 60_000)}m). Cooling navigation recovery for ${Math.round(RECONNECT_STORM_COOLDOWN_MS / 1000)}s before replanning.`,
+    )
+  }
+
+  private async queryPendingResolutionState(hasPendingNavigation: boolean): Promise<{
+    statusResp: CommandResult | null
+    locationResp: CommandResult | null
+    queueResp: CommandResult | null
+  }> {
+    const statusResp = await this.executeSilentQuery('get_status')
+    if (statusResp) this.cacheGameState(statusResp)
+    const locationResp = hasPendingNavigation ? await this.executeSilentQuery('get_location') : null
+    if (locationResp) this.cacheGameState(locationResp)
+    const profile = getProfile(this.profileId)
+    const queueResp = hasPendingNavigation && profile && (
+      profile.connection_mode === 'websocket_v2'
+      || profile.connection_mode === 'http_v2'
+      || profile.connection_mode === 'mcp_v2'
+    )
+      ? await this.executeSilentQuery('v2_get_queue')
+      : null
+    if (queueResp) this.cacheGameState(queueResp)
+    return { statusResp, locationResp, queueResp }
+  }
+
   private hasPendingServerResolution(): boolean {
     return this.pendingMutationObserved || !!getPendingNavigation(this.profileId)
   }
@@ -252,8 +296,105 @@ export class Agent {
       this.lastMutationAt = Date.now()
     }
 
+    if (command === 'mine' && !result.error && (result.meta?.pending || (result.result && typeof result.result === 'object' && (result.result as Record<string, unknown>).pending === true))) {
+      if (!this.miningAutopilotArmed) {
+        this.miningAutopilotChainCount = 0
+        this.log('system', 'Mining autopilot armed: first mine accepted, local chaining enabled until cargo/state stop condition.')
+      }
+      this.miningAutopilotArmed = true
+    } else if (command !== 'mine' && command !== 'get_status' && command !== 'get_location' && command !== 'get_cargo') {
+      if (this.miningAutopilotArmed) {
+        this.log('system', `Mining autopilot disarmed by command change: ${command}. chained_mines=${this.miningAutopilotChainCount}`)
+      }
+      this.miningAutopilotArmed = false
+      this.miningAutopilotChainCount = 0
+    }
+
     if (command === 'undock' && !result.error && (result.meta?.pending || (result.result && typeof result.result === 'object' && (result.result as Record<string, unknown>).pending === true))) {
       this.notePendingMutationObserved('undock pending; waiting for state change')
+    }
+  }
+
+  private parseActionResultCommand(notification: unknown): string | null {
+    if (!notification || typeof notification !== 'object') return null
+    const record = notification as Record<string, unknown>
+    const type = String(record.type || record.msg_type || '').toLowerCase()
+    if (type !== 'action_result') return null
+    const payload = record.payload && typeof record.payload === 'object' ? record.payload as Record<string, unknown> : null
+    const command = typeof payload?.command === 'string' ? payload.command.trim().toLowerCase() : ''
+    return command || null
+  }
+
+  private getCargoRatio(): number | null {
+    const cargo = this.getCargoUsage()
+    if (cargo.used === null || cargo.capacity === null || cargo.capacity <= 0) return null
+    return cargo.used / cargo.capacity
+  }
+
+  private canContinueMiningFromGameState(): boolean {
+    const location = (this._gameState?.location as Record<string, unknown> | undefined) || {}
+    const player = (this._gameState?.player as Record<string, unknown> | undefined) || {}
+    const modules = Array.isArray(this._gameState?.modules) ? this._gameState?.modules : []
+    const poi = resolvePoiSnapshot(location, player)
+    const fitKind = classifyMiningFit(modules)
+    if (isDockedPoi(poi.type, poi.name)) return false
+    if (!isResourcePoi(poi.type, poi.name)) return false
+    if (fitKind === 'none') return false
+    if (fitKind === 'mixed') return true
+    const poiType = String(poi.type || '').toLowerCase()
+    if (poiType.includes('asteroid')) return fitKind === 'ore'
+    if (poiType.includes('ice')) return fitKind === 'ice'
+    if (poiType.includes('gas')) return fitKind === 'gas'
+    return true
+  }
+
+  private async maybeContinueMiningAutopilot(notification: unknown): Promise<void> {
+    if (!this.connection || !this.miningAutopilotArmed || this.miningAutopilotRunning) return
+    if (this.parseActionResultCommand(notification) !== 'mine') return
+
+    this.miningAutopilotRunning = true
+    try {
+      const [cargoResp, locationResp] = await Promise.all([
+        this.executeSilentQuery('get_cargo'),
+        this.executeSilentQuery('get_location'),
+      ])
+      if (cargoResp) this.cacheGameState(cargoResp)
+      if (locationResp) this.cacheGameState(locationResp)
+
+      const cargoRatio = this.getCargoRatio()
+      if (cargoRatio !== null && cargoRatio >= 0.95) {
+        this.miningAutopilotArmed = false
+        this.log('system', `Mining autopilot stopped: cargo reached ${Math.round(cargoRatio * 100)}%. chained_mines=${this.miningAutopilotChainCount}`)
+        this.miningAutopilotChainCount = 0
+        return
+      }
+
+      if (!this.canContinueMiningFromGameState()) {
+        this.miningAutopilotArmed = false
+        this.log('system', `Mining autopilot stopped: current live state is no longer a compatible mining situation. chained_mines=${this.miningAutopilotChainCount}`)
+        this.miningAutopilotChainCount = 0
+        return
+      }
+
+      this.miningAutopilotChainCount += 1
+      this.log('system', `Mining autopilot: repeating mine without LLM because cargo/fit/location still qualify. chained_mines=${this.miningAutopilotChainCount}`)
+      const result = await this.connection.execute('mine')
+      this.cacheGameState(result)
+      this.noteCommandOutcome('mine', result)
+
+      const resultText = result.error
+        ? `Mining autopilot mine failed: ${result.error.code}: ${result.error.message}`
+        : 'Mining autopilot issued mine.'
+      this.log('tool_call', 'auto_mining: game(mine)')
+      this.log('tool_result', resultText, JSON.stringify(result, null, 2))
+
+      if (result.error) {
+        this.log('system', `Mining autopilot stopped: mine execution failed. chained_mines=${this.miningAutopilotChainCount}`)
+        this.miningAutopilotArmed = false
+        this.miningAutopilotChainCount = 0
+      }
+    } finally {
+      this.miningAutopilotRunning = false
     }
   }
 
@@ -299,10 +440,22 @@ export class Agent {
     const data = ((result?.structuredContent ?? result?.result) as Record<string, unknown> | undefined) || {}
     const queue = (data.queue as Record<string, unknown> | undefined) || {}
     const location = (data.location as Record<string, unknown> | undefined) || {}
+    const pendingNavigation = getPendingNavigation(this.profileId)
+    const currentTick = toFiniteNumber(
+      data.current_tick
+      ?? data.tick
+      ?? location.current_tick
+      ?? location.tick
+      ?? result?.meta?.tick,
+    )
+    const etaTick = pendingNavigation?.etaTick
+      ?? toFiniteNumber(location.transit_arrival_tick ?? data.transit_arrival_tick ?? location.arrival_tick ?? data.arrival_tick)
     if (queue.has_pending === true) return true
     if (location.in_transit === true) return true
-    if (toFiniteNumber(location.transit_arrival_tick) !== null) return true
-    if (toFiniteNumber(data.arrival_tick) !== null) return true
+    if (etaTick !== null && etaTick !== undefined) {
+      if (currentTick === null) return true
+      if (currentTick < etaTick) return true
+    }
     return false
   }
 
@@ -311,6 +464,12 @@ export class Agent {
 
     const now = Date.now()
     const waitMs = this.pendingWaitStartedAt > 0 ? now - this.pendingWaitStartedAt : 0
+    if (now < this.reconnectStormCooldownUntil) {
+      const remainingMs = this.reconnectStormCooldownUntil - now
+      this.setActivity('Cooling off after reconnect storm...')
+      await abortableSleep(Math.min(Math.max(remainingMs, PENDING_WAIT_SLEEP_MS), 5_000), this.abortController.signal)
+      return true
+    }
     const needsVerification = Boolean(this.pendingRecoveryReason)
       || waitMs >= PENDING_RECOVERY_MAX_WAIT_MS
       || this.loopsSincePendingMutation >= MUTATION_STALL_NUDGE_THRESHOLD
@@ -331,13 +490,12 @@ export class Agent {
     const recoveryReason = this.pendingRecoveryReason || 'pending action exceeded local wait threshold'
     this.setActivity('Verifying pending server state...')
 
-    const statusResp = await this.executeSilentQuery('get_status')
-    if (statusResp) this.cacheGameState(statusResp)
     const hasPendingNavigation = !!getPendingNavigation(this.profileId)
-    const locationResp = hasPendingNavigation ? await this.executeSilentQuery('get_location') : null
-    if (locationResp) this.cacheGameState(locationResp)
+    const { statusResp, locationResp, queueResp } = await this.queryPendingResolutionState(hasPendingNavigation)
 
-    const stillPending = this.commandResultStillPending(statusResp) || this.commandResultStillPending(locationResp)
+    const stillPending = this.commandResultStillPending(statusResp)
+      || this.commandResultStillPending(locationResp)
+      || this.commandResultStillPending(queueResp)
     if (stillPending) {
       this.notePendingMutationObserved()
       this.pendingRecoveryReason = null
@@ -580,13 +738,14 @@ export class Agent {
     }
 
     // Set up notification handler
-    this.connection.onNotification((n) => {
+      this.connection.onNotification((n) => {
       updatePendingNavigationFromNotification(this.profileId, n)
       ingestRuntimeNotification(this.profileId, n)
       ingestTradeNotification(this.profileId, n, this._gameState)
       if (isReconnectNotification(n)) {
         if (this.hasPendingServerResolution()) {
           this.pendingRecoveryReason = 'server reconnect notification during pending action'
+          this.noteReconnectDuringPendingResolution()
         }
         const detail = formatReconnectDetail(n)
         this.log('connection', formatNotificationSummary(n), detail ?? JSON.stringify(n, null, 2))
@@ -603,6 +762,10 @@ export class Agent {
         return
       }
       this.log('notification', formatNotificationSummary(n), JSON.stringify(n, null, 2))
+      void this.maybeContinueMiningAutopilot(n).catch((err) => {
+        this.miningAutopilotArmed = false
+        this.log('error', `Mining autopilot failed: ${err instanceof Error ? err.message : String(err)}`)
+      })
     })
 
     // Login if credentials exist

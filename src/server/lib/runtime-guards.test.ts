@@ -1,8 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  clearNavigationRefreshRequired,
   clearPendingMutationSeen,
   markPendingMutationSeen,
+  markNavigationRefreshRequired,
   notePendingVerification,
+  requiresNavigationRefresh,
   shouldThrottlePendingVerification,
 } from './runtime-guards'
 
@@ -30,5 +33,17 @@ describe('pending verification budget', () => {
     expect(shouldThrottlePendingVerification(profileId, 'get_location')).toBe(true)
 
     clearPendingMutationSeen(profileId)
+  })
+})
+
+describe('navigation refresh guard', () => {
+  test('tracks whether a post-jump verification is required', () => {
+    const profileId = `test-${Date.now()}-nav-refresh`
+
+    expect(requiresNavigationRefresh(profileId)).toBe(false)
+    markNavigationRefreshRequired(profileId)
+    expect(requiresNavigationRefresh(profileId)).toBe(true)
+    clearNavigationRefreshRequired(profileId)
+    expect(requiresNavigationRefresh(profileId)).toBe(false)
   })
 })

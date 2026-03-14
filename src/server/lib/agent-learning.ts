@@ -84,6 +84,20 @@ interface StatusSnapshot {
   cargo_capacity: number | null
 }
 
+interface StorageItemSnapshot {
+  item_id: string
+  quantity: number | null
+}
+
+interface StorageSnapshot {
+  ts: string
+  station_id: string | null
+  station_name: string | null
+  wallet_credits: number | null
+  storage_credits: number | null
+  items: StorageItemSnapshot[]
+}
+
 interface LastActionSnapshot {
   command: string
   args?: Record<string, unknown>
@@ -116,6 +130,7 @@ export interface StructuredAgentMemory {
   semantic: SemanticRule[]
   failures: FailurePattern[]
   last_status: StatusSnapshot | null
+  last_storage: StorageSnapshot | null
   last_action: LastActionSnapshot | null
   decision: DecisionTelemetry
 }
@@ -258,6 +273,21 @@ export function buildLearningContext(profileId: string): string {
   if (activeRules.length > 0) {
     lines.push('', '## Active Learned Rules', ...activeRules.map((entry) => `- ${entry.rule}`))
   }
+  if (memory.last_storage) {
+    const storage = memory.last_storage
+    const notableItems = storage.items
+      .filter((item) => (item.quantity ?? 0) > 0)
+      .sort((a, b) => (b.quantity ?? 0) - (a.quantity ?? 0))
+      .slice(0, 5)
+      .map((item) => `${item.item_id} x${Math.round(item.quantity ?? 0)}`)
+    lines.push('', '## Last Known Storage')
+    lines.push(`Station: ${storage.station_name || storage.station_id || 'unknown'}`)
+    lines.push(`Wallet credits: ${storage.wallet_credits ?? '?'}`)
+    if (storage.storage_credits !== null) lines.push(`Storage credits: ${storage.storage_credits}`)
+    if (notableItems.length > 0) {
+      lines.push(`Stored items: ${notableItems.join(', ')}`)
+    }
+  }
 
   return lines.join('\n')
 }
@@ -367,7 +397,7 @@ export function recordCommandOutcome(
   result: CommandResult,
   gameState: Record<string, unknown> | null,
 ): boolean {
-  const normalized = String(command || '').trim().toLowerCase()
+  const normalized = canonicalizeLearningCommand(String(command || '').trim().toLowerCase(), args)
   if (!normalized) return false
 
   const memory = loadStructuredMemory(profileId)
@@ -479,6 +509,18 @@ export function recordCommandOutcome(
         ts,
       ) || changed
     }
+    if (isRateLimitedResult(result)) {
+      const waitSeconds = extractRetryAfterSeconds(result)
+      skillsChanged = adjustSkill(skills, 'decision_efficiency', -0.5) || skillsChanged
+      changed = confirmFailure(
+        memory,
+        waitSeconds !== null ? `rate_limit_backoff:${waitSeconds}` : 'rate_limit_backoff',
+        waitSeconds !== null
+          ? `When the API returns a rate limit, wait at least ${waitSeconds}s before retrying instead of spamming nearby commands.`
+          : 'When the API returns a rate limit, slow down and avoid immediate retries.',
+        ts,
+      ) || changed
+    }
   } else {
     memory.last_action = {
       command: normalized,
@@ -523,6 +565,52 @@ export function recordCommandOutcome(
       skillsChanged = adjustSkill(skills, 'route_planning', 0.7) || skillsChanged
     } else if (normalized === 'refuel' || normalized === 'repair' || normalized === 'dock') {
       skillsChanged = adjustSkill(skills, 'risk_management', 0.5) || skillsChanged
+    } else if (normalized === 'storage_view') {
+      const storage = extractStorageSnapshot(result, gameState)
+      if (storage) {
+        const previousStorage = memory.last_storage
+        memory.last_storage = storage
+        changed = pushEpisode(memory, {
+          id: episodeId('storage'),
+          kind: 'storage_snapshot',
+          summary: `Viewed storage at ${storage.station_name || storage.station_id || 'unknown station'} with ${storage.items.filter((item) => (item.quantity ?? 0) > 0).length} stored item stacks.`,
+          confidence: 0.7,
+          ts,
+        }) || changed
+
+        if (storage.items.some((item) => (item.quantity ?? 0) > 0)) {
+          changed = confirmRule(
+            memory,
+            'Before spending wallet credits on upgrades, check whether station storage already holds useful inventory that can support the next step.',
+            0.64,
+            ts,
+          ) || changed
+        }
+
+        if (previousStorage && storage.station_id && previousStorage.station_id === storage.station_id) {
+          const previousTotal = sumStorageItems(previousStorage.items)
+          const nextTotal = sumStorageItems(storage.items)
+          if (nextTotal > previousTotal) {
+            changed = confirmRule(
+              memory,
+              `${storage.station_name || storage.station_id} is a viable batching station for unloading cargo before a later market action.`,
+              0.68,
+              ts,
+            ) || changed
+            skillsChanged = adjustSkill(skills, 'inventory_discipline', 0.8) || skillsChanged
+          }
+        }
+      }
+    } else if (normalized === 'storage_deposit') {
+      skillsChanged = adjustSkill(skills, 'inventory_discipline', 0.9) || skillsChanged
+      changed = confirmRule(
+        memory,
+        'When docked and market conditions are weak, depositing cargo into station storage is usually better than repeating bad instant sells.',
+        0.74,
+        ts,
+      ) || changed
+    } else if (normalized === 'storage_withdraw') {
+      skillsChanged = adjustSkill(skills, 'inventory_discipline', 0.4) || skillsChanged
     }
   }
 
@@ -568,6 +656,17 @@ export function getDecisionPressureSnapshot(profileId: string): DecisionPressure
     lastQueryCommand: decision.last_query_command,
     recommendation,
   }
+}
+
+export function getLatestStorageSnapshot(profileId: string): {
+  ts: string
+  station_id: string | null
+  station_name: string | null
+  wallet_credits: number | null
+  storage_credits: number | null
+  items: Array<{ item_id: string; quantity: number | null }>
+} | null {
+  return loadStructuredMemory(profileId).last_storage
 }
 
 function ensureAgentIdentity(profileId: string): AgentIdentity {
@@ -626,6 +725,7 @@ function loadStructuredMemory(profileId: string): StructuredAgentMemory {
         semantic: Array.isArray(parsed.semantic) ? parsed.semantic.slice(0, MAX_RULES) : [],
         failures: Array.isArray(parsed.failures) ? parsed.failures.slice(0, MAX_FAILURES) : [],
         last_status: parsed.last_status || null,
+        last_storage: parsed.last_storage || null,
         last_action: parsed.last_action || null,
         decision: {
           query_streak: parsed.decision?.query_streak || 0,
@@ -647,6 +747,7 @@ function loadStructuredMemory(profileId: string): StructuredAgentMemory {
     semantic: [],
     failures: [],
     last_status: null,
+    last_storage: null,
     last_action: null,
     decision: {
       query_streak: 0,
@@ -739,6 +840,30 @@ function deriveCountermeasure(command: string, code: string): string {
   return `Treat ${command} ${code} as planning feedback, refresh state, and avoid repeating the blocked action.`
 }
 
+function canonicalizeLearningCommand(command: string, args?: Record<string, unknown>): string {
+  if (command === 'get_market') return 'view_market'
+  if (command === 'cancel_mission') return 'abandon_mission'
+  if (command === 'get_list_ships') return 'list_ships'
+  if (command === 'get_recipes') return 'catalog'
+  if (command === 'get_guide') return 'help'
+  if (command === 'get_insurance_quote') return 'salvage_quote'
+  if (command === 'deposit_items') return 'storage_deposit'
+  if (command === 'withdraw_items') return 'storage_withdraw'
+  if (command === 'view_storage') return 'storage_view'
+  if (command === 'storage') {
+    const action = typeof args?.action === 'string' ? args.action.trim().toLowerCase() : ''
+    if (action === 'deposit') return 'storage_deposit'
+    if (action === 'withdraw') return 'storage_withdraw'
+    return 'storage_view'
+  }
+  if (command === 'faction_create_role') return 'faction_admin_create_role'
+  if (command === 'faction_intel_status') return 'intel_status'
+  if (command === 'faction_query_intel') return 'query_intel'
+  if (command === 'faction_query_trade_intel') return 'query_trade_intel'
+  if (command === 'faction_trade_intel_status') return 'trade_intel_status'
+  return command
+}
+
 function confirmRule(memory: StructuredAgentMemory, rule: string, confidence: number, ts: string): boolean {
   const existing = memory.semantic.find((entry) => entry.rule === rule)
   if (existing) {
@@ -755,6 +880,52 @@ function confirmRule(memory: StructuredAgentMemory, rule: string, confidence: nu
   })
   memory.semantic = memory.semantic.slice(0, MAX_RULES)
   return true
+}
+
+function extractStorageSnapshot(result: CommandResult, gameState: Record<string, unknown> | null): StorageSnapshot | null {
+  const record = ((result.structuredContent ?? result.result) as Record<string, unknown> | undefined) || {}
+  if (!record || typeof record !== 'object') return null
+
+  const player = ((gameState?.player as Record<string, unknown> | undefined) || {})
+  const itemCandidates = [record.items, record.storage, record.inventory]
+  let items: StorageItemSnapshot[] = []
+  for (const candidate of itemCandidates) {
+    if (!Array.isArray(candidate)) continue
+    items = candidate
+      .filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === 'object')
+      .map((entry) => ({
+        item_id: toText(entry.item_id) || toText(entry.id) || toText(entry.name) || 'unknown_item',
+        quantity: toNum(entry.quantity ?? entry.amount ?? entry.count),
+      }))
+    if (items.length > 0) break
+  }
+
+  return {
+    ts: new Date().toISOString(),
+    station_id: toText(record.station_id) || toText(record.base_id),
+    station_name: toText(record.station_name) || toText(record.base_name) || toText(record.station),
+    wallet_credits: toNum(player.credits),
+    storage_credits: toNum(record.credits ?? record.storage_credits ?? record.balance),
+    items,
+  }
+}
+
+function sumStorageItems(items: StorageItemSnapshot[]): number {
+  return items.reduce((sum, item) => sum + (item.quantity ?? 0), 0)
+}
+
+function extractRetryAfterSeconds(result: CommandResult): number | null {
+  const direct = toNum(result.error?.retry_after ?? result.error?.wait_seconds)
+  if (direct !== null) return direct
+  const message = result.error?.message || ''
+  const match = message.match(/\b(?:retry[_ ]after|wait(?:_seconds)?)[^\d]{0,8}(\d+)\b/i) || message.match(/\b(\d+)\s*s(?:ec(?:ond)?s?)?\b/i)
+  return match ? Number(match[1]) : null
+}
+
+function isRateLimitedResult(result: CommandResult): boolean {
+  const code = String(result.error?.code || '').toLowerCase()
+  const message = String(result.error?.message || '').toLowerCase()
+  return code.includes('429') || code.includes('rate') || message.includes('429') || message.includes('rate limit')
 }
 
 function confirmFailure(memory: StructuredAgentMemory, pattern: string, countermeasure: string, ts: string): boolean {

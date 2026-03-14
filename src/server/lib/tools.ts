@@ -9,10 +9,13 @@ import { classifyPoi, resolvePoiSnapshot } from './poi'
 import { lookupKbPoiKind } from './system-kb'
 import {
   clearPendingMutationSeen,
+  clearNavigationRefreshRequired,
   getMarketSnapshot,
   isCommandTemporarilyBlocked,
   markPendingMutationSeen,
+  markNavigationRefreshRequired,
   notePendingVerification,
+  requiresNavigationRefresh,
   rememberMarketSnapshot,
   rememberUnknownCommand,
   shouldBlockZeroFillSell,
@@ -156,6 +159,11 @@ export async function executeTool(
       commandArgs = groupedRewrite.args
       ctx.log('system', groupedRewrite.message)
     }
+    const placeholderResolution = resolveDynamicArgumentPlaceholders(command, commandArgs, ctx.gameState)
+    if (placeholderResolution.changed) {
+      commandArgs = placeholderResolution.args
+      ctx.log('system', placeholderResolution.message)
+    }
     const verifiedCommandError = await validateVerifiedGameCommand(ctx.profileId, command, ctx.connection)
     if (verifiedCommandError) {
       ctx.log('system', verifiedCommandError.systemMessage)
@@ -217,6 +225,11 @@ export async function executeTool(
 
     if (resp.error) {
       let errMsg = formatCommandError(command, resp.error.code, resp.error.message)
+      const backoffMessage = formatBackoffHint(resp)
+      if (backoffMessage) {
+        ctx.log('system', backoffMessage)
+        errMsg += `\n${backoffMessage}`
+      }
       if (resp.error.code === 'unknown_command' || resp.error.code === 'invalid_command') {
         rememberUnknownCommand(ctx.profileId, command)
         const suggestions = await suggestCommands(ctx.profileId, command, ctx.connection)
@@ -233,8 +246,12 @@ export async function executeTool(
     reconcilePendingNavigationWithStatus(ctx.profileId, resp)
     if (resp.meta?.pending || (resp.result && typeof resp.result === 'object' && (resp.result as Record<string, unknown>).pending === true)) {
       markPendingMutationSeen(ctx.profileId)
+      if (command === 'jump') markNavigationRefreshRequired(ctx.profileId)
     } else if (command !== 'get_status' && command !== 'get_location') {
       clearPendingMutationSeen(ctx.profileId)
+    }
+    if (command === 'get_status' || command === 'get_location') {
+      clearNavigationRefreshRequired(ctx.profileId)
     }
     const refreshedGameState = mergeGameStateSnapshot(ctx.gameState, resp)
     if (refreshedGameState) ctx.gameState = refreshedGameState
@@ -306,8 +323,21 @@ async function validateLocalGameCommand(
   }
 
   if (command === 'travel') {
+    if (requiresNavigationRefresh(profileId)) {
+      return {
+        systemMessage: 'Blocked travel locally: a successful jump requires one fresh location/status verification before any next navigation mutation.',
+        errorMessage: 'Error: [navigation_refresh_required] Refresh with get_location or get_status after the jump before sending travel. Do not chain a POI travel onto a jump without a fresh verified location.',
+      }
+    }
     const travelGuard = await validateTravelAgainstMiningFit(args, gameState)
     if (travelGuard) return travelGuard
+  }
+
+  if (command === 'jump' && requiresNavigationRefresh(profileId)) {
+    return {
+      systemMessage: 'Blocked jump locally: a successful jump still needs a fresh location/status verification before issuing another navigation mutation.',
+      errorMessage: 'Error: [navigation_refresh_required] Refresh with get_location or get_status after the previous jump before issuing another jump.',
+    }
   }
 
   if (command === 'search_systems') {
@@ -602,6 +632,12 @@ async function validateTravelAgainstMiningFit(
 
   const targetPoi = pickFirstStringArg(args.target_poi, args.poi_id, args.poi, args.poi_name, args.destination, args.target)
   if (!targetPoi) return null
+  if (looksLikeCombinedDestination(targetPoi)) {
+    return {
+      systemMessage: `Blocked travel locally: target POI '${targetPoi}' looks like a combined system/POI string instead of a single destination id.`,
+      errorMessage: `Error: [invalid_payload] Travel expects exactly one POI id or name in target_poi. '${targetPoi}' looks like a combined system/POI string; first jump to the system, then travel using only the POI id or POI name.`,
+    }
+  }
 
   let targetKind = classifyPoi(targetPoi, targetPoi)
   if (!['ore', 'ice', 'gas'].includes(targetKind)) {
@@ -673,6 +709,12 @@ function validateMineAgainstLiveState(
   }
 
   return null
+}
+
+function looksLikeCombinedDestination(value: string): boolean {
+  const trimmed = value.trim()
+  if (!trimmed) return false
+  return /\s\/\s/.test(trimmed) || /\s->\s/.test(trimmed)
 }
 
 async function suggestCommands(profileId: string, attempted: string, connection: GameConnection): Promise<string[]> {
@@ -752,6 +794,29 @@ function rewriteGroupedCommandInvocation(
     command: resolvedCommand,
     args: { ...(args || {}), action },
     message: `Expanded grouped command alias: ${original} -> storage(action=${action})`,
+  }
+}
+
+function resolveDynamicArgumentPlaceholders(
+  command: string,
+  args: Record<string, unknown> | undefined,
+  gameState: Record<string, unknown> | null | undefined,
+): { changed: boolean; args: Record<string, unknown> | undefined; message: string } {
+  if (!args || !gameState) return { changed: false, args, message: '' }
+
+  const next = Object.fromEntries(
+    Object.entries(args).map(([key, value]) => [key, resolveDynamicValue(value, gameState)]),
+  )
+  const changedKeys = Object.keys(next)
+    .filter((key) => JSON.stringify(next[key]) !== JSON.stringify(args[key]))
+    .map((key) => `${key}=${typeof next[key] === 'string' ? next[key] : JSON.stringify(next[key])}`)
+
+  if (changedKeys.length === 0) return { changed: false, args, message: '' }
+
+  return {
+    changed: true,
+    args: next,
+    message: `Resolved runtime placeholders for ${command}: ${changedKeys.join(', ')}`,
   }
 }
 
@@ -912,11 +977,50 @@ export function resolveExplicitCommandAlias(input: string, names: string[]): str
     return chooseFirstAvailable('abandon_mission')
   }
 
+  if (input === 'get_market') {
+    return chooseFirstAvailable('view_market')
+  }
+
   if (input === 'storage_deposit' || input === 'storage_withdraw' || input === 'storage_view') {
     return chooseFirstAvailable(input, 'storage')
   }
 
   return null
+}
+
+function resolveDynamicValue(value: unknown, gameState: Record<string, unknown>): unknown {
+  if (typeof value === 'string') return resolveDynamicString(value, gameState)
+  if (Array.isArray(value)) return value.map((entry) => resolveDynamicValue(entry, gameState))
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, entry]) => [key, resolveDynamicValue(entry, gameState)]),
+    )
+  }
+  return value
+}
+
+function resolveDynamicString(value: string, gameState: Record<string, unknown>): string {
+  const trimmed = value.trim()
+  if (!trimmed.startsWith('$')) return value
+
+  const location = ((gameState.location as Record<string, unknown> | undefined) || {})
+  const player = ((gameState.player as Record<string, unknown> | undefined) || {})
+  const poi = ((gameState.poi as Record<string, unknown> | undefined) || {})
+  const snapshot = resolvePoiSnapshot(location, player)
+
+  const replacements: Record<string, string | null> = {
+    '$current_system': pickFirstStringArg(location.system_name, location.system_id, player.current_system),
+    '$current_poi': pickFirstStringArg(location.poi_name, location.poi_id, player.current_poi),
+    '$current_poi_id': pickFirstStringArg(location.poi_id, poi.id),
+    '$current_poi_name': pickFirstStringArg(location.poi_name, poi.name, player.current_poi),
+    '$current_poi_type': pickFirstStringArg(location.poi_type, poi.type, typeof snapshot.type === 'string' ? snapshot.type : null),
+    '$docked_station': pickFirstStringArg(location.docked_at, location.poi_name, player.current_poi),
+    '$found_poi': pickFirstStringArg(poi.id, poi.name, location.poi_id, location.poi_name, player.current_poi),
+    '$found_poi_id': pickFirstStringArg(poi.id, location.poi_id),
+    '$found_poi_name': pickFirstStringArg(poi.name, location.poi_name, player.current_poi),
+  }
+
+  return replacements[trimmed] ?? value
 }
 
 function sanitizeCommandName(value: string): string {
@@ -1321,6 +1425,27 @@ function formatCommandError(command: string, code: string, message: string): str
   }
 
   return prefix
+}
+
+function formatBackoffHint(resp: CommandResult): string | null {
+  if (!resp.error) return null
+  const code = String(resp.error.code || '').toLowerCase()
+  const message = String(resp.error.message || '').toLowerCase()
+  const isRateLimit = code.includes('429') || code.includes('rate') || message.includes('429') || message.includes('rate limit')
+  const waitSeconds = toFiniteNumber(resp.error.retry_after ?? resp.error.wait_seconds)
+
+  if (isRateLimit) {
+    if (waitSeconds !== null && waitSeconds > 0) {
+      return `Backoff hint: the server asked for a ${waitSeconds}s pause before the next retry. Prefer waiting or switching turns instead of repeating the same command immediately.`
+    }
+    return 'Backoff hint: the server signaled rate pressure. Slow down and avoid immediate retries of nearby commands.'
+  }
+
+  if (code === 'action_pending') {
+    return 'Backoff hint: the previous mutation is still pending. Wait for the next tick or a fresh notification before sending another mutation.'
+  }
+
+  return null
 }
 
 function annotateNotification(tag: string, message: string): string {

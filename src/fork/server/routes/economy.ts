@@ -362,8 +362,8 @@ async function buildMarketHints(stationId: string, category: string, hours: numb
       const recentLow = prices.length > 0 ? prices[0] : null
       const recentHigh = prices.length > 0 ? prices[prices.length - 1] : null
       const tradeCount = itemFills.length
-      const confidence = deriveConfidence(tradeCount, instantSellPrice, recentFillMedian)
-      const recommendation = deriveRecommendation(instantSellPrice, recentFillMedian, bestAsk)
+      const confidence = deriveConfidence(tradeCount, instantSellPrice, recentFillMedian, bestAsk)
+      const recommendation = deriveRecommendation(tradeCount, instantSellPrice, recentFillMedian, bestAsk)
 
       return {
         item_id: itemId,
@@ -408,18 +408,49 @@ function median(values: number[]): number | null {
   return Math.round((left + right) / 2)
 }
 
-function deriveConfidence(tradeCount: number, instantSellPrice: number | null, recentFillMedian: number | null): 'low' | 'medium' | 'high' {
-  if (tradeCount >= 8 && instantSellPrice !== null && recentFillMedian !== null) return 'high'
-  if (tradeCount >= 3 || instantSellPrice !== null || recentFillMedian !== null) return 'medium'
+function deriveConfidence(
+  tradeCount: number,
+  instantSellPrice: number | null,
+  recentFillMedian: number | null,
+  bestAsk: number | null,
+): 'low' | 'medium' | 'high' {
+  if (
+    tradeCount >= 8
+    && recentFillMedian !== null
+    && (
+      (instantSellPrice !== null && instantSellPrice >= recentFillMedian * 0.85)
+      || (bestAsk !== null && bestAsk >= recentFillMedian * 0.85)
+    )
+  ) {
+    return 'high'
+  }
+  if (tradeCount >= 3 || recentFillMedian !== null || instantSellPrice !== null || bestAsk !== null) return 'medium'
   return 'low'
 }
 
 function deriveRecommendation(
+  tradeCount: number,
   instantSellPrice: number | null,
   recentFillMedian: number | null,
   bestAsk: number | null,
 ): 'sell_now' | 'list_near_market' | 'hold' {
-  if (instantSellPrice !== null && instantSellPrice > 0) return 'sell_now'
+  if (instantSellPrice !== null) {
+    if (recentFillMedian !== null) {
+      if (tradeCount >= 5 && instantSellPrice >= recentFillMedian * 0.9) return 'sell_now'
+      if (instantSellPrice >= recentFillMedian * 0.75) return 'list_near_market'
+      return 'hold'
+    }
+
+    if (bestAsk !== null) {
+      if (instantSellPrice >= bestAsk * 0.95) return 'sell_now'
+      if (instantSellPrice >= bestAsk * 0.8) return 'list_near_market'
+      return 'hold'
+    }
+
+    if (tradeCount >= 3) return 'sell_now'
+    return instantSellPrice >= 10 ? 'sell_now' : 'hold'
+  }
+
   if (recentFillMedian !== null || bestAsk !== null) return 'list_near_market'
   return 'hold'
 }

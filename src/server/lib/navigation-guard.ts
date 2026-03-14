@@ -5,6 +5,7 @@ type PendingNavigation = {
   command: 'travel' | 'jump'
   destination?: string
   createdAtMs: number
+  etaTick?: number
 }
 
 const pendingByProfile = new Map<string, PendingNavigation>()
@@ -65,6 +66,7 @@ export function updatePendingNavigationFromResult(profileId: string, command: st
       command: command as 'travel' | 'jump',
       destination: resolveDestination(command, args),
       createdAtMs: Date.now(),
+      etaTick: result.meta?.eta_tick,
     }
     pendingByProfile.set(profileId, pending)
     setPendingMutation(profileId, pending.command, pending.destination)

@@ -2,6 +2,7 @@ import type { Profile } from '../../shared/types'
 import { getStatsDelta1h, upsertProfileSkills } from './db'
 import { addLedgerEvent, addMarketSnapshot, addTradeEvent } from './economy-db'
 import { getAgentRole } from './agent-learning'
+import { getLatestStorageSnapshot } from './agent-learning'
 import type { CommandResult } from './connections/interface'
 import { is429PredictionEnabled, predict429Risk } from './loop'
 import { agentManager } from './agent-manager'
@@ -10,6 +11,7 @@ export function buildProfileResponse(profile: Profile) {
   return {
     ...profile,
     agent_role: getAgentRole(profile.id),
+    last_storage_snapshot: getLatestStorageSnapshot(profile.id),
     ...agentManager.getStatus(profile.id),
     stats_delta_1h: getStatsDelta1h(profile.id),
     rate_risk: getRateRiskPayload(profile.id),

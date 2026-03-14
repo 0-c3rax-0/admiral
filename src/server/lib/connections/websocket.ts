@@ -4,7 +4,9 @@ import WebSocket from 'ws'
 
 const RECONNECT_BASE_DELAY = 1000
 const RECONNECT_MAX_DELAY = 30000
+const HANDSHAKE_FAILURE_BACKOFF_MS = 60_000
 const COMMAND_TIMEOUT = 30_000
+const AUTH_RECOVERABLE_ERRORS = new Set(['not_authenticated', 'session_invalid', 'session_expired'])
 
 /**
  * Message types that are direct responses to client commands.
@@ -27,6 +29,8 @@ export class WebSocketConnection implements GameConnection {
   private reconnectAttempt = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private credentials: { username: string; password: string } | null = null
+  private handshakeBackoffUntil = 0
+  private reauthInFlight: Promise<boolean> | null = null
 
   // Sequential FIFO queue: server processes commands in order with no request IDs
   private pendingQueue: Array<{
@@ -41,17 +45,22 @@ export class WebSocketConnection implements GameConnection {
   }
 
   async connect(): Promise<void> {
+    if (Date.now() < this.handshakeBackoffUntil) {
+      throw new Error(`WebSocket handshake backoff active for ${Math.ceil((this.handshakeBackoffUntil - Date.now()) / 1000)}s`)
+    }
     return new Promise((resolve, reject) => {
       try {
         this.ws = new WebSocket(this.wsUrl, { headers: { 'User-Agent': USER_AGENT } })
         this.ws.on('unexpected-response', (_req, res) => {
           if (!this.connected) {
+            this.noteHandshakeFailure(`HTTP ${res.statusCode}`)
             reject(new Error(`WebSocket handshake failed: HTTP ${res.statusCode}`))
           }
         })
 
         this.ws.onopen = () => {
           this.connected = true
+          this.handshakeBackoffUntil = 0
           this.reconnectAttempt = 0
           resolve()
         }
@@ -69,14 +78,20 @@ export class WebSocketConnection implements GameConnection {
           }
         }
 
-        this.ws.onclose = () => {
+        this.ws.onclose = (event) => {
           this.connected = false
+          if (event.code === 1002 && String(event.reason || '').includes('Expected 101 status code')) {
+            this.noteHandshakeFailure(`close code ${event.code}`)
+          }
           this.rejectAllPending('Connection closed')
           this.scheduleReconnect()
         }
 
         this.ws.onerror = (err) => {
           if (!this.connected) {
+            if (err.message.includes('Expected 101 status code')) {
+              this.noteHandshakeFailure('Expected 101 status code')
+            }
             reject(new Error(`WebSocket connection failed: ${err.message}`))
           }
         }
@@ -125,7 +140,7 @@ export class WebSocketConnection implements GameConnection {
   }
 
   async execute(command: string, args?: Record<string, unknown>): Promise<CommandResult> {
-    return this.sendCommand(command, args)
+    return this.sendCommand(command, args, true)
   }
 
   onNotification(handler: NotificationHandler): void {
@@ -153,7 +168,7 @@ export class WebSocketConnection implements GameConnection {
     return this.connected && !!this.ws && this.ws.readyState === WebSocket.OPEN
   }
 
-  private async sendCommand(command: string, args?: Record<string, unknown>): Promise<CommandResult> {
+  private async sendCommand(command: string, args?: Record<string, unknown>, canRetryAuth = true): Promise<CommandResult> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       return { error: { code: 'not_connected', message: 'WebSocket not connected' } }
     }
@@ -161,7 +176,7 @@ export class WebSocketConnection implements GameConnection {
     // Server protocol: { type: "command_name", payload: { ... } } -- no request ID
     const msg = { type: command, payload: args || {} }
 
-    return new Promise<CommandResult>((resolve) => {
+    const response = await new Promise<CommandResult>((resolve) => {
       const timer = setTimeout(() => {
         const idx = this.pendingQueue.findIndex(p => p.timer === timer)
         if (idx !== -1) this.pendingQueue.splice(idx, 1)
@@ -171,6 +186,14 @@ export class WebSocketConnection implements GameConnection {
       this.pendingQueue.push({ resolve, timer, command })
       this.ws!.send(JSON.stringify(msg))
     })
+
+    if (!response.error || !canRetryAuth) return response
+    if (!AUTH_RECOVERABLE_ERRORS.has(response.error.code)) return response
+    if (command === 'login' || !this.credentials) return response
+
+    const reauthed = await this.ensureAuthenticated()
+    if (!reauthed) return response
+    return this.sendCommand(command, args, false)
   }
 
   private handleMessage(msg: Record<string, unknown>): void {
@@ -186,7 +209,7 @@ export class WebSocketConnection implements GameConnection {
         pending.resolve({
           error: {
             code: (payload.code as string) || 'server_error',
-            message: (payload.message as string) || 'Unknown error',
+            message: this.mapServerError(payload),
           },
         })
       } else {
@@ -210,6 +233,15 @@ export class WebSocketConnection implements GameConnection {
   }
 
   private scheduleReconnect(): void {
+    const now = Date.now()
+    if (now < this.handshakeBackoffUntil) {
+      const delay = Math.max(this.handshakeBackoffUntil - now, RECONNECT_BASE_DELAY)
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = null
+        this.scheduleReconnect()
+      }, delay)
+      return
+    }
     const delay = Math.min(
       RECONNECT_BASE_DELAY * Math.pow(2, this.reconnectAttempt),
       RECONNECT_MAX_DELAY
@@ -229,5 +261,39 @@ export class WebSocketConnection implements GameConnection {
         // onclose will fire and schedule next reconnect
       }
     }, delay)
+  }
+
+  private noteHandshakeFailure(reason: string): void {
+    const until = Date.now() + HANDSHAKE_FAILURE_BACKOFF_MS
+    if (until <= this.handshakeBackoffUntil) return
+    this.handshakeBackoffUntil = until
+  }
+
+  private mapServerError(payload: Record<string, unknown>): string {
+    const code = (payload.code as string) || 'server_error'
+    const message = (payload.message as string) || 'Unknown error'
+    if (code === 'not_authenticated') return 'Authentication required. Re-login and retry.'
+    if (code === 'session_expired') return 'Session expired. Re-login and retry.'
+    if (code === 'session_invalid') return 'Session invalid. Re-login and retry.'
+    return message
+  }
+
+  private async ensureAuthenticated(): Promise<boolean> {
+    if (!this.credentials) return false
+    if (this.reauthInFlight) return this.reauthInFlight
+
+    this.reauthInFlight = (async () => {
+      const loginResp = await this.sendCommand('login', {
+        username: this.credentials!.username,
+        password: this.credentials!.password,
+      }, false)
+      return !loginResp.error
+    })()
+
+    try {
+      return await this.reauthInFlight
+    } finally {
+      this.reauthInFlight = null
+    }
   }
 }

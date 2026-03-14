@@ -8,7 +8,7 @@ const CACHE_TTL = 5 * 60 * 1000
 
 commands.get('/', async (c) => {
   const serverUrl = c.req.query('server_url') || 'https://game.spacemolt.com'
-  const apiVersion = c.req.query('api_version') === 'v2' ? 'v2' : 'v1'
+  const apiVersion = c.req.query('api_version') === 'v1' ? 'v1' : 'v2'
   const apiBase = serverUrl.replace(/\/$/, '') + `/api/${apiVersion}`
   const cacheKey = `${apiBase}`
   const now = Date.now()

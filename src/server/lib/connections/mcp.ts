@@ -8,6 +8,16 @@ function asRpcResponse(value: unknown): { result?: unknown; error?: { code?: num
   return { error: { message: 'Invalid JSON-RPC response payload' } }
 }
 
+function isSessionExpiry(result: Record<string, unknown> | null): boolean {
+  const err = result?.error as Record<string, unknown> | undefined
+  const code = typeof err?.code === 'string' ? err.code.toLowerCase() : ''
+  const message = typeof err?.message === 'string' ? err.message.toLowerCase() : ''
+  return code === 'session_expired'
+    || code === 'session_invalid'
+    || message.includes('session expired')
+    || message.includes('session invalid')
+  }
+
 export class McpConnection implements GameConnection {
   readonly mode = 'mcp' as const
   private baseUrl: string
@@ -75,8 +85,7 @@ export class McpConnection implements GameConnection {
     const result = this.parseToolResult(resp.result)
 
     // Re-initialize on session expiry and retry once
-    const errCode = (result?.error as Record<string, unknown> | undefined)?.code
-    if (errCode === 'session_expired' || errCode === 'session_invalid') {
+    if (isSessionExpiry(result)) {
       this.sessionId = null
       this.connected = false
       await this.connect()
