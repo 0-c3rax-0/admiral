@@ -118,6 +118,10 @@
           "owner_id": {
             "type": "string"
           },
+          "pirate_rep_required": {
+            "description": "Minimum pirate reputation required to dock; 0 means no requirement",
+            "type": "integer"
+          },
           "poi_id": {
             "type": "string"
           },
@@ -316,6 +320,9 @@
           "message": {
             "type": "string"
           },
+          "old_ship_id": {
+            "type": "string"
+          },
           "price": {
             "type": "integer"
           },
@@ -435,34 +442,6 @@
         ],
         "type": "object"
       },
-      "BuyShipResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "credits_left": {
-            "type": "integer"
-          },
-          "message": {
-            "type": "string"
-          },
-          "new_ship_id": {
-            "type": "string"
-          },
-          "old_ship_id": {
-            "type": "string"
-          },
-          "ship_class": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "message",
-          "new_ship_id",
-          "old_ship_id",
-          "ship_class",
-          "credits_left"
-        ],
-        "type": "object"
-      },
       "CancelCommissionResponse": {
         "additionalProperties": false,
         "properties": {
@@ -555,6 +534,26 @@
           "action",
           "order_id",
           "message"
+        ],
+        "type": "object"
+      },
+      "CancelShipListingResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "class_id": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "ship_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message",
+          "ship_id",
+          "class_id"
         ],
         "type": "object"
       },
@@ -1098,6 +1097,21 @@
         "properties": {
           "chain_next": {
             "type": "string"
+          },
+          "community_contributed": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object"
+          },
+          "community_percent": {
+            "type": "number"
+          },
+          "community_progress": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
           },
           "credits_earned": {
             "type": "integer"
@@ -3768,10 +3782,22 @@
             },
             "type": "array"
           },
+          "faction_id": {
+            "type": "string"
+          },
           "has_more": {
             "type": "boolean"
           },
-          "limit": {
+          "page": {
+            "type": "integer"
+          },
+          "page_size": {
+            "type": "integer"
+          },
+          "total": {
+            "type": "integer"
+          },
+          "total_pages": {
             "type": "integer"
           }
         },
@@ -3779,7 +3805,10 @@
           "entries",
           "has_more",
           "category",
-          "limit"
+          "page",
+          "page_size",
+          "total",
+          "total_pages"
         ],
         "type": "object"
       },
@@ -3836,6 +3865,9 @@
               },
               "owner_id": {
                 "type": "string"
+              },
+              "pirate_rep_required": {
+                "type": "integer"
               },
               "poi_id": {
                 "type": "string"
@@ -4219,6 +4251,18 @@
                 "chain_next": {
                   "type": "string"
                 },
+                "community": {
+                  "type": "boolean"
+                },
+                "community_percent": {
+                  "type": "number"
+                },
+                "community_progress": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
                 "description": {
                   "type": "string"
                 },
@@ -4323,6 +4367,12 @@
                 "repeatable": {
                   "type": "boolean"
                 },
+                "required_modules": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
                 "rewards": {
                   "additionalProperties": false,
                   "properties": {
@@ -4358,6 +4408,12 @@
                 },
                 "type": {
                   "type": "string"
+                },
+                "warnings": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
                 }
               },
               "required": [
@@ -4391,9 +4447,6 @@
             "items": {
               "additionalProperties": false,
               "properties": {
-                "anonymous": {
-                  "type": "boolean"
-                },
                 "clan_tag": {
                   "type": "string"
                 },
@@ -4429,7 +4482,6 @@
                 }
               },
               "required": [
-                "anonymous",
                 "in_combat"
               ],
               "type": "object"
@@ -4542,6 +4594,74 @@
           {
             "additionalProperties": false,
             "properties": {
+              "active_battle": {
+                "additionalProperties": false,
+                "properties": {
+                  "battle_id": {
+                    "type": "string"
+                  },
+                  "participants": {
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "faction_id": {
+                          "type": "string"
+                        },
+                        "is_npc": {
+                          "type": "boolean"
+                        },
+                        "player_id": {
+                          "type": "string"
+                        },
+                        "ship_class": {
+                          "type": "string"
+                        },
+                        "side_id": {
+                          "type": "integer"
+                        },
+                        "username": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "player_id",
+                        "username",
+                        "side_id"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "sides": {
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "faction_id": {
+                          "type": "string"
+                        },
+                        "player_count": {
+                          "type": "integer"
+                        },
+                        "side_id": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "side_id",
+                        "player_count"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "battle_id",
+                  "sides",
+                  "participants"
+                ],
+                "type": "object"
+              },
               "base": {
                 "additionalProperties": false,
                 "properties": {
@@ -4592,6 +4712,9 @@
                   },
                   "owner_id": {
                     "type": "string"
+                  },
+                  "pirate_rep_required": {
+                    "type": "integer"
                   },
                   "poi_id": {
                     "type": "string"
@@ -4841,6 +4964,9 @@
                 "base_speed": {
                   "type": "integer"
                 },
+                "based_on": {
+                  "type": "string"
+                },
                 "build_materials": {
                   "items": {
                     "additionalProperties": false,
@@ -4899,6 +5025,27 @@
                 "id": {
                   "type": "string"
                 },
+                "inherent_capabilities": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "flag": {
+                        "type": "string"
+                      },
+                      "type": {
+                        "type": "string"
+                      },
+                      "value": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "type"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
                 "legacy": {
                   "type": "boolean"
                 },
@@ -4906,6 +5053,9 @@
                   "type": "string"
                 },
                 "name": {
+                  "type": "string"
+                },
+                "npc_role": {
                   "type": "string"
                 },
                 "passive_recipes": {
@@ -5012,6 +5162,74 @@
             "properties": {
               "action": {
                 "type": "string"
+              },
+              "active_battle": {
+                "additionalProperties": false,
+                "properties": {
+                  "battle_id": {
+                    "type": "string"
+                  },
+                  "participants": {
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "faction_id": {
+                          "type": "string"
+                        },
+                        "is_npc": {
+                          "type": "boolean"
+                        },
+                        "player_id": {
+                          "type": "string"
+                        },
+                        "ship_class": {
+                          "type": "string"
+                        },
+                        "side_id": {
+                          "type": "integer"
+                        },
+                        "username": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "player_id",
+                        "username",
+                        "side_id"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "sides": {
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "faction_id": {
+                          "type": "string"
+                        },
+                        "player_count": {
+                          "type": "integer"
+                        },
+                        "side_id": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "side_id",
+                        "player_count"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "battle_id",
+                  "sides",
+                  "participants"
+                ],
+                "type": "object"
               },
               "poi": {
                 "additionalProperties": false,
@@ -5876,9 +6094,6 @@
           "player": {
             "additionalProperties": false,
             "properties": {
-              "anonymous": {
-                "type": "boolean"
-              },
               "captains_log": {
                 "items": {
                   "additionalProperties": false,
@@ -6156,7 +6371,6 @@
               "clan_tag",
               "primary_color",
               "secondary_color",
-              "anonymous",
               "is_cloaked",
               "current_ship_id",
               "current_system",
@@ -6349,6 +6563,9 @@
               },
               "last_process_tick": {
                 "type": "integer"
+              },
+              "loaded_on_carrier_id": {
+                "type": "string"
               },
               "manifests": {
                 "items": {
@@ -6756,9 +6973,6 @@
       "NearbyPlayer": {
         "description": "A player visible at the current POI.",
         "properties": {
-          "anonymous": {
-            "type": "boolean"
-          },
           "clan_tag": {
             "type": "string"
           },
@@ -6891,9 +7105,6 @@
       "Player": {
         "description": "A player account with progression, customization, and current state.",
         "properties": {
-          "anonymous": {
-            "type": "boolean"
-          },
           "clan_tag": {
             "maxLength": 4,
             "type": "string"
@@ -7181,9 +7392,6 @@
           "player": {
             "additionalProperties": false,
             "properties": {
-              "anonymous": {
-                "type": "boolean"
-              },
               "captains_log": {
                 "items": {
                   "additionalProperties": false,
@@ -7461,7 +7669,6 @@
               "clan_tag",
               "primary_color",
               "secondary_color",
-              "anonymous",
               "is_cloaked",
               "current_ship_id",
               "current_system",
@@ -7634,6 +7841,9 @@
               },
               "last_process_tick": {
                 "type": "integer"
+              },
+              "loaded_on_carrier_id": {
+                "type": "string"
               },
               "manifests": {
                 "items": {
@@ -8386,22 +8596,6 @@
         ],
         "type": "object"
       },
-      "SetAnonymousResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "action": {
-            "type": "string"
-          },
-          "anonymous": {
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "action",
-          "anonymous"
-        ],
-        "type": "object"
-      },
       "SetColorsResponse": {
         "additionalProperties": false,
         "properties": {
@@ -8512,6 +8706,10 @@
             "format": "int64",
             "type": "integer"
           },
+          "loaded_on_carrier_id": {
+            "description": "Ship ID of the carrier this ship is currently loaded on (empty when not in a carrier bay)",
+            "type": "string"
+          },
           "manifests": {
             "description": "Cargo manifests held on this ship (customs clearance documents)",
             "items": {
@@ -8600,6 +8798,10 @@
           "base_speed": {
             "type": "integer"
           },
+          "based_on": {
+            "description": "Source empire ship class ID this pirate design is converted from",
+            "type": "string"
+          },
           "build_materials": {
             "additionalProperties": {
               "type": "integer"
@@ -8650,6 +8852,27 @@
           },
           "id": {
             "type": "string"
+          },
+          "inherent_capabilities": {
+            "description": "Built-in ship capabilities that don't require a module (yield bonuses, integrated cloak/scanner, scan resistance, special flags)",
+            "items": {
+              "properties": {
+                "flag": {
+                  "description": "Named flag for special_flag type (e.g. rad_handling, anomaly_detection)",
+                  "type": "string"
+                },
+                "type": {
+                  "description": "Capability type: ore_yield_bonus, ice_yield_bonus, gas_yield_bonus, integrated_cloak, integrated_scanner, scan_resistance, integrated_survey_scanner, special_flag",
+                  "type": "string"
+                },
+                "value": {
+                  "description": "Numeric parameter (percentage bonus, power level, or strength)",
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
           },
           "legacy": {
             "description": "Legacy ship class kept for existing players, hidden from catalog",
@@ -8726,86 +8949,6 @@
           "name",
           "class",
           "price"
-        ],
-        "type": "object"
-      },
-      "ShipyardShowroomResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "base_id": {
-            "type": "string"
-          },
-          "base_name": {
-            "type": "string"
-          },
-          "count": {
-            "type": "integer"
-          },
-          "ships": {
-            "items": {
-              "additionalProperties": false,
-              "properties": {
-                "cargo": {
-                  "type": "integer"
-                },
-                "category": {
-                  "type": "string"
-                },
-                "class_id": {
-                  "type": "string"
-                },
-                "hull": {
-                  "type": "integer"
-                },
-                "labor_cost": {
-                  "type": "integer"
-                },
-                "material_cost": {
-                  "type": "integer"
-                },
-                "name": {
-                  "type": "string"
-                },
-                "scale": {
-                  "type": "integer"
-                },
-                "shield": {
-                  "type": "integer"
-                },
-                "ship_id": {
-                  "type": "string"
-                },
-                "showroom_price": {
-                  "type": "integer"
-                },
-                "speed": {
-                  "type": "integer"
-                },
-                "tier": {
-                  "type": "integer"
-                }
-              },
-              "required": [
-                "ship_id",
-                "class_id",
-                "name",
-                "showroom_price"
-              ],
-              "type": "object"
-            },
-            "type": "array"
-          },
-          "shipyard_level": {
-            "type": "integer"
-          },
-          "tip": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "base_id",
-          "ships",
-          "count"
         ],
         "type": "object"
       },
@@ -9360,9 +9503,6 @@
             "items": {
               "additionalProperties": false,
               "properties": {
-                "anonymous": {
-                  "type": "boolean"
-                },
                 "clan_tag": {
                   "type": "string"
                 },
@@ -9398,7 +9538,6 @@
                 }
               },
               "required": [
-                "anonymous",
                 "in_combat"
               ],
               "type": "object"
@@ -9724,9 +9863,6 @@
           },
           "player": {
             "properties": {
-              "anonymous": {
-                "type": "boolean"
-              },
               "clan_tag": {
                 "type": "string"
               },
@@ -10319,9 +10455,6 @@
           "base_id": {
             "type": "string"
           },
-          "credits": {
-            "type": "integer"
-          },
           "gifts": {
             "items": {
               "additionalProperties": false,
@@ -10525,7 +10658,6 @@
         },
         "required": [
           "base_id",
-          "credits",
           "items",
           "ships",
           "hint"
@@ -20976,91 +21108,6 @@
         ]
       }
     },
-    "/api/v2/spacemolt_ship/buy_ship": {
-      "post": {
-        "operationId": "spacemolt_ship_buy_ship",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "properties": {
-                  "id": {
-                    "description": "Target: ship class, ship ID, listing ID, or commission ID",
-                    "type": "string",
-                    "x-positional-index": 0
-                  },
-                  "item_id": {
-                    "description": "Item ID to supply to a commission (supply_commission)",
-                    "type": "string"
-                  },
-                  "name": {
-                    "description": "Custom ship name (for rename_ship)",
-                    "type": "string",
-                    "x-positional-index": 2
-                  },
-                  "price": {
-                    "description": "Listing price in credits (for list_ship_for_sale)",
-                    "type": "integer"
-                  },
-                  "provide_materials": {
-                    "description": "If true, you deliver build materials yourself (commission_ship)",
-                    "type": "boolean"
-                  },
-                  "quantity": {
-                    "description": "Quantity of items to supply (supply_commission)",
-                    "type": "integer",
-                    "x-positional-index": 1
-                  }
-                },
-                "type": "object"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "allOf": [
-                    {
-                      "$ref": "#/components/schemas/V2Response"
-                    },
-                    {
-                      "properties": {
-                        "structuredContent": {
-                          "$ref": "#/components/schemas/BuyShipResponse"
-                        }
-                      },
-                      "type": "object"
-                    }
-                  ]
-                }
-              }
-            },
-            "description": "Result. structuredContent type: BuyShipResponse"
-          },
-          "400": {
-            "description": "Bad request — invalid params, unknown command, or game error"
-          },
-          "401": {
-            "description": "Not authenticated — missing or invalid session"
-          },
-          "429": {
-            "description": "Rate limited — mutations allow 1 per tick (10 seconds)"
-          }
-        },
-        "security": [
-          {
-            "SessionId": []
-          }
-        ],
-        "summary": "buy_ship",
-        "tags": [
-          "ship"
-        ]
-      }
-    },
     "/api/v2/spacemolt_ship/cancel_commission": {
       "post": {
         "operationId": "spacemolt_ship_cancel_commission",
@@ -21199,7 +21246,7 @@
                     {
                       "properties": {
                         "structuredContent": {
-                          "$ref": "#/components/schemas/MessageResponse"
+                          "$ref": "#/components/schemas/CancelShipListingResponse"
                         }
                       },
                       "type": "object"
@@ -21208,7 +21255,7 @@
                 }
               }
             },
-            "description": "Result. structuredContent type: MessageResponse"
+            "description": "Result. structuredContent type: CancelShipListingResponse"
           },
           "400": {
             "description": "Bad request — invalid params, unknown command, or game error"
@@ -21928,91 +21975,6 @@
           }
         ],
         "summary": "sell_ship",
-        "tags": [
-          "ship"
-        ]
-      }
-    },
-    "/api/v2/spacemolt_ship/shipyard_showroom": {
-      "post": {
-        "operationId": "spacemolt_ship_shipyard_showroom",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "properties": {
-                  "id": {
-                    "description": "Target: ship class, ship ID, listing ID, or commission ID",
-                    "type": "string",
-                    "x-positional-index": 0
-                  },
-                  "item_id": {
-                    "description": "Item ID to supply to a commission (supply_commission)",
-                    "type": "string"
-                  },
-                  "name": {
-                    "description": "Custom ship name (for rename_ship)",
-                    "type": "string",
-                    "x-positional-index": 2
-                  },
-                  "price": {
-                    "description": "Listing price in credits (for list_ship_for_sale)",
-                    "type": "integer"
-                  },
-                  "provide_materials": {
-                    "description": "If true, you deliver build materials yourself (commission_ship)",
-                    "type": "boolean"
-                  },
-                  "quantity": {
-                    "description": "Quantity of items to supply (supply_commission)",
-                    "type": "integer",
-                    "x-positional-index": 1
-                  }
-                },
-                "type": "object"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "allOf": [
-                    {
-                      "$ref": "#/components/schemas/V2Response"
-                    },
-                    {
-                      "properties": {
-                        "structuredContent": {
-                          "$ref": "#/components/schemas/ShipyardShowroomResponse"
-                        }
-                      },
-                      "type": "object"
-                    }
-                  ]
-                }
-              }
-            },
-            "description": "Result. structuredContent type: ShipyardShowroomResponse"
-          },
-          "400": {
-            "description": "Bad request — invalid params, unknown command, or game error"
-          },
-          "401": {
-            "description": "Not authenticated — missing or invalid session"
-          },
-          "429": {
-            "description": "Rate limited — mutations allow 1 per tick (10 seconds)"
-          }
-        },
-        "security": [
-          {
-            "SessionId": []
-          }
-        ],
-        "summary": "shipyard_showroom",
         "tags": [
           "ship"
         ]
@@ -23442,83 +23404,6 @@
         ]
       }
     },
-    "/api/v2/spacemolt_social/set_anonymous": {
-      "post": {
-        "operationId": "spacemolt_social_set_anonymous",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "properties": {
-                  "content": {
-                    "description": "Message text, journal entry, note body, reply content, status, or colors JSON",
-                    "type": "string",
-                    "x-positional-index": 1
-                  },
-                  "index": {
-                    "description": "Entry index for captains_log_get (0 = newest)",
-                    "type": "integer"
-                  },
-                  "target": {
-                    "description": "Channel name (local/system/faction), thread ID, note ID, or reply ID",
-                    "type": "string",
-                    "x-positional-index": 0
-                  },
-                  "title": {
-                    "description": "Thread or note title (for create operations)",
-                    "type": "string",
-                    "x-positional-index": 2
-                  }
-                },
-                "type": "object"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "allOf": [
-                    {
-                      "$ref": "#/components/schemas/V2Response"
-                    },
-                    {
-                      "properties": {
-                        "structuredContent": {
-                          "$ref": "#/components/schemas/SetAnonymousResponse"
-                        }
-                      },
-                      "type": "object"
-                    }
-                  ]
-                }
-              }
-            },
-            "description": "Result. structuredContent type: SetAnonymousResponse"
-          },
-          "400": {
-            "description": "Bad request — invalid params, unknown command, or game error"
-          },
-          "401": {
-            "description": "Not authenticated — missing or invalid session"
-          },
-          "429": {
-            "description": "Rate limited — mutations allow 1 per tick (10 seconds)"
-          }
-        },
-        "security": [
-          {
-            "SessionId": []
-          }
-        ],
-        "summary": "set_anonymous",
-        "tags": [
-          "social"
-        ]
-      }
-    },
     "/api/v2/spacemolt_social/set_colors": {
       "post": {
         "operationId": "spacemolt_social_set_colors",
@@ -23759,7 +23644,7 @@
               "schema": {
                 "properties": {
                   "item_id": {
-                    "description": "Item ID, \"credits\" for credit operations, or a ship instance ID to gift a ship",
+                    "description": "Item ID, \"credits\" for credit operations, or a ship instance ID (for carrier loading or gifting)",
                     "type": "string",
                     "x-positional-index": 1
                   },
@@ -23866,7 +23751,7 @@
               "schema": {
                 "properties": {
                   "item_id": {
-                    "description": "Item ID, \"credits\" for credit operations, or a ship instance ID to gift a ship",
+                    "description": "Item ID, \"credits\" for credit operations, or a ship instance ID (for carrier loading or gifting)",
                     "type": "string",
                     "x-positional-index": 1
                   },
@@ -23951,7 +23836,7 @@
               "schema": {
                 "properties": {
                   "item_id": {
-                    "description": "Item ID, \"credits\" for credit operations, or a ship instance ID to gift a ship",
+                    "description": "Item ID, \"credits\" for credit operations, or a ship instance ID (for carrier loading or gifting)",
                     "type": "string",
                     "x-positional-index": 1
                   },

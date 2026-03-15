@@ -2,7 +2,7 @@
 
 Auditing all connection implementations + agent tooling against:
 - `docs/openapi-v1.json` — 161 endpoints (flat, no prefix)
-- `docs/openapi-v2.json` — 190 endpoints (namespaced under `/api/v2/`)
+- `docs/openapi-v2.json` — 187 endpoints (namespaced under `/api/v2/`)
 
 V2 namespaces: `spacemolt`, `spacemolt_auth`, `spacemolt_battle`, `spacemolt_catalog`,
 `spacemolt_facility`, `spacemolt_faction`, `spacemolt_faction_admin`, `spacemolt_faction_commerce`,
@@ -34,21 +34,18 @@ V2 namespaces: `spacemolt`, `spacemolt_auth`, `spacemolt_battle`, `spacemolt_cat
 
 ## HTTP v2 (`src/server/lib/connections/http_v2.ts`)
 
-**Overall conformance: ~99% — one critical bug, everything else is solid**
+**Overall conformance: solid against current spec**
 
 ### What's correct
-- Dynamically builds namespace routing map from the OpenAPI spec via `fetchToolMapping()` — covers all 15 namespaces and 190 endpoints automatically
+- Dynamically builds namespace routing map from the OpenAPI spec via `fetchToolMapping()` — covers all 15 namespaces and 187 endpoints automatically
 - Falls back to v1 endpoints if spec unavailable
 - Auth (`X-Session-Id`), request format, response envelope, session management all correct
 - `structuredContent` correctly preferred over `result` for programmatic use
 - Login/register route correctly through `spacemolt_auth` namespace
 - Session coalescing on concurrent requests
+- Rate-limit retry already uses `error.retry_after`
 
 ### Issues
-
-- **🔴 CRITICAL BUG (line 162): `wait_seconds` → should be `retry_after`**
-  - Code reads `resp.error.wait_seconds` but spec field is `retry_after`
-  - Impact: rate-limited commands always wait 10s default instead of server-specified delay
 
 - **🟡 MINOR: `/api/v2/notifications` endpoint not actively polled**
   - Notifications only arrive bundled with command responses
@@ -116,7 +113,7 @@ V2 namespaces: `spacemolt`, `spacemolt_auth`, `spacemolt_battle`, `spacemolt_cat
 
 ## Agent Loop / System Prompt (`src/server/lib/loop.ts`, `src/server/lib/agent.ts`)
 
-**Overall: dynamically built from spec — mostly correct for v1, broken for v2**
+**Overall: dynamically built from spec — mostly correct, with known v2 metadata limits**
 
 ### What's correct
 - System prompt command list is **dynamically generated** by fetching the OpenAPI spec, not hardcoded
@@ -127,7 +124,7 @@ V2 namespaces: `spacemolt`, `spacemolt_auth`, `spacemolt_battle`, `spacemolt_cat
 
 - **🔴 V2 `x-is-mutation` is null on ALL endpoints** — every v2 command is presented to the LLM as a free query. Mining, attacking, crafting — all shown as free.
 - **🔴 V2 operationIds are fully-qualified** (`spacemolt_market_view_market`, `spacemolt_social_captains_log_list`) — format is `{tool}_{action}` (openapi/v2.go:331). LLM sees these long names in the system prompt. `http_v2.ts` maps both short names and operationIds correctly, but the LLM has no context for the naming scheme.
-- **🟡 62 v1 commands were removed/reorganized in v2** — agents running on v1 habits will attempt unavailable commands
+- **🟡 Some v1 commands were removed/reorganized in v2** — agents running on v1 habits will still attempt unavailable commands unless prompted carefully
 - **🟡 72 new v2 commands are not surfaced** unless the agent is actually on a v2 connection
 - **🟡 System prompt doesn't state which API version is active** — no way for LLM to know it's on v1 vs v2
 - **🟢 `get_commands` game endpoint not used** — spec is fetched statically. Reasonable tradeoff (pre-login, caching), but server runtime changes won't be seen.
@@ -136,12 +133,12 @@ V2 namespaces: `spacemolt`, `spacemolt_auth`, `spacemolt_battle`, `spacemolt_cat
 
 ## Commands Route + Frontend (`src/server/routes/commands.ts`, `src/frontend/src/components/CommandPanel.tsx`)
 
-**Overall: v1-only — v2 profiles get wrong/broken command info**
+**Overall: mostly correct now, with remaining v2 metadata caveats**
 
 ### Commands route (`routes/commands.ts`)
-- **🔴 Hardcoded to `/api/v1`** (line 12) — ignores profile's `connection_mode`, always fetches v1 spec
-- v2 profiles get v1 command names, causing mismatch with v2 responses
-- Cache doesn't distinguish by API version — v1 and v2 share the same 5-minute cache
+- Accepts `api_version` and fetches `/api/v1` or `/api/v2` accordingly
+- Cache key includes the API base URL, so v1 and v2 are separated
+- Still canonicalizes names down to short aliases, which is useful for UX but hides the fully-qualified v2 operation IDs
 
 ### CommandPanel (`components/CommandPanel.tsx`)
 - `GameCommandInfo` type defined locally instead of imported from shared types
@@ -149,10 +146,7 @@ V2 namespaces: `spacemolt`, `spacemolt_auth`, `spacemolt_battle`, `spacemolt_cat
 - `isMutation` icon logic will break on v2 (see below)
 
 ### QuickCommands (`components/QuickCommands.tsx`)
-All 9 hardcoded commands exist in v1 ✓. In v2:
-- **🔴 `view_market`** — replaced by `spacemolt_market/view_market` (bare name still routes fine via http_v2, but needs verification)
-- **🔴 `captains_log_list`** — replaced by `spacemolt_social/captains_log_list`
-- Remaining 7 exist in v2 ✓
+All 9 hardcoded commands are still routable in v2 via short-name mapping or alias resolution.
 
 ### V2 spec metadata issues
 - **🔴 All `x-is-mutation` fields are `null` in v2 spec** — mutation detection breaks for all v2 commands, icons wrong everywhere
@@ -219,11 +213,8 @@ All fields admiral reads are confirmed correct against Go structs (handlers/info
 
 ### 🔴 Critical
 
-1. **`retry_after` vs `wait_seconds` (http_v2.ts:162 + interface.ts error type)** — rate-limited commands wait 10s default instead of server value. CONFIRMED: gameserver sends `retry_after` (httpapiv2/handlers.go:55). Bug exists in TWO places: `http_v2.ts:162` reads `wait_seconds`, AND `interface.ts` error type definition declares it as `wait_seconds?`. Both need fixing.
-2. **V2 `x-is-mutation` intentionally absent** — CONFIRMED: v2 determines mutation status at runtime from command registry (httpapiv2/handlers.go:304), not spec. v2 clients MUST handle 429s reactively; spec-based pre-classification is impossible. Admiral's system prompt will incorrectly label all v2 commands as free queries; frontend icons will all be wrong for v2.
-3. **Commands route hardcoded to v1** (`routes/commands.ts:12`) — v2 profiles get v1 command names in the frontend
-4. **HTTP v1 login `player_id` not extracted** (`http.ts:41`) — reads `result.player_id` which doesn't exist; should be `session.player_id` from envelope or `result.player.id`. Profile's `player_id` stays null after login.
-5. **`schema.ts:85` v2 spec URL never reached** — both regex patterns produce `/api/openapi.json` (v1 spec) for v2 baseUrl; `/api/v2/openapi.json` never fetched. v2 agents get v1 command list.
+1. **V2 `x-is-mutation` intentionally absent** — CONFIRMED: v2 determines mutation status at runtime from command registry, not the spec. Admiral's system prompt and frontend will mislabel v2 mutations as free queries.
+2. **HTTP v1 login `player_id` not extracted** (`http.ts`) — reads `result.player_id` which doesn't exist; should be `session.player_id` from envelope or `result.player.id`. Profile's `player_id` stays null after login.
 
 ### 🟠 High
 
@@ -231,7 +222,7 @@ All fields admiral reads are confirmed correct against Go structs (handlers/info
 5. ~~**V2 parameter names changed**~~ — CONFIRMED NON-ISSUE: `v2_translate.go` passthrough (line 50-55) means all v1-style named params work unchanged on v2. Both `{target_poi: "x"}` and `{id: "x"}` route correctly to `travel`.
 6. ~~**`chat` params renamed**~~ — CONFIRMED NON-ISSUE: same passthrough; `{channel: "system"}` works on v2.
 7. ~~**`get_ship` modules broken on v2**~~ — CONFIRMED NON-ISSUE: v2 returns full `V2Module` objects, not string IDs. OpenAPI spec was inaccurate.
-5. ~~**QuickCommands has 2 commands invalid in v2**~~ — CONFIRMED NON-ISSUE: `view_market` and `captains_log_list` exist as valid action names in v2 (mcp/v2_tools.go:285,215). `http_v2.ts` maps short names to the correct tool namespace dynamically.
+8. ~~**QuickCommands has 2 commands invalid in v2**~~ — CONFIRMED NON-ISSUE: `view_market` and `captains_log_list` still route in v2. `http_v2.ts` maps short names to the correct namespace dynamically.
 6. **No logout endpoint called anywhere** — CONFIRMED NON-ISSUE: gameserver logout only updates `LastActiveAt`, no critical cleanup. Sessions expire after 30 min naturally. Dropping the session is fine.
 
 ### 🟡 Medium
@@ -241,14 +232,16 @@ All fields admiral reads are confirmed correct against Go structs (handlers/info
 9. **MCP v2 silent fallback to `spacemolt` tool** for unrecognized commands — cryptic server error instead of helpful message
 10. **System prompt doesn't indicate API version** — LLM doesn't know if it's on v1 or v2
 11. **Frontend `GameCommandInfo` type not in shared types** — duplicated locally in CommandPanel.tsx
-12. **🔴 `schema.ts:85` v2 spec URL never reached** — both primary regex and fallback produce `/api/openapi.json` (v1 spec) when baseUrl is `/api/v2`. The v2 spec at `/api/v2/openapi.json` is never fetched. v2 agents always get v1 command list. (server.go:389 confirms v2 spec lives at `/api/v2/openapi.json`)
-13. **`agentlogs` endpoint disabled server-side** — returns HTTP 410 Gone (httpapi.go:183). Both specs still document it. Non-issue for admiral since it uses its own local SQLite logs.
+12. **`agentlogs` endpoint disabled server-side** — returns HTTP 410 Gone. Both specs still document it. Non-issue for admiral since it uses its own local SQLite logs.
 
 ---
 
 ## V1 vs V2 Notable Differences (from spec)
 
 - `name_ship` (v1) → `spacemolt_ship/rename_ship` (v2)
+- `buy_ship` (v1) → removed from current v2 spec; use `buy_listed_ship` or `commission_ship`
+- `shipyard_showroom` (v1) → removed from current v2 spec; use catalog/listing flows instead
+- `set_anonymous` (v1) → removed from current v2 spec
 - `deposit_credits` / `withdraw_credits` (v1) → deprecated; no v2 equivalent because personal credits now live only in wallet
 - `buy_insurance` (v1) → `spacemolt_salvage/insure` (v2)
 - `get_insurance_quote` (v1) → `spacemolt_salvage/quote` (v2)
@@ -258,3 +251,13 @@ All fields admiral reads are confirmed correct against Go structs (handlers/info
 - V2 adds `spacemolt_storage` group (`deposit`, `withdraw`, `view`)
 - V2 adds `spacemolt_transfer` group (trade_* commands)
 - V2 adds `spacemolt_social` group (chat, notes, forum, captains_log, etc.)
+
+## Command Migration Impact In Admiral
+
+- No production code currently calls removed v2 commands like `buy_ship`, `shipyard_showroom`, or `set_anonymous`.
+- Storage command aliases remain intentionally supported in code:
+  - `deposit_items` → `storage_deposit`
+  - `withdraw_items` → `storage_withdraw`
+  - `view_storage` → `storage_view`
+  - grouped `storage(action=...)` also resolves correctly
+- Prompting text still mentions aliases and grouped storage forms. That is not broken, but it is worth keeping prompts aligned with the current v2 terminology so agents do not learn obsolete names first.

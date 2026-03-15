@@ -88,6 +88,43 @@ describe('command aliases', () => {
 
     expect(alias).toBe('view_market')
   })
+
+  test('rewrites facility_types to facility(action=types) before execution', async () => {
+    const calls: Array<{ command: string; args: Record<string, unknown> | undefined }> = []
+
+    await executeTool(
+      'game',
+      {
+        command: 'facility_types',
+        args: {},
+      },
+      {
+        profileId: `test-${Date.now()}-facility-types-rewrite`,
+        todo: '',
+        log: () => {},
+        connection: {
+          mode: 'http_v2',
+          connect: async () => {},
+          login: async () => ({ success: true }),
+          register: async () => ({ success: true }),
+          execute: async (command, args) => {
+            calls.push({ command, args })
+            return { result: { ok: true } }
+          },
+          onNotification: () => {},
+          disconnect: async () => {},
+          isConnected: () => true,
+        },
+      },
+    )
+
+    expect(calls).toEqual([
+      {
+        command: 'facility',
+        args: { action: 'types' },
+      },
+    ])
+  })
 })
 
 describe('navigation argument normalization', () => {

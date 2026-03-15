@@ -10,7 +10,7 @@ export interface GameCommandParam {
 export interface GameCommandInfo {
   name: string
   description: string
-  isMutation: boolean
+  isMutation: boolean | null
   params: GameCommandParam[]
 }
 
@@ -98,7 +98,7 @@ export function parseRuntimeCommandResult(result: unknown): GameCommandInfo[] {
       return {
         name: item.name,
         description: typeof item.description === 'string' && item.description.trim() ? item.description : item.name,
-        isMutation: !!item.is_mutation,
+        isMutation: typeof item.is_mutation === 'boolean' ? item.is_mutation : null,
         params: parseParamsFromFormat(typeof item.format === 'string' ? item.format : undefined),
       } satisfies GameCommandInfo
     })
@@ -333,7 +333,7 @@ export async function fetchGameCommands(baseUrl: string, log?: SpecLogFn): Promi
     if (!name) continue
     if (name === 'createSession' || path === '/session' || name === 'agentlogs') continue
 
-    const isMutation = !!op['x-is-mutation']
+    const isMutation = typeof op['x-is-mutation'] === 'boolean' ? op['x-is-mutation'] as boolean : null
     const description = (op.summary as string) || operationId || name
 
     const params: GameCommandParam[] = []
@@ -384,8 +384,9 @@ function formatCommandSignature(cmd: GameCommandInfo): string {
  * Format commands with parameter signatures and descriptions for the system prompt.
  */
 export function formatCommandList(commands: GameCommandInfo[]): string {
-  const queries = commands.filter(c => !c.isMutation)
-  const mutations = commands.filter(c => c.isMutation)
+  const queries = commands.filter(c => c.isMutation === false)
+  const mutations = commands.filter(c => c.isMutation === true)
+  const unknown = commands.filter(c => c.isMutation == null)
 
   const lines: string[] = []
   if (queries.length > 0) {
@@ -396,5 +397,35 @@ export function formatCommandList(commands: GameCommandInfo[]): string {
     lines.push('Action commands (costs 1 tick):')
     for (const cmd of mutations) lines.push(formatCommandSignature(cmd))
   }
+  if (unknown.length > 0) {
+    lines.push('Unclassified commands (tick cost not exposed by current API metadata):')
+    for (const cmd of unknown) lines.push(formatCommandSignature(cmd))
+  }
   return lines.join('\n')
+}
+export function mergeCommandMetadata(
+  base: GameCommandInfo[],
+  runtime: GameCommandInfo[],
+): GameCommandInfo[] {
+  const merged = new Map<string, GameCommandInfo>()
+  for (const command of base) {
+    merged.set(command.name.trim(), command)
+  }
+
+  for (const command of runtime) {
+    const key = command.name.trim()
+    const existing = merged.get(key)
+    if (!existing) {
+      merged.set(key, command)
+      continue
+    }
+    merged.set(key, {
+      ...existing,
+      description: command.description || existing.description,
+      isMutation: command.isMutation ?? existing.isMutation,
+      params: command.params.length > 0 ? command.params : existing.params,
+    })
+  }
+
+  return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name))
 }

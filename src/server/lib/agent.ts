@@ -9,8 +9,8 @@ import { WebSocketV2Connection } from './connections/websocket_v2'
 import { McpConnection } from './connections/mcp'
 import { McpV2Connection } from './connections/mcp_v2'
 import { resolveModel } from './model'
-import { fetchGameCommands, formatCommandList, parseRuntimeCommandResult } from './schema'
-import { allTools, mergeGameStateSnapshot } from './tools'
+import { fetchGameCommands, formatCommandList, mergeCommandMetadata, parseRuntimeCommandResult } from './schema'
+import { allTools, expandGroupedCommandAlias, mergeGameStateSnapshot } from './tools'
 import { is429PredictionEnabled, predict429Risk, runAgentTurn, type CompactionState } from './loop'
 import { addLogEntry, getLatestPendingLlmRequest, getProfile, updateProfile, getPreference } from './db'
 import { EventEmitter } from 'events'
@@ -827,25 +827,25 @@ export class Agent {
     if (profile.connection_mode === 'mcp_v2' && this.connection instanceof McpV2Connection) {
       commandList = this.connection.getCommandList()
       this.log('system', `Discovered ${this.connection.toolCount} v2 commands`)
-    } else if ((profile.connection_mode === 'websocket' || profile.connection_mode === 'websocket_v2') && this.connection) {
+    } else if (this.connection) {
       const resp = await this.connection.execute('get_commands').catch(() => null)
-      const commands = resp && !resp.error ? parseRuntimeCommandResult(resp.result) : []
+      const runtimeCommands = resp && !resp.error ? parseRuntimeCommandResult(resp.result) : []
+      const serverUrl = profile.server_url.replace(/\/$/, '')
+      const apiVersion = profile.connection_mode === 'http_v2' || profile.connection_mode === 'websocket_v2' || profile.connection_mode === 'mcp_v2' ? 'v2' : 'v1'
+      const specCommands = await fetchGameCommands(`${serverUrl}/api/${apiVersion}`, specLog).catch(() => [])
+      const commands = runtimeCommands.length > 0 ? mergeCommandMetadata(specCommands, runtimeCommands) : specCommands
       if (commands.length > 0) {
         commandList = formatCommandList(commands)
-        this.log('system', `Loaded ${commands.length} runtime game commands`)
+        this.log('system', runtimeCommands.length > 0
+          ? `Loaded ${commands.length} game commands (runtime metadata merged)`
+          : `Loaded ${commands.length} game commands`)
       } else {
-        const serverUrl = profile.server_url.replace(/\/$/, '')
-        const apiVersion = profile.connection_mode === 'websocket_v2' ? 'v2' : 'v1'
-        const fallbackCommands = await fetchGameCommands(`${serverUrl}/api/${apiVersion}`, specLog)
-        commandList = formatCommandList(fallbackCommands)
-        this.log('system', `Loaded ${fallbackCommands.length} game commands`)
+        commandList = ''
+        this.log('system', 'Loaded 0 game commands')
       }
     } else {
-      const serverUrl = profile.server_url.replace(/\/$/, '')
-      const apiVersion = profile.connection_mode === 'http_v2' || profile.connection_mode === 'websocket_v2' ? 'v2' : 'v1'
-      const commands = await fetchGameCommands(`${serverUrl}/api/${apiVersion}`, specLog)
-      commandList = formatCommandList(commands)
-      this.log('system', `Loaded ${commands.length} game commands`)
+      commandList = ''
+      this.log('system', 'Loaded 0 game commands')
     }
 
     // Build initial context
@@ -1247,9 +1247,17 @@ export class Agent {
       return { error: { code: 'not_connected', message: 'Not connected' } }
     }
 
+    const groupedRewrite = expandGroupedCommandAlias(command, args)
+    if (groupedRewrite.changed) {
+      this.log('system', groupedRewrite.message)
+      command = groupedRewrite.command
+      args = groupedRewrite.args
+    }
+
     this.log('tool_call', `manual: ${command}(${args ? JSON.stringify(args) : ''})`)
     const primaryResult = await this.connection.execute(command, args)
-    const result = await this.maybeFallbackToHttpV2(command, args, primaryResult, true)
+    const reloginResult = await this.maybeRetryAfterRelogin(command, args, primaryResult)
+    const result = await this.maybeFallbackToHttpV2(command, args, reloginResult, true)
 
     if (command === 'get_status' || command === 'get_location') this.cacheGameState(result)
     recordCommandOutcome(this.profileId, command, args, result, this._gameState)
@@ -1262,6 +1270,33 @@ export class Agent {
     }
 
     return result
+  }
+
+  private async maybeRetryAfterRelogin(
+    command: string,
+    args: Record<string, unknown> | undefined,
+    result: CommandResult,
+  ): Promise<CommandResult> {
+    if (!result.error) return result
+    if (result.error.code !== 'not_authenticated') return result
+
+    const profile = getProfile(this.profileId)
+    if (!profile?.username || !profile.password || !this.connection) return result
+    if (command === 'login' || command === 'register') return result
+
+    this.log('system', `Manual command ${command} hit not_authenticated; attempting re-login with stored credentials`)
+    try {
+      const loginResult = await this.connection.login(profile.username, profile.password)
+      if (!loginResult.success) {
+        this.log('system', `Automatic re-login failed for manual ${command}: ${loginResult.error || 'unknown error'}`)
+        return result
+      }
+      this.log('system', `Automatic re-login succeeded for manual ${command}; retrying command`)
+      return await this.connection.execute(command, args)
+    } catch (err) {
+      this.log('system', `Automatic re-login attempt failed for manual ${command}: ${err instanceof Error ? err.message : String(err)}`)
+      return result
+    }
   }
 
   private async maybeFallbackToHttpV2(
@@ -1636,7 +1671,7 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - Ship switching does not transfer modules automatically. When moving into a newly bought or commissioned ship, inspect both fit and cargo/storage, then either:
   1. move the old fit over with \`uninstall_mod\` -> \`switch_ship\` -> \`install_mod\`, or
   2. buy/install a fresh fit if that is faster or clearly better.
-- Carrier ships can transport stored ships in a bay. When flying a carrier and docked at the same station as the ship you want to move, prefer grouped storage commands when present: \`storage(action="deposit", item_id=<ship_id>, target=self)\` to load it and \`storage(action="withdraw", item_id=<ship_id>)\` to unload it. If the current API exposes \`storage_deposit\` / \`storage_withdraw\` aliases, those are equivalent.
+- Carrier ships can transport stored ships in a bay. When flying a carrier and docked at the same station as the ship you want to move, prefer storage commands: \`storage_deposit(item_id=<ship_id>, target=self)\` or \`storage(action="deposit", item_id=<ship_id>, target=self)\` to load it, and \`storage_withdraw(item_id=<ship_id>)\` or \`storage(action="withdraw", item_id=<ship_id>)\` to unload it.
 - On carrier ships, inspect \`get_cargo\` for \`carried_ships\`, \`bay_used\`, and \`bay_capacity\` before loading more ships or planning long travel.
 - Do not treat carried ships as ordinary cargo inventory. They consume carrier bay capacity, and if the carrier is destroyed the loaded ships become separate wrecks at that location.
 - Do not leave an upgraded ship idle in storage while continuing to fly the weaker hull, unless the new ship is temporarily unusable because of missing modules, skills, fuel, or required fitting work.

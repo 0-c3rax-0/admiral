@@ -777,23 +777,41 @@ function rewriteGroupedCommandInvocation(
   args: Record<string, unknown> | undefined,
 ): { changed: boolean; command: string; args: Record<string, unknown> | undefined; message: string } {
   const original = normalizeCommand(originalCommand || '')
-  if (resolvedCommand !== 'storage') {
-    return { changed: false, command: resolvedCommand, args, message: '' }
-  }
-  if (!original.startsWith('storage_')) {
-    return { changed: false, command: resolvedCommand, args, message: '' }
+  const groupedPrefixes: Array<{ command: string; prefix: string }> = [
+    { command: 'storage', prefix: 'storage_' },
+    { command: 'facility', prefix: 'facility_' },
+  ]
+
+  for (const grouped of groupedPrefixes) {
+    if (!original.startsWith(grouped.prefix)) continue
+    if (resolvedCommand !== grouped.command && resolvedCommand !== original) continue
+
+    const action = original.slice(grouped.prefix.length)
+    if (!action || (args && typeof args.action === 'string' && args.action.trim())) {
+      return { changed: false, command: resolvedCommand, args, message: '' }
+    }
+
+    return {
+      changed: true,
+      command: grouped.command,
+      args: { ...(args || {}), action },
+      message: `Expanded grouped command alias: ${original} -> ${grouped.command}(action=${action})`,
+    }
   }
 
-  const action = original.slice('storage_'.length)
-  if (!action || (args && typeof args.action === 'string' && args.action.trim())) {
-    return { changed: false, command: resolvedCommand, args, message: '' }
-  }
+  return { changed: false, command: resolvedCommand, args, message: '' }
+}
 
+export function expandGroupedCommandAlias(
+  command: string,
+  args: Record<string, unknown> | undefined,
+): { command: string; args: Record<string, unknown> | undefined; changed: boolean; message: string } {
+  const rewrite = rewriteGroupedCommandInvocation(command, command, args)
   return {
-    changed: true,
-    command: resolvedCommand,
-    args: { ...(args || {}), action },
-    message: `Expanded grouped command alias: ${original} -> storage(action=${action})`,
+    command: rewrite.command,
+    args: rewrite.args,
+    changed: rewrite.changed,
+    message: rewrite.message,
   }
 }
 

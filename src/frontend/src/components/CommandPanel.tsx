@@ -13,7 +13,7 @@ interface GameCommandParam {
 interface GameCommandInfo {
   name: string
   description: string
-  isMutation: boolean
+  isMutation: boolean | null
   params: GameCommandParam[]
 }
 
@@ -367,11 +367,14 @@ export function CommandPanel({ profileId, onSend, disabled, commandInputRef, ser
               <span className="text-xs font-medium text-foreground shrink-0 w-36 truncate font-jetbrains">
                 {cmd.name}
               </span>
-              {cmd.isMutation && (
+              {cmd.isMutation === true && (
                 <Zap size={10} className="text-[hsl(var(--smui-orange))] shrink-0 mt-0.5" />
               )}
-              {!cmd.isMutation && (
+              {cmd.isMutation === false && (
                 <SearchIcon size={10} className="text-[hsl(var(--smui-frost-2))] shrink-0 mt-0.5" />
+              )}
+              {cmd.isMutation === null && (
+                <span className="text-[10px] uppercase tracking-wider text-muted-foreground/60 shrink-0 mt-0.5">?</span>
               )}
               <span className="text-[11px] text-muted-foreground truncate flex-1">
                 {cmd.description}
@@ -396,8 +399,11 @@ export function CommandPanel({ profileId, onSend, disabled, commandInputRef, ser
               <span className="text-muted-foreground/30 ml-0.5">:{p.type}</span>
             </span>
           ))}
-          {selectedCommand.isMutation && (
+          {selectedCommand.isMutation === true && (
             <span className="text-[hsl(var(--smui-orange))] uppercase tracking-wider ml-auto shrink-0">1 tick</span>
+          )}
+          {selectedCommand.isMutation === null && (
+            <span className="text-muted-foreground/60 uppercase tracking-wider ml-auto shrink-0">tick unknown</span>
           )}
         </div>
       )}
