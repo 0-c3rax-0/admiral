@@ -15,7 +15,7 @@ import { ProfileView } from './ProfileView'
 const NewProfileWizard = lazy(() => import('./NewProfileWizard').then((mod) => ({ default: mod.NewProfileWizard })))
 const AdmiralTour = lazy(() => import('./AdmiralTour').then((mod) => ({ default: mod.AdmiralTour })))
 const GalaxyMapModal = lazy(() => import('./GalaxyMapModal').then((mod) => ({ default: mod.GalaxyMapModal })))
-const EconomyOverviewModal = lazy(() => import('./EconomyOverviewModal').then((mod) => ({ default: mod.EconomyOverviewModal })))
+const MarketBrowserModal = lazy(() => import('./MarketBrowserModal').then((mod) => ({ default: mod.MarketBrowserModal })))
 const FleetShipsModal = lazy(() => import('../fork/FleetShipsModal').then((mod) => ({ default: mod.FleetShipsModal })))
 
 interface Props {
@@ -839,11 +839,11 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
 
       {showMarkets && (
         <Suspense fallback={<ModalLoading label="Loading economy..." />}>
-          <EconomyOverviewModal
+          <MarketBrowserModal
             open={showMarkets}
             onClose={() => setShowMarkets(false)}
-            profiles={profiles}
-            activeProfileId={activeProfile?.id || null}
+            profileId={activeProfile?.id || ''}
+            connected={!!activeProfile && !!statuses[activeProfile.id]?.connected}
           />
         </Suspense>
       )}

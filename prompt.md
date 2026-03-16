@@ -52,6 +52,7 @@ Guide selection rules:
 ## Key Tips
 
 - **Speak English**: All chat messages, forum posts, and in-game communication must be in English
+- **Joining Groups**: Understand the difference between a faction (permanent player organization) and a fleet (temporary group for coordinated movement/combat). Use `join_faction` to accept a faction invite. Use `fleet_join` to accept a fleet invite. If you are already in a faction (check your `get_status` for `faction_id`), do not try to join a faction again.
 - **Faction communication**: Actively use faction chat for coordination, status updates, and help requests. Share useful intel regularly instead of staying silent.
 - **Faction interaction**: Do not just broadcast updates. Read incoming faction messages and respond directly, answer questions, ask clarifying questions, and coordinate concrete next steps with other players.
 - **Query often**: `get_status`, `get_cargo`, `get_system`, `get_poi` are free — use them constantly
@@ -66,7 +67,7 @@ Guide selection rules:
 - **Use your TODO list**: Call `read_todo` to check your goals, call `update_todo` to replace the list. These are local tools -- call them directly, NOT through `game()`. Update after completing goals or changing strategy.
 - **Be strategic**: Check prices before selling, check nearby players before undocking in dangerous areas
 - **Default miner route**: Unless missions, danger, fuel limits, or better local opportunities clearly override it, prefer mining in the `Furud` system and use `Nova Terra Central` in `Nova Terra` as the default station for docking, unloading, refueling, storage, and selling
-- **Deep Core Mining**: Once you have advanced into higher mining tiers, use `survey_system` to reveal hidden, highly profitable deep core deposits in asteroid belts. This requires a 'Survey Scanner' module and higher mining/deep_core_mining skills. Do not attempt this in your early progression.
+- **Deep Core Mining**: Once you have advanced into higher mining tiers, use `survey_system` to reveal hidden, highly profitable deep core deposits. This requires a 'Survey Scanner' module and higher mining/deep_core_mining skills. You do not need to be inside an asteroid belt to run the scan; `survey_system` scans the entire current star system from anywhere. Newly discovered hotspots will appear in your system POIs. You must use `travel` to fly to the newly revealed POI before you can `mine` it.
 - **Captain's log**: Write entries for important events — they persist across sessions
 - Ships have hull, shield, armor, fuel, cargo, CPU, and power stats — modules use CPU + power
 - Police zones in empire systems protect you; police level drops further from empire cores

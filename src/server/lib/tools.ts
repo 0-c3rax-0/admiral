@@ -146,11 +146,6 @@ export async function executeTool(
       ctx.log('error', errMsg)
       return errMsg
     }
-    if (isCommandTemporarilyBlocked(ctx.profileId, command)) {
-      const errMsg = `Error: temporarily blocked repeated unknown or invalid command '${command}'. Use a verified command instead of retrying the same unsupported action.`
-      ctx.log('error', errMsg)
-      return errMsg
-    }
     const resolved = await resolveCommandName(ctx.profileId, command, ctx.connection)
     if (resolved !== command) {
       ctx.log('system', `Adjusted command: ${command} -> ${resolved}`)
@@ -161,6 +156,11 @@ export async function executeTool(
       command = groupedRewrite.command
       commandArgs = groupedRewrite.args
       ctx.log('system', groupedRewrite.message)
+    }
+    if (isCommandTemporarilyBlocked(ctx.profileId, command)) {
+      const errMsg = `Error: temporarily blocked repeated unknown or invalid command '${command}'. Use a verified command instead of retrying the same unsupported action.`
+      ctx.log('error', errMsg)
+      return errMsg
     }
     const placeholderResolution = resolveDynamicArgumentPlaceholders(command, commandArgs, ctx.gameState)
     if (placeholderResolution.changed) {
@@ -187,6 +187,11 @@ export async function executeTool(
     if (normalizedNavigation.changed) {
       commandArgs = normalizedNavigation.args
       ctx.log('system', normalizedNavigation.message)
+    }
+    const normalizedSearch = normalizeSearchSystemsArgs(command, commandArgs)
+    if (normalizedSearch.changed) {
+      commandArgs = normalizedSearch.args
+      ctx.log('system', normalizedSearch.message)
     }
     const normalizedSellOrder = normalizeSellOrderArgs(ctx.profileId, command, commandArgs, ctx.gameState)
     if (normalizedSellOrder.changed) {
@@ -300,6 +305,9 @@ export function detectImmediateRecoveryHint(toolName: string, toolArgs: Record<s
   if (lower.includes('error: [already_in_system]')) {
     return { reason: 'travel target is already satisfied', suggestedStateCheck: 'get_status' }
   }
+  if (effectiveCommand === 'travel' && lower.includes('error: [invalid_poi]')) {
+    return { reason: 'travel failed because the destination POI was not found, likely because it is in a different system', suggestedStateCheck: 'get_location' }
+  }
   if (lower.includes('error: [cargo_full]')) {
     return { reason: 'cargo capacity is exhausted and the current gather plan is blocked', suggestedStateCheck: 'get_status' }
   }
@@ -320,6 +328,9 @@ export function detectImmediateRecoveryHint(toolName: string, toolArgs: Record<s
   }
   if (effectiveCommand === 'sell' && (lower.includes('error: [market') || lower.includes('error: [sell'))) {
     return { reason: 'sell action failed due to market constraints', suggestedStateCheck: 'get_status' }
+  }
+  if (effectiveCommand === 'search_systems' && (lower.includes('looks like a poi') || lower.includes('error: [invalid_query]'))) {
+    return { reason: 'search_systems was used with a POI/station name or missing query. The agent is likely confused about its current location.', suggestedStateCheck: 'get_location' }
   }
 
   return null
@@ -450,7 +461,7 @@ async function validateSearchSystemsCommand(
 ): Promise<{ systemMessage: string; errorMessage: string } | null> {
   if (!args) return null
 
-  const query = pickFirstStringArg(args.query, args.system_name, args.system, args.target)
+  const query = pickFirstStringArg(args.query, args.search, args.system_name, args.system, args.target, args.text, args.id)
   if (!query) return null
 
   const normalized = query.trim().toLowerCase()
@@ -466,7 +477,9 @@ async function validateSearchSystemsCommand(
     normalized.includes('command') ||
     normalized.includes('station') ||
     normalized.includes('shipyard') ||
-    normalized.includes('base')
+    normalized.includes('base') ||
+    normalized.includes('belt') ||
+    normalized.includes('asteroid')
 
   if (classifiedPoi !== 'unknown' || looksLikeBaseId) {
     return {
@@ -872,35 +885,37 @@ function rewriteGroupedCommandInvocation(
   ])
 
   if (bareFacilityActions.has(original)) {
-    if (!args || typeof args.action !== 'string' || !args.action.trim()) {
-      return {
-        changed: true,
-        command: 'facility',
-        args: { ...(args || {}), action: original },
-        message: `Expanded bare action alias: ${original} -> facility(action=${original})`,
-      }
+    const explicitAction = args && typeof args.action === 'string' ? args.action.trim() : ''
+    const actionToUse = explicitAction || original
+    return {
+      changed: true,
+      command: 'facility',
+      args: { ...(args || {}), action: actionToUse },
+      message: `Expanded bare action alias: ${original} -> facility(action=${actionToUse})`,
     }
   }
 
   const groupedPrefixes: Array<{ command: string; prefix: string }> = [
     { command: 'storage', prefix: 'storage_' },
     { command: 'facility', prefix: 'facility_' },
+    { command: 'facility', prefix: 'station_' },
   ]
 
   for (const grouped of groupedPrefixes) {
     if (!original.startsWith(grouped.prefix)) continue
     if (resolvedCommand !== grouped.command && resolvedCommand !== original) continue
 
-    const action = original.slice(grouped.prefix.length)
-    if (!action || (args && typeof args.action === 'string' && args.action.trim())) {
-      return { changed: false, command: resolvedCommand, args, message: '' }
-    }
+    const implicitAction = original.slice(grouped.prefix.length)
+    if (!implicitAction) continue
+
+    const explicitAction = args && typeof args.action === 'string' ? args.action.trim() : ''
+    const actionToUse = explicitAction || implicitAction
 
     return {
       changed: true,
       command: grouped.command,
-      args: { ...(args || {}), action },
-      message: `Expanded grouped command alias: ${original} -> ${grouped.command}(action=${action})`,
+      args: { ...(args || {}), action: actionToUse },
+      message: `Expanded grouped command alias: ${original} -> ${grouped.command}(action=${actionToUse})`,
     }
   }
 
@@ -1111,7 +1126,8 @@ export function resolveExplicitCommandAlias(input: string, names: string[]): str
   if (
     input === 'personal_build' || input === 'personal_decorate' || input === 'personal_visit' ||
     input === 'faction_build' || input === 'faction_upgrade' || input === 'faction_list' || input === 'faction_toggle' ||
-    input.startsWith('facility_')
+    input.startsWith('facility_') ||
+    input.startsWith('station_')
   ) {
     return chooseFirstAvailable(input, 'facility')
   }
@@ -1546,6 +1562,10 @@ function formatCommandError(command: string, code: string, message: string): str
     return `${prefix}\nInterpretation: you are already at the intended destination. Treat travel as already satisfied, refresh with get_status if needed, and continue with the next step instead of retrying travel.`
   }
 
+  if (normalized === 'invalid_poi' && command === 'travel') {
+    return `${prefix}\nInterpretation: this POI is not in your current star system. The 'travel' command only moves between POIs within the same system. If your destination is in another system, use 'search_systems' and 'find_route' to navigate there using 'jump' first. Refresh with get_location to confirm where you currently are.`
+  }
+
   if (normalized === 'cargo_full') {
     return `${prefix}\nInterpretation: cargo is full. Stop repeating resource-gathering actions. Refresh with get_status or get_cargo and switch to selling, transferring, crafting, or another cargo-clearing step.`
   }
@@ -1572,6 +1592,10 @@ function formatCommandError(command: string, code: string, message: string): str
 
   if (command === 'craft' && (normalized.includes('invalid') || normalized.includes('unknown') || normalized.includes('access') || normalized.includes('denied'))) {
     return `${prefix}\nInterpretation: this recipe is either obsolete, invalid, or your current faction/account cannot craft it here. It has been removed from your local database. Change your plan and do not attempt to craft it again.`
+  }
+
+  if (normalized === 'invalid_query' && command === 'search_systems') {
+    return `${prefix}\nInterpretation: search_systems requires a star system name. You cannot search for POIs, asteroid belts, or stations. If you don't know the system name, use get_location to orient yourself.`
   }
 
   return prefix
@@ -1647,7 +1671,7 @@ function normalizeNavigationArgs(
     }
   }
 
-  if (command === 'jump') {
+  if (command === 'jump' || command === 'find_route') {
     const targetSystem = pickFirstStringArg(next.target_system, next.system_id, next.destination_id, next.system, next.system_name, next.destination, next.target, next.id, next.text)
     if (targetSystem && next.target_system !== targetSystem) {
       next.target_system = targetSystem
@@ -1665,6 +1689,30 @@ function normalizeNavigationArgs(
     args: next,
     message: `Normalized navigation args for ${command}: ${changes.join(', ')}`,
   }
+}
+
+function normalizeSearchSystemsArgs(
+  command: string,
+  args: Record<string, unknown> | undefined,
+): { changed: boolean; args: Record<string, unknown> | undefined; message: string } {
+  if (command !== 'search_systems' || !args) return { changed: false, args, message: '' }
+
+  const next = { ...args }
+  const query = pickFirstStringArg(next.query, next.search, next.system_name, next.system, next.target, next.text, next.id)
+  
+  if (query && next.query !== query) {
+    next.query = query
+    for (const key of ['search', 'system_name', 'system', 'target', 'text', 'id'] as const) {
+      if (key in next) delete next[key]
+    }
+    return {
+      changed: true,
+      args: next,
+      message: `Normalized search_systems args: query=${query}`,
+    }
+  }
+
+  return { changed: false, args, message: '' }
 }
 
 function normalizeCatalogArgs(

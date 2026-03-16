@@ -1,5 +1,5 @@
 
-import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
+import { useState, useCallback, useEffect, useRef, useMemo, lazy, Suspense } from 'react'
 import { Square, Plug, PlugZap, Trash2, Pencil, Check, X, PanelLeft, PanelLeftClose, PanelRightClose, MessageSquare, Save, RotateCcw } from 'lucide-react'
 import type { Profile, Provider } from '@/types'
 import { Button } from '@/components/ui/button'
@@ -11,7 +11,8 @@ import { CommandPanel } from './CommandPanel'
 import { QuickCommands } from './QuickCommands'
 import { LogPane } from './LogPane'
 import { SidePane } from './SidePane'
-import { MarketBrowserModal } from './MarketBrowserModal'
+
+const MarketBrowserModal = lazy(() => import('./MarketBrowserModal').then((mod) => ({ default: mod.MarketBrowserModal })))
 
 type CatalogPanelData = {
   type: 'ships' | 'modules' | 'items'
@@ -1202,12 +1203,16 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
       {/* Manual command input */}
       <CommandPanel profileId={profile.id} onSend={handleSendCommand} disabled={!status.connected} commandInputRef={commandInputRef} serverUrl={profile.server_url} connectionMode={profile.connection_mode} />
 
-      <MarketBrowserModal
-        open={showMarketModal}
-        connected={status.connected}
-        profileId={profile.id}
-        onClose={() => setShowMarketModal(false)}
-      />
+      {showMarketModal && (
+        <Suspense fallback={null}>
+          <MarketBrowserModal
+            open={showMarketModal}
+            connected={status.connected}
+            profileId={profile.id}
+            onClose={() => setShowMarketModal(false)}
+          />
+        </Suspense>
+      )}
 
       {/* Directive modal */}
       {showDirectiveModal && (

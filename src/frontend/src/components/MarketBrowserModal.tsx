@@ -54,6 +54,18 @@ type MarketHint = {
   recommendation: 'sell_now' | 'list_near_market' | 'hold'
 }
 
+type RecipeEconomics = {
+  recipe_id: string
+  recipe_name: string
+  output_item_name: string
+  output_quantity: number
+  inputs: Array<{ item_name: string; quantity: number }>
+  estimated_input_cost: number | null
+  last_known_output_bid: number | null
+  estimated_revenue: number | null
+  estimated_profit: number | null
+}
+
 const MARKET_CATEGORIES = [
   { id: 'ore', label: 'Ore' },
   { id: 'ice', label: 'Ice' },
@@ -90,15 +102,19 @@ export function MarketBrowserModal({ open, connected, profileId, onClose }: Prop
   const [tradesOpen, setTradesOpen] = useState(false)
   const [liveTradesOpen, setLiveTradesOpen] = useState(true)
   const [hintsOpen, setHintsOpen] = useState(true)
+  const [recipeEconomics, setRecipeEconomics] = useState<RecipeEconomics[]>([])
+  const [recipeFilter, setRecipeFilter] = useState('')
+  const [importingRecipes, setImportingRecipes] = useState(false)
 
   async function loadHistory(nextCategory: string, nextStation: string) {
     setHistoryLoading(true)
     try {
-      const [snapshotResp, tradesResp, liveTradesResp, marketHintsResp] = await Promise.all([
+      const [snapshotResp, tradesResp, liveTradesResp, marketHintsResp, recipesResp] = await Promise.all([
         fetch(`/api/economy/profiles/${profileId}/market/latest?category=${encodeURIComponent(nextCategory)}`),
         fetch(`/api/economy/profiles/${profileId}/trades?limit=20`),
         fetch(`/api/economy/market/fills?station_id=${encodeURIComponent(nextStation)}&category=${encodeURIComponent(nextCategory)}&limit=100`),
         fetch(`/api/economy/market/hints?station_id=${encodeURIComponent(nextStation)}&category=${encodeURIComponent(nextCategory)}`),
+        fetch('/api/economy/recipes?limit=1000'),
       ])
 
       if (snapshotResp.ok) {
@@ -130,12 +146,20 @@ export function MarketBrowserModal({ open, connected, profileId, onClose }: Prop
       } else {
         setMarketHints([])
       }
+
+      if (recipesResp.ok) {
+        const data = await recipesResp.json()
+        setRecipeEconomics(Array.isArray(data.economics) ? data.economics : [])
+      } else {
+        setRecipeEconomics([])
+      }
     } catch {
       setStoredEntries([])
       setStoredAt(null)
       setRecentTrades([])
       setLiveTrades([])
       setMarketHints([])
+      setRecipeEconomics([])
     } finally {
       setHistoryLoading(false)
     }
@@ -145,6 +169,17 @@ export function MarketBrowserModal({ open, connected, profileId, onClose }: Prop
     if (!open) return
     loadHistory(category, selectedStation)
   }, [open, category, selectedStation])
+
+  async function importRecipes() {
+    if (!profileId) return
+    setImportingRecipes(true)
+    try {
+      await fetch(`/api/economy/profiles/${profileId}/recipes/import`, { method: 'POST' })
+      await loadHistory(category, selectedStation)
+    } finally {
+      setImportingRecipes(false)
+    }
+  }
 
   const filteredStoredEntries = useMemo(() => {
     const needle = filter.trim().toLowerCase()
@@ -164,13 +199,22 @@ export function MarketBrowserModal({ open, connected, profileId, onClose }: Prop
     return marketHints.filter((hint) => hint.item_name.toLowerCase().includes(needle))
   }, [marketHints, filter])
 
+  const filteredRecipes = useMemo(() => {
+    const needle = recipeFilter.trim().toLowerCase()
+    if (!needle) return recipeEconomics
+    return recipeEconomics.filter((r) =>
+      r.recipe_name.toLowerCase().includes(needle) ||
+      r.output_item_name.toLowerCase().includes(needle) ||
+      r.inputs.some((i) => i.item_name.toLowerCase().includes(needle))
+    )
+  }, [recipeEconomics, recipeFilter])
 
   if (!open) return null
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4" onClick={onClose}>
-      <div className="bg-card border border-border shadow-lg w-full max-w-5xl max-h-[85vh] overflow-hidden" onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+      <div className="bg-card border border-border shadow-lg w-[95vw] lg:w-[80vw] h-[90vh] lg:h-[80vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
           <div className="flex items-center gap-2">
             <Store size={14} className="text-primary" />
             <span className="font-jetbrains text-xs font-semibold tracking-[1.5px] text-primary uppercase">Market Browser</span>
@@ -180,7 +224,7 @@ export function MarketBrowserModal({ open, connected, profileId, onClose }: Prop
           </button>
         </div>
 
-        <div className="p-4 border-b border-border bg-background/40">
+        <div className="p-4 border-b border-border bg-background/40 shrink-0">
           <div className="flex flex-wrap items-center gap-2">
             {MARKET_CATEGORIES.map((item) => (
               <Button
@@ -229,190 +273,246 @@ export function MarketBrowserModal({ open, connected, profileId, onClose }: Prop
           </p>
         </div>
 
-        <div className="overflow-auto max-h-[calc(85vh-125px)]">
-          <section className="border-b border-border">
-            <button
-              onClick={() => setHintsOpen((value) => !value)}
-              className="w-full px-4 py-2.5 bg-background/30 flex items-center justify-between hover:bg-background/40 transition-colors"
-            >
-              <span className="inline-flex items-center gap-2 text-[11px] uppercase tracking-[1.2px] text-muted-foreground">
-                {hintsOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-                Price Hints
-              </span>
-              <span className="text-[10px] text-muted-foreground">{filteredMarketHints.length} Items</span>
-            </button>
-            {hintsOpen && !historyLoading && filteredMarketHints.length === 0 && (
-              <div className="px-4 py-4 text-sm text-muted-foreground">
-                Keine Preis-Hints fuer diese Station und Kategorie verfuegbar.
-              </div>
-            )}
-            {hintsOpen && filteredMarketHints.length > 0 && (
-              <table className="w-full text-xs">
-                <thead className="bg-card/70">
-                  <tr className="border-b border-border text-muted-foreground uppercase tracking-[1.2px]">
-                    <th className="text-left px-4 py-2 font-medium">Item</th>
-                    <th className="text-right px-4 py-2 font-medium">Sofort</th>
-                    <th className="text-right px-4 py-2 font-medium">Median</th>
-                    <th className="text-right px-4 py-2 font-medium">Range</th>
-                    <th className="text-right px-4 py-2 font-medium">Ask</th>
-                    <th className="text-right px-4 py-2 font-medium">Trades</th>
-                    <th className="text-left px-4 py-2 font-medium">Empfehlung</th>
-                    <th className="text-left px-4 py-2 font-medium">Confidence</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredMarketHints.map((hint) => (
-                    <tr key={hint.item_id} className="border-b border-border/50">
-                      <td className="px-4 py-2">{hint.item_name}</td>
-                      <td className="px-4 py-2 text-right tabular-nums text-[hsl(var(--smui-green))]">{formatNumber(hint.instant_sell_price)}</td>
-                      <td className="px-4 py-2 text-right tabular-nums">{formatNumber(hint.recent_fill_median)}</td>
-                      <td className="px-4 py-2 text-right tabular-nums text-muted-foreground">{formatRange(hint.recent_fill_low, hint.recent_fill_high)}</td>
-                      <td className="px-4 py-2 text-right tabular-nums text-[hsl(var(--smui-orange))]">{formatNumber(hint.best_ask)}</td>
-                      <td className="px-4 py-2 text-right tabular-nums">{hint.recent_trade_count.toLocaleString()}</td>
-                      <td className="px-4 py-2">{formatRecommendation(hint.recommendation)}</td>
-                      <td className="px-4 py-2">{formatConfidence(hint.confidence)}</td>
+        <div className="flex flex-col lg:flex-row overflow-hidden flex-1">
+          <div className="flex-1 lg:w-3/5 overflow-auto border-b lg:border-b-0 lg:border-r border-border">
+            <section className="border-b border-border">
+              <button
+                onClick={() => setHintsOpen((value) => !value)}
+                className="w-full px-4 py-2.5 bg-background/30 flex items-center justify-between hover:bg-background/40 transition-colors"
+              >
+                <span className="inline-flex items-center gap-2 text-[11px] uppercase tracking-[1.2px] text-muted-foreground">
+                  {hintsOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                  Price Hints
+                </span>
+                <span className="text-[10px] text-muted-foreground">{filteredMarketHints.length} Items</span>
+              </button>
+              {hintsOpen && !historyLoading && filteredMarketHints.length === 0 && (
+                <div className="px-4 py-4 text-sm text-muted-foreground">
+                  Keine Preis-Hints fuer diese Station und Kategorie verfuegbar.
+                </div>
+              )}
+              {hintsOpen && filteredMarketHints.length > 0 && (
+                <table className="w-full text-xs">
+                  <thead className="bg-card/70">
+                    <tr className="border-b border-border text-muted-foreground uppercase tracking-[1.2px]">
+                      <th className="text-left px-4 py-2 font-medium">Item</th>
+                      <th className="text-right px-4 py-2 font-medium">Sofort</th>
+                      <th className="text-right px-4 py-2 font-medium">Median</th>
+                      <th className="text-right px-4 py-2 font-medium">Range</th>
+                      <th className="text-right px-4 py-2 font-medium">Ask</th>
+                      <th className="text-right px-4 py-2 font-medium">Trades</th>
+                      <th className="text-left px-4 py-2 font-medium">Empfehlung</th>
+                      <th className="text-left px-4 py-2 font-medium">Confidence</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </section>
+                  </thead>
+                  <tbody>
+                    {filteredMarketHints.map((hint) => (
+                      <tr key={hint.item_id} className="border-b border-border/50">
+                        <td className="px-4 py-2">{hint.item_name}</td>
+                        <td className="px-4 py-2 text-right tabular-nums text-[hsl(var(--smui-green))]">{formatNumber(hint.instant_sell_price)}</td>
+                        <td className="px-4 py-2 text-right tabular-nums">{formatNumber(hint.recent_fill_median)}</td>
+                        <td className="px-4 py-2 text-right tabular-nums text-muted-foreground">{formatRange(hint.recent_fill_low, hint.recent_fill_high)}</td>
+                        <td className="px-4 py-2 text-right tabular-nums text-[hsl(var(--smui-orange))]">{formatNumber(hint.best_ask)}</td>
+                        <td className="px-4 py-2 text-right tabular-nums">{hint.recent_trade_count.toLocaleString()}</td>
+                        <td className="px-4 py-2">{formatRecommendation(hint.recommendation)}</td>
+                        <td className="px-4 py-2">{formatConfidence(hint.confidence)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </section>
+  
+            <section className="border-b border-border">
+              <button
+                onClick={() => setLiveTradesOpen((value) => !value)}
+                className="w-full px-4 py-2.5 bg-background/30 flex items-center justify-between hover:bg-background/40 transition-colors"
+              >
+                <span className="inline-flex items-center gap-2 text-[11px] uppercase tracking-[1.2px] text-muted-foreground">
+                  {liveTradesOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                  Live Station Trades
+                </span>
+                <span className="text-[10px] text-muted-foreground">{liveTrades.length} Eintraege</span>
+              </button>
+              {liveTradesOpen && !historyLoading && liveTrades.length === 0 && (
+                <div className="px-4 py-4 text-sm text-muted-foreground">
+                  Keine Live-Trades fuer diese Station und Kategorie gefunden.
+                </div>
+              )}
+              {liveTradesOpen && liveTrades.length > 0 && (
+                <table className="w-full text-xs">
+                  <thead className="bg-card/70">
+                    <tr className="border-b border-border text-muted-foreground uppercase tracking-[1.2px]">
+                      <th className="text-left px-4 py-2 font-medium">Zeit</th>
+                      <th className="text-left px-4 py-2 font-medium">Item</th>
+                      <th className="text-right px-4 py-2 font-medium">Menge</th>
+                      <th className="text-right px-4 py-2 font-medium">Preis</th>
+                      <th className="text-right px-4 py-2 font-medium">Total</th>
+                      <th className="text-left px-4 py-2 font-medium">Kaeufer</th>
+                      <th className="text-left px-4 py-2 font-medium">Verkaeufer</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {liveTrades.map((trade) => (
+                      <tr key={trade.id} className="border-b border-border/50">
+                        <td className="px-4 py-2 text-muted-foreground">{formatDateTime(trade.timestamp)}</td>
+                        <td className="px-4 py-2">{trade.item_name}</td>
+                        <td className="px-4 py-2 text-right tabular-nums">{formatNumber(trade.quantity)}</td>
+                        <td className="px-4 py-2 text-right tabular-nums">{formatNumber(trade.price_each)}</td>
+                        <td className="px-4 py-2 text-right tabular-nums">{formatNumber(trade.total)}</td>
+                        <td className="px-4 py-2 text-muted-foreground">{trade.buyer_name}</td>
+                        <td className="px-4 py-2 text-muted-foreground">{trade.seller_name}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </section>
+  
+            <section className="border-b border-border">
+              <button
+                onClick={() => setSnapshotOpen((value) => !value)}
+                className="w-full px-4 py-2.5 bg-background/30 flex items-center justify-between hover:bg-background/40 transition-colors"
+              >
+                <span className="inline-flex items-center gap-2 text-[11px] uppercase tracking-[1.2px] text-muted-foreground">
+                  {snapshotOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                  Stored Market Snapshot
+                </span>
+                <span className="text-[10px] text-muted-foreground">
+                  {storedAt ? formatDateTime(storedAt) : historyLoading ? 'laedt...' : 'keine Daten'}
+                </span>
+              </button>
+              {snapshotOpen && !historyLoading && filteredStoredEntries.length === 0 && (
+                <div className="px-4 py-4 text-sm text-muted-foreground">
+                  Kein gespeicherter Snapshot fuer diese Kategorie vorhanden.
+                </div>
+              )}
+              {snapshotOpen && filteredStoredEntries.length > 0 && (
+                <table className="w-full text-xs">
+                  <thead className="bg-card/70">
+                    <tr className="border-b border-border text-muted-foreground uppercase tracking-[1.2px]">
+                      <th className="text-left px-4 py-2 font-medium">Item</th>
+                      <th className="text-right px-4 py-2 font-medium">Preis</th>
+                      <th className="text-right px-4 py-2 font-medium">Best Buy</th>
+                      <th className="text-right px-4 py-2 font-medium">Best Sell</th>
+                      <th className="text-right px-4 py-2 font-medium">Buy Vol.</th>
+                      <th className="text-right px-4 py-2 font-medium">Sell Vol.</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredStoredEntries.map((entry) => (
+                      <tr key={entry.item_name} className="border-b border-border/50">
+                        <td className="px-4 py-2">{entry.item_name}</td>
+                        <td className="px-4 py-2 text-right tabular-nums text-foreground">{formatStoredPrice(entry)}</td>
+                        <td className="px-4 py-2 text-right tabular-nums text-[hsl(var(--smui-green))]">{formatNumber(entry.best_bid)}</td>
+                        <td className="px-4 py-2 text-right tabular-nums text-[hsl(var(--smui-orange))]">{formatNumber(entry.best_ask)}</td>
+                        <td className="px-4 py-2 text-right tabular-nums text-muted-foreground">{formatNumber(entry.bid_volume)}</td>
+                        <td className="px-4 py-2 text-right tabular-nums text-muted-foreground">{formatNumber(entry.ask_volume)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </section>
+  
+            <section>
+              <button
+                onClick={() => setTradesOpen((value) => !value)}
+                className="w-full px-4 py-2.5 bg-background/30 flex items-center justify-between hover:bg-background/40 transition-colors"
+              >
+                <span className="inline-flex items-center gap-2 text-[11px] uppercase tracking-[1.2px] text-muted-foreground">
+                  {tradesOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                  Recent Trades
+                </span>
+                <span className="text-[10px] text-muted-foreground">{recentTrades.length} Eintraege</span>
+              </button>
+              {tradesOpen && !historyLoading && recentTrades.length === 0 && (
+                <div className="px-4 py-4 text-sm text-muted-foreground">
+                  Noch keine eigenen Trades in der Economy-DB gespeichert.
+                </div>
+              )}
+              {tradesOpen && recentTrades.length > 0 && (
+                <table className="w-full text-xs">
+                  <thead className="bg-card/70">
+                    <tr className="border-b border-border text-muted-foreground uppercase tracking-[1.2px]">
+                      <th className="text-left px-4 py-2 font-medium">Zeit</th>
+                      <th className="text-left px-4 py-2 font-medium">Typ</th>
+                      <th className="text-left px-4 py-2 font-medium">Item</th>
+                      <th className="text-right px-4 py-2 font-medium">Menge</th>
+                      <th className="text-right px-4 py-2 font-medium">Preis</th>
+                      <th className="text-right px-4 py-2 font-medium">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {recentTrades.map((trade) => (
+                      <tr key={trade.id} className="border-b border-border/50">
+                        <td className="px-4 py-2 text-muted-foreground">{formatDateTime(trade.occurred_at)}</td>
+                        <td className={`px-4 py-2 uppercase ${trade.trade_type === 'sell' ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-frost-2))]'}`}>{trade.trade_type}</td>
+                        <td className="px-4 py-2">{trade.item_name}</td>
+                        <td className="px-4 py-2 text-right tabular-nums">{formatNumber(trade.quantity)}</td>
+                        <td className="px-4 py-2 text-right tabular-nums">{formatNumber(trade.unit_price)}</td>
+                        <td className="px-4 py-2 text-right tabular-nums">{formatNumber(trade.total_price)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </section>
+          </div>
 
-          <section className="border-b border-border">
-            <button
-              onClick={() => setLiveTradesOpen((value) => !value)}
-              className="w-full px-4 py-2.5 bg-background/30 flex items-center justify-between hover:bg-background/40 transition-colors"
-            >
-              <span className="inline-flex items-center gap-2 text-[11px] uppercase tracking-[1.2px] text-muted-foreground">
-                {liveTradesOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-                Live Station Trades
-              </span>
-              <span className="text-[10px] text-muted-foreground">{liveTrades.length} Eintraege</span>
-            </button>
-            {liveTradesOpen && !historyLoading && liveTrades.length === 0 && (
-              <div className="px-4 py-4 text-sm text-muted-foreground">
-                Keine Live-Trades fuer diese Station und Kategorie gefunden.
+          <div className="flex-1 lg:w-2/5 flex flex-col bg-background/20 overflow-hidden">
+            <div className="px-4 py-2.5 border-b border-border flex flex-wrap items-center justify-between gap-3 bg-background/40">
+              <span className="text-[11px] uppercase tracking-[1.2px] text-muted-foreground">Crafting Economics</span>
+              <div className="flex items-center gap-2">
+                <Input
+                  value={recipeFilter}
+                  onChange={(e) => setRecipeFilter(e.target.value)}
+                  placeholder="Rezepte filtern..."
+                  className="h-7 w-full max-w-[140px] text-xs"
+                />
+                <Button variant="outline" size="sm" onClick={importRecipes} disabled={importingRecipes || !connected} className="gap-1.5 h-7 px-2 text-xs">
+                  <RefreshCw size={12} className={importingRecipes ? 'animate-spin' : ''} />
+                  Import
+                </Button>
               </div>
-            )}
-            {liveTradesOpen && liveTrades.length > 0 && (
+            </div>
+            <div className="overflow-auto flex-1">
               <table className="w-full text-xs">
-                <thead className="bg-card/70">
-                  <tr className="border-b border-border text-muted-foreground uppercase tracking-[1.2px]">
-                    <th className="text-left px-4 py-2 font-medium">Zeit</th>
-                    <th className="text-left px-4 py-2 font-medium">Item</th>
-                    <th className="text-right px-4 py-2 font-medium">Menge</th>
-                    <th className="text-right px-4 py-2 font-medium">Preis</th>
-                    <th className="text-right px-4 py-2 font-medium">Total</th>
-                    <th className="text-left px-4 py-2 font-medium">Kaeufer</th>
-                    <th className="text-left px-4 py-2 font-medium">Verkaeufer</th>
+                <thead className="bg-card/70 sticky top-0 shadow-[0_1px_0_hsl(var(--smui-border))]">
+                  <tr className="text-muted-foreground uppercase tracking-[1.2px]">
+                    <th className="text-left px-4 py-2 font-medium">Recipe</th>
+                    <th className="text-right px-4 py-2 font-medium">Profit</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {liveTrades.map((trade) => (
-                    <tr key={trade.id} className="border-b border-border/50">
-                      <td className="px-4 py-2 text-muted-foreground">{formatDateTime(trade.timestamp)}</td>
-                      <td className="px-4 py-2">{trade.item_name}</td>
-                      <td className="px-4 py-2 text-right tabular-nums">{formatNumber(trade.quantity)}</td>
-                      <td className="px-4 py-2 text-right tabular-nums">{formatNumber(trade.price_each)}</td>
-                      <td className="px-4 py-2 text-right tabular-nums">{formatNumber(trade.total)}</td>
-                      <td className="px-4 py-2 text-muted-foreground">{trade.buyer_name}</td>
-                      <td className="px-4 py-2 text-muted-foreground">{trade.seller_name}</td>
+                  {filteredRecipes.map((recipe) => (
+                    <tr key={recipe.recipe_id} className="border-b border-border/50 hover:bg-background/40 transition-colors">
+                      <td className="px-4 py-2">
+                        <div className="font-medium text-foreground">{recipe.recipe_name} <span className="text-[10px] text-muted-foreground font-normal ml-1">({recipe.output_item_name} x{recipe.output_quantity})</span></div>
+                        <div className="text-[10px] text-muted-foreground mt-0.5">In: {recipe.inputs.map((input) => `${input.item_name} x${input.quantity}`).join(', ')}</div>
+                      </td>
+                      <td className="px-4 py-2 text-right">
+                        <div className={`tabular-nums ${recipe.estimated_profit !== null && recipe.estimated_profit >= 0 ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-red))]'}`}>
+                          {formatSigned(recipe.estimated_profit)}
+                        </div>
+                        <div className="text-[10px] text-muted-foreground mt-0.5">
+                          {formatNumber(recipe.estimated_input_cost)} &rarr; {formatNumber(recipe.estimated_revenue)}
+                        </div>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-            )}
-          </section>
-
-          <section className="border-b border-border">
-            <button
-              onClick={() => setSnapshotOpen((value) => !value)}
-              className="w-full px-4 py-2.5 bg-background/30 flex items-center justify-between hover:bg-background/40 transition-colors"
-            >
-              <span className="inline-flex items-center gap-2 text-[11px] uppercase tracking-[1.2px] text-muted-foreground">
-                {snapshotOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-                Stored Market Snapshot
-              </span>
-              <span className="text-[10px] text-muted-foreground">
-                {storedAt ? formatDateTime(storedAt) : historyLoading ? 'laedt...' : 'keine Daten'}
-              </span>
-            </button>
-            {snapshotOpen && !historyLoading && filteredStoredEntries.length === 0 && (
-              <div className="px-4 py-4 text-sm text-muted-foreground">
-                Kein gespeicherter Snapshot fuer diese Kategorie vorhanden.
-              </div>
-            )}
-            {snapshotOpen && filteredStoredEntries.length > 0 && (
-              <table className="w-full text-xs">
-                <thead className="bg-card/70">
-                  <tr className="border-b border-border text-muted-foreground uppercase tracking-[1.2px]">
-                    <th className="text-left px-4 py-2 font-medium">Item</th>
-                    <th className="text-right px-4 py-2 font-medium">Preis</th>
-                    <th className="text-right px-4 py-2 font-medium">Best Buy</th>
-                    <th className="text-right px-4 py-2 font-medium">Best Sell</th>
-                    <th className="text-right px-4 py-2 font-medium">Buy Vol.</th>
-                    <th className="text-right px-4 py-2 font-medium">Sell Vol.</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredStoredEntries.map((entry) => (
-                    <tr key={entry.item_name} className="border-b border-border/50">
-                      <td className="px-4 py-2">{entry.item_name}</td>
-                      <td className="px-4 py-2 text-right tabular-nums text-foreground">{formatStoredPrice(entry)}</td>
-                      <td className="px-4 py-2 text-right tabular-nums text-[hsl(var(--smui-green))]">{formatNumber(entry.best_bid)}</td>
-                      <td className="px-4 py-2 text-right tabular-nums text-[hsl(var(--smui-orange))]">{formatNumber(entry.best_ask)}</td>
-                      <td className="px-4 py-2 text-right tabular-nums text-muted-foreground">{formatNumber(entry.bid_volume)}</td>
-                      <td className="px-4 py-2 text-right tabular-nums text-muted-foreground">{formatNumber(entry.ask_volume)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </section>
-
-          <section>
-            <button
-              onClick={() => setTradesOpen((value) => !value)}
-              className="w-full px-4 py-2.5 bg-background/30 flex items-center justify-between hover:bg-background/40 transition-colors"
-            >
-              <span className="inline-flex items-center gap-2 text-[11px] uppercase tracking-[1.2px] text-muted-foreground">
-                {tradesOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-                Recent Trades
-              </span>
-              <span className="text-[10px] text-muted-foreground">{recentTrades.length} Eintraege</span>
-            </button>
-            {tradesOpen && !historyLoading && recentTrades.length === 0 && (
-              <div className="px-4 py-4 text-sm text-muted-foreground">
-                Noch keine eigenen Trades in der Economy-DB gespeichert.
-              </div>
-            )}
-            {tradesOpen && recentTrades.length > 0 && (
-              <table className="w-full text-xs">
-                <thead className="bg-card/70">
-                  <tr className="border-b border-border text-muted-foreground uppercase tracking-[1.2px]">
-                    <th className="text-left px-4 py-2 font-medium">Zeit</th>
-                    <th className="text-left px-4 py-2 font-medium">Typ</th>
-                    <th className="text-left px-4 py-2 font-medium">Item</th>
-                    <th className="text-right px-4 py-2 font-medium">Menge</th>
-                    <th className="text-right px-4 py-2 font-medium">Preis</th>
-                    <th className="text-right px-4 py-2 font-medium">Total</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {recentTrades.map((trade) => (
-                    <tr key={trade.id} className="border-b border-border/50">
-                      <td className="px-4 py-2 text-muted-foreground">{formatDateTime(trade.occurred_at)}</td>
-                      <td className={`px-4 py-2 uppercase ${trade.trade_type === 'sell' ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-frost-2))]'}`}>{trade.trade_type}</td>
-                      <td className="px-4 py-2">{trade.item_name}</td>
-                      <td className="px-4 py-2 text-right tabular-nums">{formatNumber(trade.quantity)}</td>
-                      <td className="px-4 py-2 text-right tabular-nums">{formatNumber(trade.unit_price)}</td>
-                      <td className="px-4 py-2 text-right tabular-nums">{formatNumber(trade.total_price)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </section>
+              {filteredRecipes.length === 0 && (
+                <div className="px-4 py-4 text-sm text-muted-foreground">
+                  {historyLoading ? 'Laedt...' : 'Keine Rezepte gefunden.'}
+                </div>
+              )}
+            </div>
+            <div className="px-4 py-3 text-[10px] text-muted-foreground border-t border-border mt-auto bg-background/40">
+              Import zieht Rezeptdaten aus dem aktiven Account. Profit ist eine einfache Schaetzung aus Input-Kosten und Output-Preis.
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -420,7 +520,13 @@ export function MarketBrowserModal({ open, connected, profileId, onClose }: Prop
 }
 
 function formatNumber(value: number | null): string {
-  return value === null ? '-' : value.toLocaleString()
+  return value === null ? '-' : value.toLocaleString(undefined, { maximumFractionDigits: 2 })
+}
+
+function formatSigned(value: number | null): string {
+  if (value === null) return '-'
+  const formatted = value.toLocaleString(undefined, { maximumFractionDigits: 2 })
+  return value > 0 ? `+${formatted}` : formatted
 }
 
 function formatSpread(bid: number | null, ask: number | null): string {

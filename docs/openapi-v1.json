@@ -451,6 +451,9 @@
           "auto_listed": {
             "additionalProperties": false,
             "properties": {
+              "consolidated": {
+                "type": "boolean"
+              },
               "escrow": {
                 "type": "integer"
               },
@@ -1343,6 +1346,9 @@
           "action": {
             "type": "string"
           },
+          "consolidated": {
+            "type": "boolean"
+          },
           "delivered_to_cargo": {
             "type": "integer"
           },
@@ -1482,6 +1488,9 @@
         "properties": {
           "action": {
             "type": "string"
+          },
+          "consolidated": {
+            "type": "boolean"
           },
           "fills": {
             "items": {
@@ -2075,6 +2084,9 @@
           "action": {
             "type": "string"
           },
+          "consolidated": {
+            "type": "boolean"
+          },
           "faction_id": {
             "type": "string"
           },
@@ -2150,6 +2162,9 @@
         "properties": {
           "action": {
             "type": "string"
+          },
+          "consolidated": {
+            "type": "boolean"
           },
           "faction_id": {
             "type": "string"
@@ -10374,6 +10389,9 @@
           "auto_listed": {
             "additionalProperties": false,
             "properties": {
+              "consolidated": {
+                "type": "boolean"
+              },
               "escrow": {
                 "type": "integer"
               },
