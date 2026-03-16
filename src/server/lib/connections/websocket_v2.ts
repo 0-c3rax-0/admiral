@@ -344,6 +344,9 @@ export class WebSocketV2Connection implements GameConnection {
         return false
       } finally {
         this.reconnectInFlight = null
+        if (this.shouldReconnect && (!this.ws || this.ws.readyState !== WebSocket.OPEN) && !this.reconnectTimer) {
+          this.scheduleReconnect()
+        }
       }
     })()
 
@@ -434,7 +437,9 @@ export class WebSocketV2Connection implements GameConnection {
         }
       } catch (err) {
         this.logTransport('error', `Scheduled WebSocket reconnect failed: ${err instanceof Error ? err.message : String(err)}`)
-        // onclose schedules subsequent retries
+        if (this.shouldReconnect && (!this.ws || this.ws.readyState !== WebSocket.OPEN) && !this.reconnectTimer) {
+          this.scheduleReconnect()
+        }
       }
     }, delay)
   }

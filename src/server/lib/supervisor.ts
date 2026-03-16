@@ -20,6 +20,7 @@ import {
   applyCommissionQuotes,
   dedupeShipOffers,
   extractShipOffers,
+  extractModuleDetails,
   formatRequiredSkills,
   normalizeCatalogKey,
   type ShipOffer as CatalogShipOffer,
@@ -49,6 +50,7 @@ type Candidate = {
   shipUpgradeSignals: string[]
   ownedShipSignals: string[]
   fleetCleanupSignals: string[]
+  moduleUpgradeSignals: string[]
   adviceSignals: AdviceSignal[]
 }
 
@@ -137,6 +139,7 @@ class FleetSupervisor {
   private shipUpgradeSignalsCache = new Map<string, { expiresAt: number; signals: string[] }>()
   private ownedShipSignalsCache = new Map<string, { expiresAt: number; signals: string[] }>()
   private fleetCleanupSignalsCache = new Map<string, { expiresAt: number; signals: string[] }>()
+  private moduleUpgradeSignalsCache = new Map<string, { expiresAt: number; signals: string[] }>()
   private verifiedCommandsCache = new Map<string, { expiresAt: number; commands: VerifiedCommands | null }>()
 
   start(): void {
@@ -265,9 +268,10 @@ class FleetSupervisor {
       const shipUpgradeSignals = await this.buildShipUpgradeSignals(profile, status)
       const ownedShipSignals = await this.buildOwnedShipSignals(profile, status)
       const fleetCleanupSignals = await this.buildFleetCleanupSignals(profile, status)
+      const moduleUpgradeSignals = await this.buildModuleUpgradeSignals(profile, status)
       const verifiedCommands = await this.getVerifiedCommands(profile)
       const commandHintSignals = buildCommandHintSignals(logs, verifiedCommands)
-      const adviceSignals = buildAdviceSignals(status, recentSignals, routeSignals, shipUpgradeSignals, ownedShipSignals, fleetCleanupSignals, verifiedCommands, loopSignal, commandHintSignals)
+      const adviceSignals = buildAdviceSignals(status, recentSignals, routeSignals, shipUpgradeSignals, ownedShipSignals, fleetCleanupSignals, moduleUpgradeSignals, verifiedCommands, loopSignal, commandHintSignals)
       const noisyState =
         status.mutation_state !== 'idle' ||
         recentSignals.length > 0 ||
@@ -276,6 +280,7 @@ class FleetSupervisor {
         shipUpgradeSignals.length > 0 ||
         ownedShipSignals.length > 0 ||
         fleetCleanupSignals.length > 0 ||
+        moduleUpgradeSignals.length > 0 ||
         adviceSignals.length > 0
       if (!noisyState) continue
 
@@ -292,6 +297,7 @@ class FleetSupervisor {
         shipUpgradeSignals,
         ownedShipSignals,
         fleetCleanupSignals,
+        moduleUpgradeSignals,
         adviceSignals,
       })
 
@@ -346,6 +352,22 @@ class FleetSupervisor {
 
     const signals = await computeFleetCleanupSignals(profile, status)
     this.fleetCleanupSignalsCache.set(profile.id, {
+      expiresAt: Date.now() + SHIP_UPGRADE_CACHE_TTL_MS,
+      signals,
+    })
+    return signals
+  }
+
+  private async buildModuleUpgradeSignals(
+    profile: Profile,
+    status: ReturnType<typeof agentManager.getStatus>,
+  ): Promise<string[]> {
+    const cached = this.moduleUpgradeSignalsCache.get(profile.id)
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.signals
+    }
+    const signals = await computeModuleUpgradeSignals(profile, status)
+    this.moduleUpgradeSignalsCache.set(profile.id, {
       expiresAt: Date.now() + SHIP_UPGRADE_CACHE_TTL_MS,
       signals,
     })
@@ -594,6 +616,7 @@ function buildAdviceSignals(
   shipUpgradeSignals: string[],
   ownedShipSignals: string[],
   fleetCleanupSignals: string[],
+  moduleUpgradeSignals: string[],
   verifiedCommands: VerifiedCommands | null,
   loopSignal: LoopSignal,
   commandHintSignals: CommandHintSignal[],
@@ -823,6 +846,18 @@ function buildAdviceSignals(
       recommendedChecks: ['list_ships', 'get_ship'],
       recommendedActions: ['sell_ship'],
       whyNow: 'excess non-mining hulls can be converted into mining capital or fitting budget',
+    })
+  }
+
+  if (moduleUpgradeSignals.length > 0) {
+    signals.push({
+      kind: 'upgrade_module',
+      priority: 73,
+      summary: 'A materially better mining laser is affordable and available at this station.',
+      evidence: moduleUpgradeSignals.slice(0, 1),
+      recommendedChecks: ['view_market'],
+      recommendedActions: ['buy', 'install_mod'],
+      whyNow: credits !== null ? `current credits=${credits}` : 'an affordable module upgrade window is open',
     })
   }
 
@@ -1261,6 +1296,105 @@ async function fetchShipUpgradeContext(profile: Profile): Promise<ShipUpgradeCon
     }
   } catch {
     return { offers: [], skills: {} }
+  } finally {
+    await connection.disconnect().catch(() => {})
+  }
+}
+
+async function computeModuleUpgradeSignals(
+  profile: Profile,
+  status: ReturnType<typeof agentManager.getStatus>,
+): Promise<string[]> {
+  if (!profile.username || !profile.password) return []
+  if (!isMiningFocusedProfile(profile)) return []
+
+  const poi = typeof status.gameState?.poi === 'string' ? status.gameState.poi.toLowerCase() : ''
+  if (!poi || (!poi.includes('station') && !poi.includes('base') && !poi.includes('shipyard'))) return []
+
+  const credits = toFiniteNumber(status.gameState?.credits)
+  if (credits === null || credits < 2000) return []
+
+  const modules = Array.isArray((status.gameState as Record<string, unknown> | undefined)?.modules)
+    ? ((status.gameState as Record<string, unknown>).modules as unknown[])
+    : []
+  
+  let currentLaserTier = 0
+  for (const m of modules) {
+    const name = String((m as Record<string, unknown>).name || '').toLowerCase()
+    if (name.includes('mining laser iv')) currentLaserTier = Math.max(currentLaserTier, 4)
+    else if (name.includes('mining laser iii')) currentLaserTier = Math.max(currentLaserTier, 3)
+    else if (name.includes('mining laser ii')) currentLaserTier = Math.max(currentLaserTier, 2)
+    else if (name.includes('mining laser i') || name.includes('mining laser')) currentLaserTier = Math.max(currentLaserTier, 1)
+  }
+
+  if (currentLaserTier === 0 || currentLaserTier >= 4) return []
+
+  const connection = createGameConnection(profile)
+  try {
+    await connection.connect()
+    const login = await connection.login(profile.username || '', profile.password || '')
+    if (!login.success) return []
+
+    const [marketResp, skillsResp, catalogResp] = await Promise.all([
+      connection.execute('view_market', {}),
+      connection.execute('get_skills', {}),
+      connection.execute('catalog', { type: 'modules' }),
+    ])
+
+    if (marketResp.error || skillsResp.error || catalogResp.error) return []
+
+    const marketData = ((marketResp.structuredContent ?? marketResp.result) as Record<string, unknown> | undefined) || {}
+    const items = Array.isArray(marketData.items) ? marketData.items : []
+    const availableLasers = items.filter(item => {
+      if (!item || typeof item !== 'object') return false
+      const rec = item as Record<string, unknown>
+      const name = String(rec.name || rec.item_name || rec.item_id || '').toLowerCase()
+      const ask = toFiniteNumber(rec.best_ask ?? rec.ask_price ?? rec.sell_price)
+      return name.includes('mining laser') && ask !== null && ask <= credits - 1000
+    })
+
+    if (availableLasers.length === 0) return []
+
+    const skillsData = ((skillsResp.structuredContent ?? skillsResp.result) as Record<string, unknown> | undefined) || {}
+    const skills = extractSkillLevels(skillsData)
+
+    const catalogData = ((catalogResp.structuredContent ?? catalogResp.result) as Record<string, unknown> | undefined) || {}
+    const modDetails = extractModuleDetails(catalogData)
+
+    const candidates: Array<{ name: string; tier: number; price: number; requiredSkills: SkillMap }> = []
+    for (const laser of availableLasers) {
+      const rec = laser as Record<string, unknown>
+      const name = String(rec.name || rec.item_name || rec.item_id || '')
+      const nameLower = name.toLowerCase()
+      const ask = toFiniteNumber(rec.best_ask ?? rec.ask_price ?? rec.sell_price)!
+      
+      let tier = 1
+      if (nameLower.includes(' iv')) tier = 4
+      else if (nameLower.includes(' iii')) tier = 3
+      else if (nameLower.includes(' ii')) tier = 2
+      
+      if (tier <= currentLaserTier) continue
+
+      const detail = modDetails.find(d => d.name.toLowerCase() === nameLower)
+      let requiredSkills: SkillMap = {}
+      if (detail && Object.keys(detail.requiredSkills).length > 0) {
+        if (!hasRequiredSkills(skills, detail.requiredSkills)) continue
+        requiredSkills = detail.requiredSkills
+      }
+      
+      candidates.push({ name, tier, price: ask, requiredSkills })
+    }
+
+    candidates.sort((a, b) => b.tier - a.tier || a.price - b.price)
+    const best = candidates[0]
+    if (!best) return []
+
+    const reqStr = Object.keys(best.requiredSkills).length > 0 ? ` (requires ${formatRequiredSkills(best.requiredSkills)})` : ''
+    return [
+      `affordable module upgrade available: Mining Laser Tier ${currentLaserTier} -> ${best.name} (Tier ${best.tier}) for ${best.price} cr${reqStr}. You have enough credits and skills. Replace your old laser to increase mining yield.`
+    ]
+  } catch {
+    return []
   } finally {
     await connection.disconnect().catch(() => {})
   }

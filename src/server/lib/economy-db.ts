@@ -157,6 +157,13 @@ export interface ProfileProfitHintRow {
   traded_units: number
 }
 
+export interface ShipPriceRow {
+  ship_name: string
+  class_id: string
+  price: number
+  updated_at: string
+}
+
 export function getEconomyDb(): Database {
   if (db) return db
   fs.mkdirSync(DB_DIR, { recursive: true })
@@ -256,6 +263,13 @@ function migrate(db: Database): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_recipes_output_item ON recipes(output_item_name);
+
+    CREATE TABLE IF NOT EXISTS ship_prices (
+      ship_name TEXT PRIMARY KEY,
+      class_id TEXT,
+      price REAL,
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
   `)
 
   const tradeCols = db.query("PRAGMA table_info(trade_events)").all() as Array<{ name: string }>
@@ -290,6 +304,23 @@ export function addTradeEvent(input: TradeEventInput): number {
     input.raw_json ?? null,
   )
   return Number(result.lastInsertRowid)
+}
+
+export function getRecipe(recipeId: string): RecipeRow & { inputs: RecipeInputRow[] } | null {
+  const recipe = getEconomyDb().query(
+    `SELECT recipe_id, recipe_name, output_item_name, output_quantity FROM recipes WHERE lower(recipe_id) = lower(?)`
+  ).get(recipeId) as RecipeRow | undefined
+  if (!recipe) return null
+
+  const inputs = getEconomyDb().query(
+    `SELECT item_name, quantity FROM recipe_inputs WHERE recipe_id = ?`
+  ).all(recipe.recipe_id) as RecipeInputRow[]
+
+  return { ...recipe, inputs }
+}
+
+export function deleteRecipe(recipeId: string): void {
+  getEconomyDb().query('DELETE FROM recipes WHERE lower(recipe_id) = lower(?)').run(recipeId)
 }
 
 export function addLedgerEvent(input: LedgerEventInput): number {
@@ -537,13 +568,6 @@ export function upsertRecipes(recipes: RecipeRow[], sourceProfileId?: string): n
          updated_at = datetime('now')`
     )
     const deleteInputs = database.query('DELETE FROM recipe_inputs WHERE recipe_id = ?')
-    const deleteMissingRecipes = sourceProfileId
-      ? database.query(
-        `DELETE FROM recipes
-         WHERE source_profile_id = ?
-           AND recipe_id NOT IN (${recipes.map(() => '?').join(', ')})`
-      )
-      : null
     const insertInput = database.query(
       `INSERT INTO recipe_inputs (recipe_id, item_name, quantity) VALUES (?, ?, ?)`
     )
@@ -559,9 +583,6 @@ export function upsertRecipes(recipes: RecipeRow[], sourceProfileId?: string): n
       for (const input of recipe.inputs) {
         insertInput.run(recipe.recipe_id, input.item_name, input.quantity)
       }
-    }
-    if (deleteMissingRecipes && sourceProfileId) {
-      deleteMissingRecipes.run(sourceProfileId, ...recipes.map((recipe) => recipe.recipe_id))
     }
     database.exec('COMMIT')
     return recipes.length
@@ -618,6 +639,118 @@ export function listRecipeEconomics(limit: number = 50): RecipeEconomicsRow[] {
       estimated_profit: profit,
     }
   }).sort((a, b) => (b.estimated_profit ?? -Infinity) - (a.estimated_profit ?? -Infinity))
+}
+
+export function upsertShipPrices(offers: Array<{ name: string; classId: string; price: number | null }>): number {
+  if (offers.length === 0) return 0
+  const database = getEconomyDb()
+  database.exec('BEGIN')
+  try {
+    const stmt = database.query(
+      `INSERT INTO ship_prices (ship_name, class_id, price, updated_at)
+       VALUES (?, ?, ?, datetime('now'))
+       ON CONFLICT(ship_name) DO UPDATE SET
+         class_id = excluded.class_id,
+         price = excluded.price,
+         updated_at = datetime('now')`
+    )
+    let count = 0
+    for (const offer of offers) {
+      if (offer.price !== null) {
+        stmt.run(offer.name, offer.classId, offer.price)
+        count++
+      }
+    }
+    database.exec('COMMIT')
+    return count
+  } catch (err) {
+    database.exec('ROLLBACK')
+    throw err
+  }
+}
+
+export function listShipPrices(): ShipPriceRow[] {
+  return getEconomyDb().query('SELECT ship_name, class_id, price, updated_at FROM ship_prices ORDER BY ship_name ASC').all() as ShipPriceRow[]
+}
+
+export function extractRecipesFromCatalog(data: unknown): RecipeRow[] {
+  if (!data || typeof data !== 'object') return []
+  const record = data as Record<string, unknown>
+  const candidates = [
+    record.items,
+    record.recipes,
+    record.entries,
+    record.result && typeof record.result === 'object' ? (record.result as Record<string, unknown>).items : null,
+    record.result && typeof record.result === 'object' ? (record.result as Record<string, unknown>).recipes : null,
+  ]
+
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) continue
+    const recipes = candidate
+      .map((entry, index) => toRecipeRow(entry, index))
+      .filter((recipe): recipe is RecipeRow => Boolean(recipe))
+    if (recipes.length > 0) return recipes
+  }
+  return []
+}
+
+function toRecipeRow(value: unknown, index: number): RecipeRow | null {
+  if (!value || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  const recipeId = stringOrNull(record.recipe_id) ?? stringOrNull(record.id) ?? stringOrNull(record.name) ?? `recipe-${index}`
+  const recipeName = stringOrNull(record.name) ?? recipeId
+  
+  let outputItemName = stringOrNull(record.output_item_name)
+    ?? stringOrNull(record.item_name)
+    ?? stringOrNull(record.output)
+  let outputQuantity = toFiniteNumber(record.output_quantity ?? record.quantity)
+
+  const outputsRaw = record.outputs
+  if (Array.isArray(outputsRaw) && outputsRaw.length > 0) {
+    const firstOut = outputsRaw[0]
+    if (firstOut && typeof firstOut === 'object') {
+      const outRec = firstOut as Record<string, unknown>
+      outputItemName = outputItemName ?? stringOrNull(outRec.item_id) ?? stringOrNull(outRec.item_name) ?? stringOrNull(outRec.name)
+      outputQuantity = outputQuantity ?? toFiniteNumber(outRec.quantity ?? outRec.qty ?? outRec.amount)
+    }
+  }
+
+  const inputsRaw = record.inputs ?? record.ingredients ?? record.components
+  if (!Array.isArray(inputsRaw)) return null
+
+  const inputs = inputsRaw
+    .map((input) => {
+      if (!input || typeof input !== 'object') return null
+      const row = input as Record<string, unknown>
+      const itemName = stringOrNull(row.item_name) ?? stringOrNull(row.name) ?? stringOrNull(row.item_id)
+      const quantity = toFiniteNumber(row.quantity ?? row.qty ?? row.amount)
+      if (!itemName || quantity === null || quantity <= 0) return null
+      return { item_name: itemName, quantity }
+    })
+    .filter((input): input is { item_name: string; quantity: number } => Boolean(input))
+
+  if (inputs.length === 0) return null
+
+  return {
+    recipe_id: recipeId,
+    recipe_name: recipeName,
+    output_item_name: outputItemName ?? recipeName,
+    output_quantity: outputQuantity ?? 1,
+    inputs,
+  }
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
 }
 
 export function pruneEconomyRows(): void {

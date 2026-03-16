@@ -12,7 +12,7 @@ import { resolveModel } from './model'
 import { fetchGameCommands, formatCommandList, mergeCommandMetadata, parseRuntimeCommandResult } from './schema'
 import { allTools, expandGroupedCommandAlias, mergeGameStateSnapshot } from './tools'
 import { is429PredictionEnabled, predict429Risk, runAgentTurn, type CompactionState } from './loop'
-import { addLogEntry, getLatestPendingLlmRequest, getProfile, updateProfile, getPreference } from './db'
+import { addLogEntry, getLatestPendingLlmRequest, getProfile, updateProfile, getPreference, getProfileSkills } from './db'
 import { EventEmitter } from 'events'
 import fs from 'fs'
 import path from 'path'
@@ -62,6 +62,8 @@ const CONTINUE_NUDGE_INTERVAL = 6
 const LEARNING_CONTEXT_REFRESH_INTERVAL_MS = 5 * 60_000
 const MARKET_TELEMETRY_INTERVAL = 3
 const SHIP_TELEMETRY_INTERVAL = 8
+const RECIPE_TELEMETRY_INTERVAL = 12
+const MODULE_TELEMETRY_INTERVAL = 6
 const MUTATION_STALL_NUDGE_THRESHOLD = 4
 const LOCAL_MUTATION_STUCK_THRESHOLD = 6
 const PENDING_WAIT_SLEEP_MS = 1500
@@ -76,6 +78,7 @@ const HTTP_V2_FALLBACK_QUERY_COMMANDS = new Set([
   'estimate_purchase', 'catalog', 'browse_ships', 'list_ships', 'quote', 'wrecks', 'forum_list', 'forum_get_thread',
   'captains_log_list', 'captains_log_get', 'social_captains_log_list', 'social_captains_log_get',
   'get_commands', 'get_base', 'view_orders', 'search_systems', 'find_route', 'storage_view', 'salvage_quote',
+  'fleet_status',
 ])
 
 export type { MutationState, NavigationState } from '../../fork/server'
@@ -196,10 +199,10 @@ export class Agent {
     this.events.emit('activity', activity)
   }
 
-  private cacheGameState(result: CommandResult): void {
+  private cacheGameState(result: CommandResult, command?: string, args?: Record<string, unknown>): void {
     const data = result.structuredContent ?? result.result
     if (!data || typeof data !== 'object') return
-    const merged = mergeGameStateSnapshot(this._gameState, result)
+    const merged = mergeGameStateSnapshot(this._gameState, result, command, args)
     if (!merged) return
     this._gameState = merged
     reconcilePendingNavigationWithStatus(this.profileId, result)
@@ -270,19 +273,20 @@ export class Agent {
     locationResp: CommandResult | null
     queueResp: CommandResult | null
   }> {
-    const statusResp = await this.executeSilentQuery('get_status')
-    if (statusResp) this.cacheGameState(statusResp)
-    const locationResp = hasPendingNavigation ? await this.executeSilentQuery('get_location') : null
-    if (locationResp) this.cacheGameState(locationResp)
     const profile = getProfile(this.profileId)
-    const queueResp = hasPendingNavigation && profile && (
+    const needsQueue = hasPendingNavigation && profile && (
       profile.connection_mode === 'websocket_v2'
       || profile.connection_mode === 'http_v2'
       || profile.connection_mode === 'mcp_v2'
     )
-      ? await this.executeSilentQuery('v2_get_queue')
-      : null
-    if (queueResp) this.cacheGameState(queueResp)
+    const [statusResp, locationResp, queueResp] = await Promise.all([
+      this.executeSilentQuery('get_status'),
+      hasPendingNavigation ? this.executeSilentQuery('get_location') : Promise.resolve(null),
+      needsQueue ? this.executeSilentQuery('v2_get_queue') : Promise.resolve(null),
+    ])
+    if (statusResp) this.cacheGameState(statusResp, 'get_status')
+    if (locationResp) this.cacheGameState(locationResp, 'get_location')
+    if (queueResp) this.cacheGameState(queueResp, 'v2_get_queue')
     return { statusResp, locationResp, queueResp }
   }
 
@@ -303,6 +307,7 @@ export class Agent {
       }
       this.miningAutopilotArmed = true
     } else if (command !== 'mine' && command !== 'get_status' && command !== 'get_location' && command !== 'get_cargo') {
+    } else if (command !== 'mine' && !HTTP_V2_FALLBACK_QUERY_COMMANDS.has(command)) {
       if (this.miningAutopilotArmed) {
         this.log('system', `Mining autopilot disarmed by command change: ${command}. chained_mines=${this.miningAutopilotChainCount}`)
       }
@@ -319,6 +324,7 @@ export class Agent {
     if (!notification || typeof notification !== 'object') return null
     const record = notification as Record<string, unknown>
     const type = String(record.type || record.msg_type || '').toLowerCase()
+    if (type === 'mining_yield') return 'mine'
     if (type !== 'action_result') return null
     const payload = record.payload && typeof record.payload === 'object' ? record.payload as Record<string, unknown> : null
     const command = typeof payload?.command === 'string' ? payload.command.trim().toLowerCase() : ''
@@ -334,17 +340,20 @@ export class Agent {
   private canContinueMiningFromGameState(): boolean {
     const location = (this._gameState?.location as Record<string, unknown> | undefined) || {}
     const player = (this._gameState?.player as Record<string, unknown> | undefined) || {}
-    const modules = Array.isArray(this._gameState?.modules) ? this._gameState?.modules : []
+    const modules = Array.isArray(this._gameState?.modules) ? this._gameState?.modules : null
     const poi = resolvePoiSnapshot(location, player)
-    const fitKind = classifyMiningFit(modules)
     if (isDockedPoi(poi.type, poi.name)) return false
     if (!isResourcePoi(poi.type, poi.name)) return false
-    if (fitKind === 'none') return false
-    if (fitKind === 'mixed') return true
-    const poiType = String(poi.type || '').toLowerCase()
-    if (poiType.includes('asteroid')) return fitKind === 'ore'
-    if (poiType.includes('ice')) return fitKind === 'ice'
-    if (poiType.includes('gas')) return fitKind === 'gas'
+    
+    if (modules !== null) {
+      const fitKind = classifyMiningFit(modules)
+      if (fitKind === 'none') return false
+      if (fitKind === 'mixed') return true
+      const poiType = String(poi.type || '').toLowerCase()
+      if (poiType.includes('asteroid')) return fitKind === 'ore'
+      if (poiType.includes('ice')) return fitKind === 'ice'
+      if (poiType.includes('gas')) return fitKind === 'gas'
+    }
     return true
   }
 
@@ -354,18 +363,15 @@ export class Agent {
 
     this.miningAutopilotRunning = true
     try {
-      const [cargoResp, locationResp] = await Promise.all([
-        this.executeSilentQuery('get_cargo'),
-        this.executeSilentQuery('get_location'),
-      ])
-      if (cargoResp) this.cacheGameState(cargoResp)
-      if (locationResp) this.cacheGameState(locationResp)
+      const cargoResp = await this.executeSilentQuery('get_cargo')
+      if (cargoResp) this.cacheGameState(cargoResp, 'get_cargo')
 
       const cargoRatio = this.getCargoRatio()
       if (cargoRatio !== null && cargoRatio >= 0.95) {
         this.miningAutopilotArmed = false
         this.log('system', `Mining autopilot stopped: cargo reached ${Math.round(cargoRatio * 100)}%. chained_mines=${this.miningAutopilotChainCount}`)
         this.miningAutopilotChainCount = 0
+        this.injectNudge('Cargo is full (>= 95%). Mining autopilot disarmed. Return to your designated unload station. If it is in another system, use find_route and take ONLY the first jump. NEVER issue multiple jumps in the same turn.')
         return
       }
 
@@ -373,13 +379,14 @@ export class Agent {
         this.miningAutopilotArmed = false
         this.log('system', `Mining autopilot stopped: current live state is no longer a compatible mining situation. chained_mines=${this.miningAutopilotChainCount}`)
         this.miningAutopilotChainCount = 0
+        this.injectNudge('Mining autopilot stopped because the location or ship state is no longer valid for mining. Verify your status and plan the next step.')
         return
       }
 
       this.miningAutopilotChainCount += 1
       this.log('system', `Mining autopilot: repeating mine without LLM because cargo/fit/location still qualify. chained_mines=${this.miningAutopilotChainCount}`)
       const result = await this.connection.execute('mine')
-      this.cacheGameState(result)
+      this.cacheGameState(result, 'mine')
       this.noteCommandOutcome('mine', result)
 
       const resultText = result.error
@@ -409,7 +416,7 @@ export class Agent {
       this.log('system', 'Verified docked state after unresolved undock flow; issuing one automatic undock recovery action')
       this.log('tool_call', 'auto_recovery: game(undock)')
       const resp = await this.connection.execute('undock')
-      this.cacheGameState(resp)
+      this.cacheGameState(resp, 'undock')
       this.noteCommandOutcome('undock', resp)
 
       const resultText = resp.error
@@ -423,7 +430,7 @@ export class Agent {
       this.log('system', 'Verified undocked state after unresolved dock flow; issuing one automatic dock recovery action')
       this.log('tool_call', 'auto_recovery: game(dock)')
       const resp = await this.connection.execute('dock')
-      this.cacheGameState(resp)
+      this.cacheGameState(resp, 'dock')
       this.noteCommandOutcome('dock', resp)
 
       const resultText = resp.error
@@ -539,7 +546,7 @@ export class Agent {
   private async collectFreeTelemetry(): Promise<string | null> {
     const statusResp = await this.executeSilentQuery('get_status')
     if (!statusResp || statusResp.error) return null
-    this.cacheGameState(statusResp)
+    this.cacheGameState(statusResp, 'get_status')
 
     this.telemetryCycle++
 
@@ -564,12 +571,103 @@ export class Agent {
       if (shipInfo) sections.push(shipInfo)
     }
 
+    if (likelyDocked && this.telemetryCycle % MODULE_TELEMETRY_INTERVAL === 0) {
+      const modInfo = await this.collectModuleTelemetry()
+      if (modInfo) sections.push(modInfo)
+    }
+
+    if (likelyDocked && this.telemetryCycle % RECIPE_TELEMETRY_INTERVAL === 0) {
+      await this.collectRecipeTelemetry()
+    }
+
     if (sections.length === 0) return null
     return [
       '## Automatic Telemetry',
       'Admiral refreshed free query commands directly. Treat this snapshot as current and prefer using it instead of re-running routine get_status/get_cargo checks unless you need a fresher answer after an action.',
       ...sections,
     ].join('\n\n')
+  }
+
+  private async collectModuleTelemetry(): Promise<string | null> {
+    const profile = getProfile(this.profileId)
+    if (!profile) return null
+    const directive = (profile.directive || '').toLowerCase()
+    const isMiner = /\\bmine\\b|\\bmining\\b|\\bminer\\b|\\bore\\b/.test(directive)
+    if (!isMiner) return null
+
+    const modules = Array.isArray(this._gameState?.modules) ? this._gameState?.modules : []
+    let currentLaserTier = 0
+    for (const m of modules) {
+      const name = String((m as Record<string, unknown>).name || '').toLowerCase()
+      if (name.includes('mining laser iv')) currentLaserTier = Math.max(currentLaserTier, 4)
+      else if (name.includes('mining laser iii')) currentLaserTier = Math.max(currentLaserTier, 3)
+      else if (name.includes('mining laser ii')) currentLaserTier = Math.max(currentLaserTier, 2)
+      else if (name.includes('mining laser i') || name.includes('mining laser')) currentLaserTier = Math.max(currentLaserTier, 1)
+    }
+
+    if (currentLaserTier === 0 || currentLaserTier >= 4) return null
+
+    const [marketResp, catalogResp] = await Promise.all([
+      this.executeSilentQuery('view_market', {}),
+      this.executeSilentQuery('catalog', { type: 'modules' }),
+    ])
+
+    if (!marketResp || marketResp.error || !catalogResp || catalogResp.error) return null
+
+    const marketData = ((marketResp.structuredContent ?? marketResp.result) as Record<string, unknown> | undefined) || {}
+    const entries = extractMarketEntries(marketData)
+    const availableLasers = entries.filter(e => e.name.toLowerCase().includes('mining laser') && e.ask !== null)
+    if (availableLasers.length === 0) return null
+
+    const catalogData = ((catalogResp.structuredContent ?? catalogResp.result) as Record<string, unknown> | undefined) || {}
+    const { extractModuleDetails, formatRequiredSkills } = await import('./catalog')
+    const modDetails = extractModuleDetails(catalogData)
+
+    const skills = getProfileSkills(this.profileId)?.skills || {}
+    const credits = toFiniteNumber(((this._gameState?.player as Record<string, unknown> | undefined) || {}).credits) || 0
+
+    const candidates: string[] = []
+    for (const laser of availableLasers) {
+      const nameLower = laser.name.toLowerCase()
+      let tier = 1
+      if (nameLower.includes(' iv')) tier = 4
+      else if (nameLower.includes(' iii')) tier = 3
+      else if (nameLower.includes(' ii')) tier = 2
+      
+      if (tier <= currentLaserTier) continue
+      
+      const price = laser.ask!
+      if (price > credits - 2000) continue
+
+      const detail = modDetails.find(d => d.name.toLowerCase() === nameLower)
+      candidates.push(`- ${laser.name} at ${price} cr${detail && Object.keys(detail.requiredSkills).length > 0 ? ` (requires ${formatRequiredSkills(detail.requiredSkills)})` : ''}`)
+    }
+
+    if (candidates.length === 0) return null
+
+    return [
+      '## Module Upgrade Opportunity',
+      `You are currently using a Tier ${currentLaserTier} Mining Laser. The local market has better lasers you can afford:\n${candidates.join('\\n')}\nConsider buying and installing a better laser to increase your mining yield.`
+    ].join('\\n')
+  }
+
+  private async collectRecipeTelemetry(): Promise<void> {
+    let page = 1
+    let totalPages = 1
+    const { extractRecipesFromCatalog, upsertRecipes } = await import('./economy-db')
+
+    do {
+      const catalogResp = await this.executeSilentQuery('catalog', { type: 'recipes', page, page_size: 50 })
+      if (!catalogResp || catalogResp.error) break
+      const data = (catalogResp.structuredContent ?? catalogResp.result) as Record<string, unknown>
+      const recipes = extractRecipesFromCatalog(data)
+      if (recipes.length > 0) {
+        upsertRecipes(recipes, this.profileId)
+      }
+      const innerData = (data.result && typeof data.result === 'object' ? data.result : data) as Record<string, unknown>
+      totalPages = typeof innerData.total_pages === 'number' ? innerData.total_pages : 1
+      page++
+    } while (page <= totalPages && page <= 50)
   }
 
   private async collectCargoTelemetry(): Promise<string | null> {
@@ -749,14 +847,10 @@ export class Agent {
         }
         const detail = formatReconnectDetail(n)
         this.log('connection', formatNotificationSummary(n), detail ?? JSON.stringify(n, null, 2))
-        void Promise.all([
-          this.executeSilentQuery('get_status'),
-          this.executeSilentQuery('get_location'),
-        ])
-          .then(([statusResp, locationResp]) => {
-            if (statusResp) this.cacheGameState(statusResp)
-            if (locationResp) this.cacheGameState(locationResp)
-            this.log('system', 'Automatic status/location refresh triggered after reconnect notification')
+        void this.executeSilentQuery('get_status')
+          .then((statusResp) => {
+            if (statusResp) this.cacheGameState(statusResp, 'get_status')
+            this.log('system', 'Automatic status refresh triggered after reconnect notification')
           })
           .catch(() => {})
         return
@@ -782,7 +876,7 @@ export class Agent {
     // Fetch initial game state (best-effort)
     try {
       const statusResp = await this.connection.execute('get_status')
-      this.cacheGameState(statusResp)
+      this.cacheGameState(statusResp, 'get_status')
     } catch { /* ignore */ }
 
     // For modern websocket/v2 setups, immediately reconcile stale local pending
@@ -828,17 +922,12 @@ export class Agent {
       commandList = this.connection.getCommandList()
       this.log('system', `Discovered ${this.connection.toolCount} v2 commands`)
     } else if (this.connection) {
-      const resp = await this.connection.execute('get_commands').catch(() => null)
-      const runtimeCommands = resp && !resp.error ? parseRuntimeCommandResult(resp.result) : []
       const serverUrl = profile.server_url.replace(/\/$/, '')
       const apiVersion = profile.connection_mode === 'http_v2' || profile.connection_mode === 'websocket_v2' || profile.connection_mode === 'mcp_v2' ? 'v2' : 'v1'
-      const specCommands = await fetchGameCommands(`${serverUrl}/api/${apiVersion}`, specLog).catch(() => [])
-      const commands = runtimeCommands.length > 0 ? mergeCommandMetadata(specCommands, runtimeCommands) : specCommands
+      const commands = await fetchGameCommands(`${serverUrl}/api/${apiVersion}`, specLog).catch(() => [])
       if (commands.length > 0) {
         commandList = formatCommandList(commands)
-        this.log('system', runtimeCommands.length > 0
-          ? `Loaded ${commands.length} game commands (runtime metadata merged)`
-          : `Loaded ${commands.length} game commands`)
+        this.log('system', `Loaded ${commands.length} game commands`)
       } else {
         commandList = ''
         this.log('system', 'Loaded 0 game commands')
@@ -1050,6 +1139,7 @@ export class Agent {
               this._effectiveContextBudgetRatio = info.effectiveRatio
             },
             onGameCommandResult: (command, args, result) => {
+              this.cacheGameState(result, command, args)
               this.noteCommandOutcome(command, result)
               const changed = recordCommandOutcome(this.profileId, command, args, result, this._gameState)
               if (changed) {
@@ -1084,7 +1174,7 @@ export class Agent {
       let pendingEvents = ''
       try {
         const pollResp = await this.connection.execute('get_status')
-        this.cacheGameState(pollResp)
+        this.cacheGameState(pollResp, 'get_status')
         const notifications = Array.isArray(pollResp.notifications) ? pollResp.notifications : []
         const sawActionResult = notifications.some((n) => isActionResultNotification(n))
         const sawPendingMutation = notifications.some((n) => isPendingMutationNotification(n))
@@ -1106,10 +1196,8 @@ export class Agent {
             .join('\n')
 
           if (shouldForceStateRefreshFromNotifications(notifications)) {
-            const refreshResp = await this.connection.execute('get_status')
-            this.cacheGameState(refreshResp)
-            this.log('system', 'Automatic state refresh triggered after dock/undock-related notification')
-            pendingEvents += '\n  > [SYSTEM] Automatic recovery: refreshed state with get_status after dock/undock event.'
+            this.log('system', 'Automatic state recovery triggered after dock/undock-related notification')
+            pendingEvents += '\n  > [SYSTEM] Automatic recovery: planning state refresh triggered by notification.'
             this.pendingRecoveryNudge = buildRecoveryNudge(notifications, this._gameState)
           }
         }
@@ -1259,7 +1347,7 @@ export class Agent {
     const reloginResult = await this.maybeRetryAfterRelogin(command, args, primaryResult)
     const result = await this.maybeFallbackToHttpV2(command, args, reloginResult, true)
 
-    if (command === 'get_status' || command === 'get_location') this.cacheGameState(result)
+    this.cacheGameState(result, command, args)
     recordCommandOutcome(this.profileId, command, args, result, this._gameState)
 
     if (result.error) {
@@ -1651,6 +1739,7 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - Always check fuel before traveling and cargo space before mining.
 - Match mining targets to the installed modules before traveling or mining: ore equipment should target asteroid belts, ice harvesters should target ice fields, and gas harvesters should target gas clouds. Do not fly to an incompatible resource node just to try mine().
 - Route planning matters more now: use \`find_route\` for non-trivial jumps, and do not assume older fixed-time or fixed-fuel navigation behavior.
+- NEVER chain multiple \`jump\` or \`travel\` commands in a single response. Take exactly one movement step per turn and wait for the result.
 - Existing ships may have new speed values after a server restart. Do not rely on stale assumptions about jump duration, travel duration, or fuel burn from earlier runs.
 - If attacked by NPC pirates and escape is legal, \`jump\` or \`travel\` can be a valid recovery option. Treat navigation as a possible escape tool when combat pressure is non-player and leaving is feasible.
 - Mining loops should be practical: mine until cargo is near full (roughly 95%), but stop early if yields fail, the location lacks resources, the node mismatches the current mining fit, cargo is full, or a better unload/travel opportunity appears.
@@ -1660,7 +1749,7 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - If already at a compatible ore belt and cargo is below 95%, keep mining unless the location is depleted, yields collapse, cargo is full, no resources are available, or the current fit does not match the node.
 - If cargo reaches roughly 95%, stop mining, return to a known unload station, dock, refuel when needed, unload, and only craft items when a supported crafting action is actually available and worthwhile.
 - If docked with cargo above 15%, process cargo before leaving again: refuel when needed, unload, only craft items when a supported crafting action is actually available and worthwhile, then choose direct sell for small stacks or strong buy-side liquidity; otherwise prefer \`create_sell_order\` once quantity or expected sale value is above your configured threshold.
-- Do not hoard ore blindly. When docked with valuable raw materials, inspect the market before selling. Avoid dumping into obviously bad instant bids; prefer corrected pricing or listing behavior when needed.
+- Do not hoard ore blindly. When docked with valuable raw materials, consider refining them into higher-value crafted items (e.g., Steel Plates, Circuit Boards) if you have the recipes. Refined materials usually sell for much more via \`create_sell_order\` than raw ore. Avoid dumping into obviously bad instant bids.
 - Periodically check for practical ship upgrades when docked at a shipyard or base. Favor upgrades that materially improve cargo, mining throughput, survivability, or travel efficiency and are affordable without stalling progress.
 - Keep a wallet reserve of at least 10000 credits. Do not spend below that floor on ship purchases, fitting, or optional upgrades unless explicit human guidance overrides it.
 - Before buying another ship, check \`list_ships\` for already-owned hulls. If you already own a larger or clearly better ship than the current active hull, prefer switching into that owned ship before spending more credits on a new purchase.
@@ -1684,8 +1773,8 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
   | Archimedes | 1 | 2200 cr | 185 | 1/1/3 | 1x Mining Laser I, 1x Afterburner I, 2x Cargo Bay Expansion | none publicly exposed |
   | Excavation | 2 | 8000 cr | 250 | 1/1/4 | 1x Mining Laser II, 1x Afterburner II, 3x Cargo Bay Expansion | mining 3, small_ships 3 |
   | Deep Survey | 3 | 30000 cr | 660 | 1/1/6 | 1x Mining Laser III, 1x Afterburner III, 5x Cargo Bay Expansion | mining 5, small_ships 5 |
-  | Lithosphere | 4 | 100000 cr | 1680 | 1/2/8 | 1x Mining Laser IV, 1x Afterburner III, 7x Cargo Bay Expansion | mining 7, medium_ships 3 |
-  | Tellurian | 5 | 400000 cr | 2400 | 1/3/10 | 1x Mining Laser IV, 1x Afterburner III, 9x Cargo Bay Expansion | mining 7, large_ships 5 |
+  | Lithosphere | 4 | 100000 cr | 1680 | 1/2/8 | 1x Mining Laser IV, 1x Afterburner III, 1x Survey Scanner, 6x Cargo Bay Expansion | mining 7, deep_core_mining 1, medium_ships 3 |
+  | Tellurian | 5 | 400000 cr | 2400 | 1/3/10 | 1x Mining Laser IV, 1x Afterburner III, 1x Survey Scanner, 8x Cargo Bay Expansion | mining 7, deep_core_mining 3, large_ships 5 |
 - When evaluating a Solarian miner upgrade, prefer the next ship in that path first. Only skip a step if the next hull is unavailable, unaffordable after fitting reserve, blocked by skills, or a later step is already clearly affordable and skill-legal.
 - For non-Solarian mining accounts, prefer continuity of the current mining line: keep mining hulls in the upgrade path, keep freighters/support hulls out of it, and use \`list_ships\` plus the ship catalog before deciding to buy, switch, or sell.
 - Be social -- chat with players you meet.

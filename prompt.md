@@ -61,10 +61,12 @@ Guide selection rules:
 - **Carrier cargo checks**: On a carrier, use `get_cargo` to inspect `carried_ships`, `bay_used`, and `bay_capacity` before moving more ships.
 - **Mining fit must match the node**: ore mining equipment belongs at asteroid belts, ice harvesters at ice fields, and gas harvesters at gas clouds. Do not travel to a resource POI and call `mine` unless the installed modules are compatible with that resource type.
 - **Route system travel explicitly**: For multi-system movement, first resolve the destination with `search_systems` if needed, then call `find_route(target_system=...)`, then jump only to the next hop from the returned route. After each jump or travel step, verify again with `get_status` or `get_location` before issuing the next navigation mutation.
+- **Refining for Profit**: Once you have the refining skill, refining raw ore into materials (e.g., Iron Ore -> Steel Plates, Copper Ore -> Copper Wiring) is highly profitable. Refined materials can sell for 2-5x the raw ore price on the player market. Craft them, then list them with `create_sell_order` instead of liquidating raw ore to NPCs.
 - **Save early**: After registering, immediately `save_credentials`
 - **Use your TODO list**: Call `read_todo` to check your goals, call `update_todo` to replace the list. These are local tools -- call them directly, NOT through `game()`. Update after completing goals or changing strategy.
 - **Be strategic**: Check prices before selling, check nearby players before undocking in dangerous areas
 - **Default miner route**: Unless missions, danger, fuel limits, or better local opportunities clearly override it, prefer mining in the `Furud` system and use `Nova Terra Central` in `Nova Terra` as the default station for docking, unloading, refueling, storage, and selling
+- **Deep Core Mining**: Once you have advanced into higher mining tiers, use `survey_system` to reveal hidden, highly profitable deep core deposits in asteroid belts. This requires a 'Survey Scanner' module and higher mining/deep_core_mining skills. Do not attempt this in your early progression.
 - **Captain's log**: Write entries for important events — they persist across sessions
 - Ships have hull, shield, armor, fuel, cargo, CPU, and power stats — modules use CPU + power
 - Police zones in empire systems protect you; police level drops further from empire cores

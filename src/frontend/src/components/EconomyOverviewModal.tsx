@@ -3,6 +3,7 @@ import { ChevronDown, ChevronRight, Coins, RefreshCw, X } from 'lucide-react'
 import type { Profile } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Select } from '@/components/ui/select'
+import { Input } from '@/components/ui/input'
 
 type OverviewTrade = {
   id: number
@@ -95,6 +96,7 @@ export function EconomyOverviewModal({ open, onClose, profiles, activeProfileId 
   const [selectedCategory, setSelectedCategory] = useState('ore')
   const [selectedStation, setSelectedStation] = useState('nova_terra_central')
   const [liveTrades, setLiveTrades] = useState<LiveMarketTrade[]>([])
+  const [recipeFilter, setRecipeFilter] = useState('')
   const selectedProfileId = activeProfileId || profiles[0]?.id || ''
 
   async function loadData(profileId: string, stationId = selectedStation, category = selectedCategory) {
@@ -103,7 +105,7 @@ export function EconomyOverviewModal({ open, onClose, profiles, activeProfileId 
       const [overviewResp, hintsResp, recipesResp, liveTradesResp] = await Promise.all([
         fetch('/api/economy/overview?trade_limit=120&item_limit=40'),
         profileId ? fetch(`/api/economy/profiles/${profileId}/profit-hints?limit=20`) : Promise.resolve(null),
-        fetch('/api/economy/recipes?limit=40'),
+        fetch('/api/economy/recipes?limit=1000'),
         fetch(`/api/economy/market/fills?station_id=${encodeURIComponent(stationId)}&category=${encodeURIComponent(category)}&limit=100`),
       ])
 
@@ -175,6 +177,16 @@ export function EconomyOverviewModal({ open, onClose, profiles, activeProfileId 
     }
     return [...groups.values()]
   }, [overview])
+
+  const filteredRecipes = useMemo(() => {
+    const needle = recipeFilter.trim().toLowerCase()
+    if (!needle) return recipeEconomics
+    return recipeEconomics.filter((r) =>
+      r.recipe_name.toLowerCase().includes(needle) ||
+      r.output_item_name.toLowerCase().includes(needle) ||
+      r.inputs.some((i) => i.item_name.toLowerCase().includes(needle))
+    )
+  }, [recipeEconomics, recipeFilter])
 
   if (!open) return null
 
@@ -353,12 +365,20 @@ export function EconomyOverviewModal({ open, onClose, profiles, activeProfileId 
               </section>
 
               <section className="border border-border bg-background/30">
-                <div className="px-4 py-2.5 border-b border-border flex items-center justify-between gap-3">
+                <div className="px-4 py-2.5 border-b border-border flex flex-wrap items-center justify-between gap-3">
                   <span className="text-[11px] uppercase tracking-[1.2px] text-muted-foreground">Crafting Economics</span>
-                  <Button variant="outline" size="sm" onClick={importRecipes} disabled={importingRecipes || !selectedProfileId} className="gap-1.5">
-                    <RefreshCw size={12} className={importingRecipes ? 'animate-spin' : ''} />
-                    Import Recipes
-                  </Button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Input
+                      value={recipeFilter}
+                      onChange={(e) => setRecipeFilter(e.target.value)}
+                      placeholder="Rezepte filtern..."
+                      className="h-8 w-full max-w-[180px] text-xs"
+                    />
+                    <Button variant="outline" size="sm" onClick={importRecipes} disabled={importingRecipes || !selectedProfileId} className="gap-1.5">
+                      <RefreshCw size={12} className={importingRecipes ? 'animate-spin' : ''} />
+                      Import Recipes
+                    </Button>
+                  </div>
                 </div>
                 <div className="overflow-auto">
                   <table className="w-full text-xs">
@@ -372,7 +392,7 @@ export function EconomyOverviewModal({ open, onClose, profiles, activeProfileId 
                       </tr>
                     </thead>
                     <tbody>
-                      {recipeEconomics.map((recipe) => (
+                      {filteredRecipes.map((recipe) => (
                         <tr key={recipe.recipe_id} className="border-b border-border/50">
                           <td className="px-4 py-2">
                             <div>{recipe.recipe_name}</div>

@@ -259,23 +259,33 @@ export function ingestTradeNotification(profileId: string, notification: unknown
 
   const payload = record.payload && typeof record.payload === 'object' ? record.payload as Record<string, unknown> : null
   const command = String(payload?.command || '').toLowerCase()
-  if (command !== 'buy' && command !== 'sell') return
+  const isBuy = command.includes('buy')
+  const isSell = command.includes('sell')
+  if (!isBuy && !isSell) return
+  if (command.includes('ship') || command.includes('wreck') || command.includes('insurance')) return
 
   const result = payload?.result && typeof payload.result === 'object' ? payload.result as Record<string, unknown> : null
   if (!result) return
 
-  const quantity = toFiniteNumber(result.quantity_sold ?? result.quantity_bought ?? result.quantity ?? result.filled_quantity ?? result.amount)
+  let quantity = toFiniteNumber(result.quantity_sold ?? result.quantity_bought ?? result.quantity_filled ?? result.filled_quantity)
+  if (quantity === null && (command === 'buy' || command === 'sell')) {
+    quantity = toFiniteNumber(result.quantity ?? result.amount)
+  }
   if (quantity === null || quantity <= 0) return
 
   const itemName = String(result.item ?? result.item_name ?? result.name ?? result.item_id ?? '').trim()
   if (!itemName) return
 
-  const unitPrice = toFiniteNumber(result.price_each ?? result.unit_price ?? result.price ?? result.executed_price)
-  const totalPrice = toFiniteNumber(result.total_earned ?? result.total_spent ?? result.total_price)
+  const totalPrice = toFiniteNumber(result.total_earned ?? result.total_spent ?? result.total_cost ?? result.total_price)
+  let unitPrice = toFiniteNumber(result.price_each ?? result.unit_price ?? result.price ?? result.executed_price)
+
+  if (unitPrice === null && totalPrice !== null && quantity > 0) {
+    unitPrice = totalPrice / quantity
+  }
 
   addTradeEvent({
     profile_id: profileId,
-    trade_type: command as 'buy' | 'sell',
+    trade_type: isBuy ? 'buy' : 'sell',
     item_id: typeof result.item_id === 'string' ? result.item_id : null,
     item_name: itemName,
     quantity,
@@ -285,6 +295,49 @@ export function ingestTradeNotification(profileId: string, notification: unknown
     poi_name: extractGameStateLocation(gameState, 'poi'),
     source_command: command,
     raw_json: JSON.stringify(notification),
+  })
+}
+
+export function ingestSynchronousTrade(profileId: string, command: string, resp: unknown, gameState: Record<string, unknown> | null): void {
+  const normalizedCmd = String(command || '').toLowerCase()
+  const isBuy = normalizedCmd.includes('buy')
+  const isSell = normalizedCmd.includes('sell')
+  if (!isBuy && !isSell) return
+  if (normalizedCmd.includes('ship') || normalizedCmd.includes('wreck') || normalizedCmd.includes('insurance')) return
+
+  const record = resp as Record<string, unknown> | undefined
+  const result = (record?.structuredContent ?? record?.result) as Record<string, unknown> | undefined
+  if (!result || typeof result !== 'object') return
+  if (result.pending === true) return
+
+  let quantity = toFiniteNumber(result.quantity_sold ?? result.quantity_bought ?? result.quantity_filled ?? result.filled_quantity)
+  if (quantity === null && (normalizedCmd === 'buy' || normalizedCmd === 'sell')) {
+    quantity = toFiniteNumber(result.quantity ?? result.amount)
+  }
+  if (quantity === null || quantity <= 0) return
+
+  const itemName = String(result.item ?? result.item_name ?? result.name ?? result.item_id ?? '').trim()
+  if (!itemName) return
+
+  const totalPrice = toFiniteNumber(result.total_earned ?? result.total_spent ?? result.total_cost ?? result.total_price)
+  let unitPrice = toFiniteNumber(result.price_each ?? result.unit_price ?? result.price ?? result.executed_price)
+
+  if (unitPrice === null && totalPrice !== null && quantity > 0) {
+    unitPrice = totalPrice / quantity
+  }
+
+  addTradeEvent({
+    profile_id: profileId,
+    trade_type: isBuy ? 'buy' : 'sell',
+    item_id: typeof result.item_id === 'string' ? result.item_id : null,
+    item_name: itemName,
+    quantity,
+    unit_price: unitPrice,
+    total_price: totalPrice ?? (unitPrice !== null ? unitPrice * quantity : null),
+    system_name: extractGameStateLocation(gameState, 'system'),
+    poi_name: extractGameStateLocation(gameState, 'poi'),
+    source_command: normalizedCmd,
+    raw_json: JSON.stringify(result),
   })
 }
 

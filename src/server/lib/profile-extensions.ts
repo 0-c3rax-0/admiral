@@ -86,7 +86,7 @@ function ingestEconomyData(profileId: string, command: string, args: Record<stri
       return
     }
 
-    if (command === 'buy' || command === 'sell') {
+    if ((command.includes('buy') || command.includes('sell')) && !command.includes('ship') && !command.includes('wreck') && !command.includes('insurance')) {
       const trade = extractTradeEvent(profileId, command, result)
       if (trade) addTradeEvent(trade)
       return
@@ -107,9 +107,11 @@ function extractTradeEvent(profileId: string, command: string, result: CommandRe
   const data = result.structuredContent ?? result.result ?? result
   if (!data || typeof data !== 'object') return null
   const record = data as Record<string, unknown>
-  const quantity = toFiniteNumber(
-    record.quantity_sold ?? record.quantity_bought ?? record.quantity ?? record.filled_quantity ?? record.amount
-  )
+  
+  let quantity = toFiniteNumber(record.quantity_sold ?? record.quantity_bought ?? record.quantity_filled ?? record.filled_quantity)
+  if (quantity === null && (command === 'buy' || command === 'sell')) {
+    quantity = toFiniteNumber(record.quantity ?? record.amount)
+  }
   if (quantity === null || quantity <= 0) return null
 
   const itemName = String(
@@ -122,7 +124,7 @@ function extractTradeEvent(profileId: string, command: string, result: CommandRe
 
   return {
     profile_id: profileId,
-    trade_type: command as 'buy' | 'sell',
+    trade_type: (command.includes('buy') ? 'buy' : 'sell') as 'buy' | 'sell',
     item_id: stringOrNull(record.item_id),
     item_name: itemName,
     quantity,

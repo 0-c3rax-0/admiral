@@ -2,7 +2,7 @@ import { Agent, clearProfileMemory, readProfileMemory, writeProfileMemory, type 
 import { getProfile, addLogEntry } from './db'
 import { getPendingNavigation } from './navigation-guard'
 
-const BACKOFF_BASE = 5_000      // 5 seconds
+const BACKOFF_BASE = 12_000     // 12 seconds (must exceed PROFILE_CONNECT_COOLDOWN_MS)
 const BACKOFF_MAX = 5 * 60_000  // 5 minutes
 const BACKOFF_RESET = 60_000    // Reset backoff after 1 min of successful running
 

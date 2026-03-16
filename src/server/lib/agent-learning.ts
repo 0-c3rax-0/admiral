@@ -14,6 +14,7 @@ const QUERY_COMMANDS = new Set([
   'estimate_purchase', 'catalog', 'browse_ships', 'list_ships', 'quote', 'wrecks', 'forum_list', 'forum_get_thread',
   'captains_log_list', 'captains_log_get', 'social_captains_log_list', 'social_captains_log_get',
   'get_commands', 'get_base', 'view_orders', 'search_systems', 'find_route', 'storage_view', 'salvage_quote',
+  'fleet_status',
 ])
 const MUTATION_COMMANDS = new Set([
   'undock', 'travel', 'jump', 'dock', 'mine', 'sell', 'refuel', 'repair', 'craft', 'install_mod', 'accept_mission',
@@ -21,6 +22,7 @@ const MUTATION_COMMANDS = new Set([
   'insure', 'loot', 'salvage', 'join', 'chat', 'captains_log_add', 'social_chat', 'social_captains_log_add', 'buy',
   'storage_deposit', 'storage_withdraw', 'market_create_sell_order', 'market_create_buy_order',
   'faction_commerce_create_sell_order', 'faction_commerce_create_buy_order',
+  'fleet_create', 'fleet_invite', 'fleet_join', 'fleet_leave', 'fleet_kick', 'use_item', 'transfer',
 ])
 
 export interface AgentIdentity {
@@ -210,10 +212,10 @@ const ROLE_PRESETS: Record<AgentRole, RolePreset> = {
       'Prefer production chains with measurable margin.',
       'Check recipe and market viability before crafting or other recipe-based processing.',
     ],
-    development_focus: ['market_timing', 'inventory_discipline', 'mission_selection', 'query_discipline'],
+    development_focus: ['market_timing', 'inventory_discipline', 'crafting_efficiency', 'query_discipline'],
     playstyle: [
       'Prefer recipe-based processing, crafting, and ship/equipment progression.',
-      'Think in value chains instead of only raw ore liquidation.',
+      'Think in value chains instead of only raw ore liquidation. Refining ore (e.g., Iron to Steel Plates) and listing it via create_sell_order yields much higher profits.',
       'When docked with cargo above 15%, process it before leaving again: refuel when needed, unload, only craft items when a supported crafting action is actually available and worthwhile, then sell or list based on stack size, fees, and liquidity.',
     ],
   },
@@ -563,6 +565,19 @@ export function recordCommandOutcome(
         ts,
       }) || changed
       skillsChanged = adjustSkill(skills, 'route_planning', 0.7) || skillsChanged
+    } else if (normalized === 'craft') {
+      changed = pushEpisode(memory, {
+        id: episodeId('craft'),
+        kind: 'craft_execution',
+        summary: `Crafted items successfully${location ? ` at ${location}` : ''}.`,
+        confidence: 0.8,
+        ts,
+      }) || changed
+      skillsChanged = adjustSkill(skills, 'inventory_discipline', 0.8) || skillsChanged
+      skillsChanged = adjustSkill(skills, 'crafting_efficiency', 1.5) || skillsChanged
+      if (location) {
+        changed = confirmRule(memory, `${location} is a reliable station for crafting operations.`, 0.65, ts) || changed
+      }
     } else if (normalized === 'refuel' || normalized === 'repair' || normalized === 'dock') {
       skillsChanged = adjustSkill(skills, 'risk_management', 0.5) || skillsChanged
     } else if (normalized === 'storage_view') {
@@ -778,6 +793,7 @@ function getOrCreateSkillMap(profileId: string): Record<string, number> {
     mission_selection: 50,
     decision_efficiency: 50,
     query_discipline: 50,
+    crafting_efficiency: 50,
     ...existing,
   }
 }

@@ -21,6 +21,9 @@ import {
   shouldBlockZeroFillSell,
   shouldThrottlePendingVerification,
 } from './runtime-guards'
+import { ingestSynchronousTrade } from './agent-extensions'
+import { getRecipe, deleteRecipe } from './economy-db'
+import { getLatestStorageSnapshot } from './agent-learning'
 
 // --- Tool Definitions ---
 
@@ -85,7 +88,7 @@ export type LogFn = (type: string, summary: string, detail?: string) => void
 
 export interface ImmediateRecoveryHint {
   reason: string
-  suggestedStateCheck: 'get_status'
+  suggestedStateCheck: 'get_status' | 'get_location'
 }
 
 interface ToolContext {
@@ -224,6 +227,15 @@ export async function executeTool(
     const resp = await ctx.connection.execute(command, commandArgs && Object.keys(commandArgs).length > 0 ? commandArgs : undefined)
 
     if (resp.error) {
+      if (command === 'craft' && commandArgs) {
+        const recipeId = pickFirstStringArg(commandArgs.recipe_id, commandArgs.recipe, commandArgs.id)
+        const errLower = `${resp.error.code} ${resp.error.message}`.toLowerCase()
+        if (recipeId && (errLower.includes('unknown') || errLower.includes('invalid') || errLower.includes('not found') || errLower.includes('unsupported') || errLower.includes('access') || errLower.includes('denied'))) {
+          deleteRecipe(recipeId)
+          ctx.log('system', `Auto-cleanup: removed obsolete or inaccessible recipe '${recipeId}' from database after server rejection.`)
+        }
+      }
+
       let errMsg = formatCommandError(command, resp.error.code, resp.error.message)
       const backoffMessage = formatBackoffHint(resp)
       if (backoffMessage) {
@@ -253,9 +265,10 @@ export async function executeTool(
     if (command === 'get_status' || command === 'get_location') {
       clearNavigationRefreshRequired(ctx.profileId)
     }
-    const refreshedGameState = mergeGameStateSnapshot(ctx.gameState, resp)
+    const refreshedGameState = mergeGameStateSnapshot(ctx.gameState, resp, command, commandArgs)
     if (refreshedGameState) ctx.gameState = refreshedGameState
     ingestMarketSnapshot(ctx.profileId, command, resp)
+    ingestSynchronousTrade(ctx.profileId, command, resp, ctx.gameState ?? null)
     notePendingVerification(ctx.profileId, command)
     ctx.onGameCommandResult?.(command, commandArgs, resp)
 
@@ -295,6 +308,9 @@ export function detectImmediateRecoveryHint(toolName: string, toolArgs: Record<s
   }
   if (effectiveCommand === 'mine' && lower.includes('error: [no_equipment]') && lower.includes('ice harvester')) {
     return { reason: 'mining is blocked because the current ship/loadout cannot mine this ice node; replan locally instead of forcing this target', suggestedStateCheck: 'get_status' }
+  }
+  if (effectiveCommand === 'mine' && lower.includes('error: [unverified_location]')) {
+    return { reason: 'mining is blocked because the local state lacks verified POI data', suggestedStateCheck: 'get_location' }
   }
   if (lower.includes('error: [not_enough_fuel]')) {
     return { reason: 'movement plan is blocked by insufficient fuel', suggestedStateCheck: 'get_status' }
@@ -355,6 +371,11 @@ async function validateLocalGameCommand(
   if (command === 'mine') {
     const mineGuard = validateMineAgainstLiveState(profileId, gameState)
     if (mineGuard) return mineGuard
+  }
+
+  if (command === 'craft') {
+    const craftGuard = validateCraftCommand(profileId, args, gameState)
+    if (craftGuard) return craftGuard
   }
 
   if (command !== 'sell') return null
@@ -532,6 +553,73 @@ function validateCancelOrderCommand(
     return {
       systemMessage: 'Blocked cancel_order locally: order fields were provided, but no order_id was included. Do not cancel by item_id, quantity, or price.',
       errorMessage: formatCommandError('cancel_order', 'invalid_payload', 'invalid_payload: cancel_order requires order_id. Use view_orders to inspect your orders and then cancel the exact order_id.'),
+    }
+  }
+
+  return null
+}
+
+function validateCraftCommand(
+  profileId: string,
+  args: Record<string, unknown> | undefined,
+  gameState: Record<string, unknown> | null | undefined,
+): { systemMessage: string; errorMessage: string } | null {
+  if (!args) return null
+  const recipeId = pickFirstStringArg(args.recipe_id, args.recipe, args.id)
+  if (!recipeId) {
+    return {
+      systemMessage: 'Blocked craft locally: missing recipe_id.',
+      errorMessage: formatCommandError('craft', 'invalid_payload', 'invalid_payload: craft requires a recipe_id. Use catalog(type="recipes") to find valid recipes.'),
+    }
+  }
+
+  const locationKey = extractSellLocationKey(gameState)
+  if (!locationKey) {
+    return {
+      systemMessage: 'Blocked craft locally: not docked at a station.',
+      errorMessage: 'Error: [not_docked] You must be docked at a base with a crafting facility to craft items. Travel to a station and dock first.',
+    }
+  }
+
+  const recipe = getRecipe(recipeId)
+  if (!recipe) return null // Fallback: falls das Rezept noch nicht importiert wurde, darf der Server entscheiden
+
+  const ship = (gameState?.ship as Record<string, unknown> | undefined) || {}
+  const cargo = Array.isArray(ship.cargo) ? ship.cargo : []
+  const storage = getLatestStorageSnapshot(profileId)
+  
+  const location = (gameState?.location as Record<string, unknown> | undefined) || {}
+  const currentStationId = location.base_id || location.poi_id
+  const storageItems = storage && (storage.station_id === currentStationId || storage.station_name === location.poi_name) 
+    ? storage.items 
+    : []
+
+  const craftQuantity = toFiniteNumber(args.quantity ?? args.qty ?? args.amount) || 1
+  const missing: string[] = []
+
+  for (const input of recipe.inputs) {
+    let available = 0
+    const required = input.quantity * craftQuantity
+    const inputNameLower = input.item_name.toLowerCase()
+
+    for (const item of [...cargo, ...storageItems]) {
+      const rec = item as Record<string, unknown>
+      const name = String(rec.name || rec.item_name || '').toLowerCase()
+      const id = String(rec.item_id || '').toLowerCase()
+      if (name === inputNameLower || id === inputNameLower || id.replace(/_/g, ' ') === inputNameLower) {
+        available += toFiniteNumber(rec.quantity) || 0
+      }
+    }
+
+    if (available < required) {
+      missing.push(`${required - available}x ${input.item_name}`)
+    }
+  }
+
+  if (missing.length > 0) {
+    return {
+      systemMessage: `Blocked craft locally: missing materials for ${craftQuantity}x ${recipe.recipe_name}.`,
+      errorMessage: `Error: [insufficient_materials] Cannot craft ${craftQuantity}x ${recipe.recipe_name}. You are missing: ${missing.join(', ')}. Check the market (view_market) and buy the missing materials, or mine them first.`,
     }
   }
 
@@ -777,6 +865,23 @@ function rewriteGroupedCommandInvocation(
   args: Record<string, unknown> | undefined,
 ): { changed: boolean; command: string; args: Record<string, unknown> | undefined; message: string } {
   const original = normalizeCommand(originalCommand || '')
+
+  const bareFacilityActions = new Set([
+    'personal_build', 'personal_decorate', 'personal_visit',
+    'faction_build', 'faction_upgrade', 'faction_list', 'faction_toggle',
+  ])
+
+  if (bareFacilityActions.has(original)) {
+    if (!args || typeof args.action !== 'string' || !args.action.trim()) {
+      return {
+        changed: true,
+        command: 'facility',
+        args: { ...(args || {}), action: original },
+        message: `Expanded bare action alias: ${original} -> facility(action=${original})`,
+      }
+    }
+  }
+
   const groupedPrefixes: Array<{ command: string; prefix: string }> = [
     { command: 'storage', prefix: 'storage_' },
     { command: 'facility', prefix: 'facility_' },
@@ -1003,6 +1108,14 @@ export function resolveExplicitCommandAlias(input: string, names: string[]): str
     return chooseFirstAvailable(input, 'storage')
   }
 
+  if (
+    input === 'personal_build' || input === 'personal_decorate' || input === 'personal_visit' ||
+    input === 'faction_build' || input === 'faction_upgrade' || input === 'faction_list' || input === 'faction_toggle' ||
+    input.startsWith('facility_')
+  ) {
+    return chooseFirstAvailable(input, 'facility')
+  }
+
   return null
 }
 
@@ -1042,10 +1155,16 @@ function resolveDynamicString(value: string, gameState: Record<string, unknown>)
 }
 
 function sanitizeCommandName(value: string): string {
-  return value
+  const cleaned = value
     .trim()
     .replace(/^["'`]+|["'`]+$/g, '')
-    .replace(/[>.,;:!?]+$/g, '')
+    .replace(/[>.,;:!?</]+$/g, '')
+
+  const parenIdx = cleaned.indexOf('(')
+  if (parenIdx !== -1) {
+    return cleaned.slice(0, parenIdx).trim()
+  }
+  return cleaned
 }
 
 function isBlockedGameCommand(command: string): boolean {
@@ -1238,6 +1357,8 @@ function parseNotification(n: unknown): { tag: string; text: string } | null {
 export function mergeGameStateSnapshot(
   current: Record<string, unknown> | null | undefined,
   resp: CommandResult,
+  command?: string,
+  args?: Record<string, unknown> | undefined,
 ): Record<string, unknown> | null {
   const payload = (resp.structuredContent ?? resp.result) as Record<string, unknown> | undefined
   if (!payload || typeof payload !== 'object') return current || null
@@ -1267,33 +1388,40 @@ export function mergeGameStateSnapshot(
   if (locationWrapper && typeof locationWrapper === 'object') {
     next.location = locationWrapper
     changed = true
-  } else if ((payload.poi_id || payload.poi_name || payload.poi_type || payload.system_id || payload.system_name) && !('location' in payload)) {
+  } else if ((payload.poi_id !== undefined || payload.poi_name !== undefined || payload.poi_type !== undefined || payload.system_id !== undefined || payload.system_name !== undefined || payload.in_transit !== undefined) && !('location' in payload)) {
+    const prevLoc = (next.location && typeof next.location === 'object' ? next.location : {}) as Record<string, unknown>
     next.location = {
-      ...(next.location && typeof next.location === 'object' ? next.location as Record<string, unknown> : {}),
-      system_id: payload.system_id,
-      system_name: payload.system_name,
-      poi_id: payload.poi_id,
-      poi_name: payload.poi_name,
-      poi_type: payload.poi_type,
-      docked_at: payload.docked_at,
+      ...prevLoc,
+      system_id: payload.system_id ?? prevLoc.system_id,
+      system_name: payload.system_name ?? prevLoc.system_name,
+      poi_id: payload.poi_id ?? prevLoc.poi_id,
+      poi_name: payload.poi_name ?? prevLoc.poi_name,
+      poi_type: payload.poi_type ?? prevLoc.poi_type,
+      docked_at: payload.docked_at ?? prevLoc.docked_at,
+      in_transit: payload.in_transit ?? prevLoc.in_transit,
+      transit_type: payload.transit_type ?? prevLoc.transit_type,
+      ticks_remaining: payload.ticks_remaining ?? prevLoc.ticks_remaining,
+      transit_dest_system_name: payload.to_system ?? payload.transit_dest_system_name ?? prevLoc.transit_dest_system_name,
+      transit_dest_poi_name: payload.to_poi ?? payload.transit_dest_poi_name ?? prevLoc.transit_dest_poi_name,
     }
-    changed = true
-  } else if (payload.location && typeof payload.location === 'object') {
-    next.location = payload.location
     changed = true
   }
 
   const poiBlock = payload.poi
   if (poiBlock && typeof poiBlock === 'object') {
-    const poi = poiBlock as Record<string, unknown>
-    next.location = {
-      ...(next.location && typeof next.location === 'object' ? next.location as Record<string, unknown> : {}),
-      poi_id: poi.id ?? (next.location as Record<string, unknown> | undefined)?.poi_id,
-      poi_name: poi.name ?? (next.location as Record<string, unknown> | undefined)?.poi_name,
-      poi_type: poi.type ?? (next.location as Record<string, unknown> | undefined)?.poi_type,
-      system_id: poi.system_id ?? (next.location as Record<string, unknown> | undefined)?.system_id,
+    const isTargetedLookup = command === 'get_poi' && args && Object.keys(args).length > 0
+    if (!isTargetedLookup) {
+      const poi = poiBlock as Record<string, unknown>
+      const prevLoc = (next.location && typeof next.location === 'object' ? next.location : {}) as Record<string, unknown>
+      next.location = {
+        ...prevLoc,
+        poi_id: poi.id ?? prevLoc.poi_id,
+        poi_name: poi.name ?? prevLoc.poi_name,
+        poi_type: poi.type ?? prevLoc.poi_type,
+        system_id: poi.system_id ?? prevLoc.system_id,
+      }
+      changed = true
     }
-    changed = true
   }
 
   return changed ? next : (current || null)
@@ -1440,6 +1568,10 @@ function formatCommandError(command: string, code: string, message: string): str
 
   if ((normalized.includes('market') || normalized.includes('sell')) && command === 'sell') {
     return `${prefix}\nInterpretation: selling failed due to market or sale constraints. Refresh with get_status or market/cargo queries and choose a corrected sell plan instead of repeating the same sell action blindly.`
+  }
+
+  if (command === 'craft' && (normalized.includes('invalid') || normalized.includes('unknown') || normalized.includes('access') || normalized.includes('denied'))) {
+    return `${prefix}\nInterpretation: this recipe is either obsolete, invalid, or your current faction/account cannot craft it here. It has been removed from your local database. Change your plan and do not attempt to craft it again.`
   }
 
   return prefix

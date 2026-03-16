@@ -11,6 +11,8 @@ import {
   listTradeEvents,
   type RecipeRow,
   upsertRecipes,
+  extractRecipesFromCatalog,
+  listShipPrices,
 } from '../../../server/lib/economy-db'
 import { agentManager } from '../../../server/lib/agent-manager'
 
@@ -201,10 +203,10 @@ economy.get('/overview', (c) => {
 })
 
 economy.get('/recipes', (c) => {
-  const limit = Math.max(1, Math.min(200, parseInt(c.req.query('limit') || '100', 10) || 100))
+  const limit = Math.max(1, Math.min(1000, parseInt(c.req.query('limit') || '500', 10) || 500))
   return c.json({
     recipes: listRecipes(limit),
-    economics: listRecipeEconomics(Math.min(limit, 50)),
+    economics: listRecipeEconomics(limit),
   })
 })
 
@@ -216,72 +218,35 @@ economy.post('/profiles/:id/recipes/import', async (c) => {
   if (!agent || !agent.isConnected) return c.json({ error: 'Agent not connected' }, 400)
 
   try {
-    const result = await agent.executeCommand('catalog', { type: 'recipes' })
-    const recipes = extractRecipesFromCatalog(result.structuredContent ?? result.result ?? result)
-    const imported = upsertRecipes(recipes, id)
-    return c.json({ profile_id: id, imported, recipes: imported > 0 ? recipes.slice(0, 10) : [] })
+    let page = 1
+    let totalPages = 1
+    let totalImported = 0
+    const allRecipes: RecipeRow[] = []
+
+    do {
+      const result = await agent.executeCommand('catalog', { type: 'recipes', page, page_size: 50 })
+      const data = (result.structuredContent ?? result.result ?? result) as Record<string, unknown>
+      const recipes = extractRecipesFromCatalog(data)
+      if (recipes.length > 0) {
+        totalImported += upsertRecipes(recipes, id)
+        allRecipes.push(...recipes)
+      }
+      const innerData = (data.result && typeof data.result === 'object' ? data.result : data) as Record<string, unknown>
+      totalPages = typeof innerData.total_pages === 'number' ? innerData.total_pages : 1
+      page++
+    } while (page <= totalPages && page <= 50)
+
+    return c.json({ profile_id: id, imported: totalImported, recipes: allRecipes.slice(0, 10) })
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
   }
 })
 
+economy.get('/ships/prices', (c) => {
+  return c.json({ prices: listShipPrices() })
+})
+
 export default economy
-
-function extractRecipesFromCatalog(data: unknown): RecipeRow[] {
-  if (!data || typeof data !== 'object') return []
-  const record = data as Record<string, unknown>
-  const candidates = [
-    record.items,
-    record.recipes,
-    record.entries,
-    record.result && typeof record.result === 'object' ? (record.result as Record<string, unknown>).items : null,
-    record.result && typeof record.result === 'object' ? (record.result as Record<string, unknown>).recipes : null,
-  ]
-
-  for (const candidate of candidates) {
-    if (!Array.isArray(candidate)) continue
-    const recipes = candidate
-      .map((entry, index) => toRecipeRow(entry, index))
-      .filter((recipe): recipe is RecipeRow => Boolean(recipe))
-    if (recipes.length > 0) return recipes
-  }
-  return []
-}
-
-function toRecipeRow(value: unknown, index: number): RecipeRow | null {
-  if (!value || typeof value !== 'object') return null
-  const record = value as Record<string, unknown>
-  const recipeId = stringOrNull(record.recipe_id) ?? stringOrNull(record.id) ?? stringOrNull(record.name) ?? `recipe-${index}`
-  const recipeName = stringOrNull(record.name) ?? recipeId
-  const outputItemName = stringOrNull(record.output_item_name)
-    ?? stringOrNull(record.item_name)
-    ?? stringOrNull(record.output)
-    ?? recipeName
-  const outputQuantity = toFiniteNumber(record.output_quantity ?? record.quantity ?? 1) ?? 1
-  const inputsRaw = record.inputs ?? record.ingredients ?? record.components
-  if (!Array.isArray(inputsRaw)) return null
-
-  const inputs = inputsRaw
-    .map((input) => {
-      if (!input || typeof input !== 'object') return null
-      const row = input as Record<string, unknown>
-      const itemName = stringOrNull(row.item_name) ?? stringOrNull(row.name) ?? stringOrNull(row.item_id)
-      const quantity = toFiniteNumber(row.quantity ?? row.qty ?? row.amount)
-      if (!itemName || quantity === null || quantity <= 0) return null
-      return { item_name: itemName, quantity }
-    })
-    .filter((input): input is { item_name: string; quantity: number } => Boolean(input))
-
-  if (inputs.length === 0) return null
-
-  return {
-    recipe_id: recipeId,
-    recipe_name: recipeName,
-    output_item_name: outputItemName,
-    output_quantity: outputQuantity,
-    inputs,
-  }
-}
 
 function stringOrNull(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null

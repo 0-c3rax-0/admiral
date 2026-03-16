@@ -100,6 +100,7 @@ export async function runAgentTurn(
     stalledErrorRounds: 0,
     stagnantRounds: 0,
   }
+  let currentGameState = options?.gameState ?? null
 
   while (rounds < maxRounds) {
     if (options?.signal?.aborted) return
@@ -237,7 +238,7 @@ export async function runAgentTurn(
       profileId,
       log,
       todo: todo.value,
-      gameState: options?.gameState ?? null,
+      gameState: currentGameState,
       onGameCommandResult: options?.onGameCommandResult,
     }
     const roundToolFingerprints: string[] = []
@@ -253,6 +254,7 @@ export async function runAgentTurn(
       showedReason = true
       roundToolFingerprints.push(fingerprintToolCall(toolCall.name, toolCall.arguments))
       const result = await executeTool(toolCall.name, toolCall.arguments, toolCtx, callReason)
+      currentGameState = toolCtx.gameState ?? null
       roundResultFingerprints.push(fingerprintResult(result))
 
       // If update_todo changed the todo via local tool, sync back
