@@ -331,7 +331,16 @@ export async function fetchGameCommands(baseUrl: string, log?: SpecLogFn): Promi
     const operationId = typeof op.operationId === 'string' ? op.operationId : undefined
     const name = deriveCommandName(path, operationId, [...toolPrefixes])
     if (!name) continue
-    if (name === 'createSession' || path === '/session' || name === 'agentlogs') continue
+    if (
+      name === 'createSession' ||
+      name === 'session' ||
+      path === '/session' ||
+      path.endsWith('/session') ||
+      name === 'agentlogs' ||
+      name === 'notifications'
+    ) {
+      continue
+    }
 
     const isMutation = typeof op['x-is-mutation'] === 'boolean' ? op['x-is-mutation'] as boolean : null
     const description = (op.summary as string) || operationId || name

@@ -35,4 +35,55 @@ describe('extractFallbackToolCalls', () => {
 
     expect(extractFallbackToolCalls(response)).toHaveLength(1)
   })
+
+  test('recovers malformed inline game call with nested args', () => {
+    const response = {
+      content: [
+        { type: 'text', text: 'tool_call game(, command=travel args={"target_poi":"furud_belt"})' },
+      ],
+    } as any
+
+    expect(extractFallbackToolCalls(response)).toEqual([
+      {
+        type: 'toolCall',
+        id: 'fallback-tool-1',
+        name: 'game',
+        arguments: { command: 'travel', args: { target_poi: 'furud_belt' } },
+      },
+    ])
+  })
+
+  test('recovers malformed inline game call without args', () => {
+    const response = {
+      content: [
+        { type: 'text', text: 'game(, command=storage_view)' },
+      ],
+    } as any
+
+    expect(extractFallbackToolCalls(response)).toEqual([
+      {
+        type: 'toolCall',
+        id: 'fallback-tool-1',
+        name: 'game',
+        arguments: { command: 'storage_view', args: {} },
+      },
+    ])
+  })
+
+  test('recovers malformed inline game call for simple empty object args', () => {
+    const response = {
+      content: [
+        { type: 'text', text: 'game(, command=get_cargo args={})' },
+      ],
+    } as any
+
+    expect(extractFallbackToolCalls(response)).toEqual([
+      {
+        type: 'toolCall',
+        id: 'fallback-tool-1',
+        name: 'game',
+        arguments: { command: 'get_cargo', args: {} },
+      },
+    ])
+  })
 })

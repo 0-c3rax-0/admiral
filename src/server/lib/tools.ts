@@ -133,6 +133,18 @@ export async function executeTool(
     }
     commandArgs = normalizedCommandArgs.value
     command = sanitizeCommandName(command)
+    const repairedNestedGameCall = repairNestedGameInvocation(command, commandArgs)
+    if (repairedNestedGameCall.changed) {
+      command = repairedNestedGameCall.command
+      commandArgs = repairedNestedGameCall.args
+      ctx.log('system', repairedNestedGameCall.message)
+    }
+    const rewrittenLegacyCommand = rewriteLegacyCommandInvocation(command, commandArgs)
+    if (rewrittenLegacyCommand.changed) {
+      command = rewrittenLegacyCommand.command
+      commandArgs = rewrittenLegacyCommand.args
+      ctx.log('system', rewrittenLegacyCommand.message)
+    }
     originalCommand = command
     if (!command) return 'Error: missing \'command\' argument'
     if (LOCAL_TOOLS.has(command)) {
@@ -193,10 +205,25 @@ export async function executeTool(
       commandArgs = normalizedSearch.args
       ctx.log('system', normalizedSearch.message)
     }
+    const normalizedFacility = normalizeFacilityArgs(command, commandArgs)
+    if (normalizedFacility.changed) {
+      commandArgs = normalizedFacility.args
+      ctx.log('system', normalizedFacility.message)
+    }
+    const normalizedStorage = normalizeStorageArgs(command, commandArgs)
+    if (normalizedStorage.changed) {
+      commandArgs = normalizedStorage.args
+      ctx.log('system', normalizedStorage.message)
+    }
     const normalizedSellOrder = normalizeSellOrderArgs(ctx.profileId, command, commandArgs, ctx.gameState)
     if (normalizedSellOrder.changed) {
       commandArgs = normalizedSellOrder.args
       ctx.log('system', normalizedSellOrder.message)
+    }
+    const normalizedAuth = normalizeAuthArgs(ctx.profileId, command, commandArgs)
+    if (normalizedAuth.changed) {
+      commandArgs = normalizedAuth.args
+      ctx.log('system', normalizedAuth.message)
     }
     const reroutedSell = rerouteSellToOrder(ctx.profileId, command, commandArgs, ctx.gameState)
     if (reroutedSell.changed) {
@@ -387,6 +414,14 @@ async function validateLocalGameCommand(
   if (command === 'craft') {
     const craftGuard = validateCraftCommand(profileId, args, gameState)
     if (craftGuard) return craftGuard
+  }
+
+  if (command === 'storage') {
+    return validateStorageCommand(args)
+  }
+
+  if (command === 'facility') {
+    return validateFacilityCommand(args)
   }
 
   if (command !== 'sell') return null
@@ -633,6 +668,53 @@ function validateCraftCommand(
     return {
       systemMessage: `Blocked craft locally: missing materials for ${craftQuantity}x ${recipe.recipe_name}.`,
       errorMessage: `Error: [insufficient_materials] Cannot craft ${craftQuantity}x ${recipe.recipe_name}. You are missing: ${missing.join(', ')}. Check the market (view_market) and buy the missing materials, or mine them first.`,
+    }
+  }
+
+  return null
+}
+
+function validateFacilityCommand(
+  args: Record<string, unknown> | undefined,
+): { systemMessage: string; errorMessage: string } | null {
+  if (!args) return null
+
+  const action = typeof args.action === 'string' ? args.action.trim().toLowerCase() : ''
+  if (!action) return null
+
+  const requiresType = new Set([
+    'build',
+    'personal_build',
+    'faction_build',
+    'upgrade',
+    'faction_upgrade',
+  ])
+
+  if (requiresType.has(action)) {
+    const facilityType = pickFirstStringArg(
+      args.facility_type,
+      args.type,
+      args.facility,
+      args.base_type,
+      args.station_type,
+      args.upgrade_to,
+    )
+    if (!facilityType) {
+      const categoryHint = action === 'personal_build' ? ', category="personal"' : ''
+      return {
+        systemMessage: `Blocked facility locally: action=${action} requires facility_type.`,
+        errorMessage: formatCommandError('facility', 'invalid_payload', `invalid_payload: Must specify 'facility_type'. Use facility(action="types"${categoryHint}) to see valid type IDs before building or upgrading.`),
+      }
+    }
+
+    if (action === 'personal_build') {
+      const facilityId = pickFirstStringArg(args.facility_id, args.id, args.target, args.target_id)
+      if (facilityId && /central|station|citadel|shipyard|exchange|checkpoint|command|terra/i.test(facilityId)) {
+        return {
+          systemMessage: 'Blocked facility locally: personal_build received what looks like a station/base identifier in facility_id.',
+          errorMessage: 'Error: [invalid_payload] facility(action="personal_build") expects a personal facility type in facility_type. Do not pass the current station/base ID as facility_id. Use facility(action="types", category="personal") to inspect valid personal facility_type values first.',
+        }
+      }
     }
   }
 
@@ -935,6 +1017,33 @@ export function expandGroupedCommandAlias(
   }
 }
 
+function rewriteLegacyCommandInvocation(
+  command: string,
+  args: Record<string, unknown> | undefined,
+): { changed: boolean; command: string; args: Record<string, unknown> | undefined; message: string } {
+  const normalized = normalizeCommand(command)
+
+  if (normalized === 'get_recipes' || normalized === 'get_recipe' || normalized === 'get_receipe' || normalized === 'get_receipes') {
+    return {
+      changed: true,
+      command: 'catalog',
+      args: { ...(args || {}), type: 'recipes' },
+      message: `Rewrote legacy command alias: ${command} -> catalog(type=recipes)`,
+    }
+  }
+
+  if (normalized === 'auth_login') {
+    return {
+      changed: true,
+      command: 'login',
+      args,
+      message: `Rewrote legacy command alias: ${command} -> login`,
+    }
+  }
+
+  return { changed: false, command, args, message: '' }
+}
+
 function resolveDynamicArgumentPlaceholders(
   command: string,
   args: Record<string, unknown> | undefined,
@@ -1030,6 +1139,10 @@ function semanticCommandHints(inputRaw: string): string[] {
     hints.push('catalog(args={ type: "recipes" })')
   }
 
+  if (input === 'session' || input === 'createsession') {
+    hints.push('get_status')
+  }
+
   return hints
 }
 
@@ -1052,6 +1165,48 @@ function rankCommandSuggestions(inputRaw: string, candidates: string[]): string[
 
 function normalizeCommand(value: string): string {
   return value.trim().toLowerCase().replace(/[\s-]+/g, '_')
+}
+
+function normalizeAuthArgs(
+  profileId: string,
+  command: string,
+  args: Record<string, unknown> | undefined,
+): { changed: boolean; args: Record<string, unknown> | undefined; message: string } {
+  if (normalizeCommand(command) !== 'login') return { changed: false, args, message: '' }
+
+  const profile = getProfile(profileId)
+  if (!profile?.username || !profile.password) return { changed: false, args, message: '' }
+
+  const next: Record<string, unknown> = { ...(args || {}) }
+  const incomingUsername = typeof next.username === 'string' ? next.username : undefined
+  const incomingPassword = typeof next.password === 'string' ? next.password : undefined
+  const incomingEmpire = typeof next.empire === 'string' ? next.empire : undefined
+
+  let changed = false
+  if (incomingUsername !== profile.username) {
+    next.username = profile.username
+    changed = true
+  }
+  if (incomingPassword !== profile.password) {
+    next.password = profile.password
+    changed = true
+  }
+  if (profile.empire && incomingEmpire !== profile.empire) {
+    next.empire = profile.empire
+    changed = true
+  }
+
+  if (!changed) return { changed: false, args, message: '' }
+
+  const reason = incomingUsername && incomingUsername !== profile.username
+    ? `overrode mismatched username '${incomingUsername}' with stored profile credentials`
+    : 'filled login command from stored profile credentials'
+
+  return {
+    changed: true,
+    args: next,
+    message: `Normalized login credentials: ${reason}.`,
+  }
 }
 
 export function findCanonicalAlias(inputRaw: string, names: string[]): string | null {
@@ -1115,7 +1270,7 @@ export function resolveExplicitCommandAlias(input: string, names: string[]): str
     return chooseFirstAvailable('abandon_mission')
   }
 
-  if (input === 'get_market') {
+  if (input === 'get_market' || input === 'market_view') {
     return chooseFirstAvailable('view_market')
   }
 
@@ -1377,10 +1532,15 @@ export function mergeGameStateSnapshot(
   args?: Record<string, unknown> | undefined,
 ): Record<string, unknown> | null {
   const payload = (resp.structuredContent ?? resp.result) as Record<string, unknown> | undefined
-  if (!payload || typeof payload !== 'object') return current || null
-
   const next = current && typeof current === 'object' ? { ...current } : {}
   let changed = false
+
+  if ((!payload || typeof payload !== 'object') && resp.error) {
+    const inferred = inferStateFromCommandError(next, resp.error.code, command, args)
+    return inferred.changed ? inferred.state : (current || null)
+  }
+
+  if (!payload || typeof payload !== 'object') return current || null
 
   const player = payload.player
   if (player && typeof player === 'object') {
@@ -1441,6 +1601,66 @@ export function mergeGameStateSnapshot(
   }
 
   return changed ? next : (current || null)
+}
+
+function inferStateFromCommandError(
+  current: Record<string, unknown>,
+  code: string,
+  command?: string,
+  args?: Record<string, unknown> | undefined,
+): { changed: boolean; state: Record<string, unknown> } {
+  const normalized = String(code || '').trim().toLowerCase()
+  const next = { ...current }
+  const player = (next.player && typeof next.player === 'object' ? { ...(next.player as Record<string, unknown>) } : {}) as Record<string, unknown>
+  const prevLoc = (next.location && typeof next.location === 'object' ? { ...(next.location as Record<string, unknown>) } : {}) as Record<string, unknown>
+  if (normalized === 'already_docked' && command === 'dock') {
+    const dockedAt = pickFirstStringArg(
+      args?.station_id,
+      args?.station,
+      args?.base_id,
+      args?.base,
+      args?.id,
+      prevLoc.docked_at,
+      prevLoc.poi_name,
+      player.current_poi,
+    )
+
+    const location = {
+      ...prevLoc,
+      in_transit: false,
+      transit_type: null,
+      ticks_remaining: 0,
+      docked_at: dockedAt ?? prevLoc.docked_at ?? player.current_poi ?? null,
+      poi_name: dockedAt ?? prevLoc.docked_at ?? prevLoc.poi_name ?? player.current_poi ?? null,
+      poi_type: 'station',
+    }
+
+    player.current_poi = location.poi_name ?? dockedAt ?? player.current_poi ?? null
+
+    next.player = player
+    next.location = location
+    return { changed: true, state: next }
+  }
+
+  if (normalized === 'not_docked' && command === 'undock') {
+    const location: Record<string, unknown> = {
+      ...prevLoc,
+      docked_at: null,
+      in_transit: false,
+      transit_type: null,
+      ticks_remaining: 0,
+    }
+
+    if (typeof location.poi_type === 'string' && /station|base|shipyard|checkpoint|exchange|citadel|command/i.test(location.poi_type)) {
+      location.poi_type = 'space'
+    }
+
+    next.player = player
+    next.location = location
+    return { changed: true, state: next }
+  }
+
+  return { changed: false, state: current }
 }
 
 function ingestMarketSnapshot(profileId: string, command: string, resp: CommandResult): void {
@@ -1720,9 +1940,28 @@ function normalizeCatalogArgs(
   args: Record<string, unknown> | undefined,
 ): { changed: boolean; args: Record<string, unknown> | undefined; message: string } {
   if (command !== 'catalog' || !args) return { changed: false, args, message: '' }
-  if (typeof args.type === 'string' && args.type.trim()) return { changed: false, args, message: '' }
 
   const next = { ...args }
+
+  if (typeof next.type === 'string' && next.type.trim()) {
+    let t = next.type.trim().toLowerCase()
+    if (t === 'receipe' || t === 'receipes') t = 'recipes'
+    if (t === 'item') t = 'items'
+    if (t === 'ship') t = 'ships'
+    if (t === 'skill') t = 'skills'
+    if (t === 'recipe') t = 'recipes'
+    
+    if (t !== next.type) {
+      next.type = t
+      return {
+        changed: true,
+        args: next,
+        message: `Normalized catalog args: corrected type=${t}`,
+      }
+    }
+    return { changed: false, args, message: '' }
+  }
+
   const category = typeof next.category === 'string' ? next.category.trim().toLowerCase() : ''
   const search = typeof next.search === 'string' ? next.search.trim().toLowerCase() : ''
 
@@ -1745,6 +1984,224 @@ function normalizeCatalogArgs(
     args: next,
     message: `Normalized catalog args: injected type=${inferredType}`,
   }
+}
+
+function repairNestedGameInvocation(
+  command: string,
+  args: Record<string, unknown> | undefined,
+): { changed: boolean; command: string; args: Record<string, unknown> | undefined; message: string } {
+  if (command) return { changed: false, command, args, message: '' }
+  if (!args) return { changed: false, command, args, message: '' }
+
+  const nestedCommand = typeof args.command === 'string' ? sanitizeCommandName(args.command) : ''
+  if (!nestedCommand) return { changed: false, command, args, message: '' }
+
+  const normalizedNestedArgs = normalizeOptionalArgsRecord(args.args)
+  const nestedArgs = normalizedNestedArgs.ok ? normalizedNestedArgs.value : undefined
+  const passthrough: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(args)) {
+    if (key === 'command' || key === 'args') continue
+    passthrough[key] = value
+  }
+
+  return {
+    changed: true,
+    command: nestedCommand,
+    args: nestedArgs ? { ...passthrough, ...nestedArgs } : (Object.keys(passthrough).length > 0 ? passthrough : undefined),
+    message: `Repaired malformed nested game invocation: command=${nestedCommand}`,
+  }
+}
+
+function normalizeFacilityArgs(
+  command: string,
+  args: Record<string, unknown> | undefined,
+): { changed: boolean; args: Record<string, unknown> | undefined; message: string } {
+  if (command !== 'facility' || !args) return { changed: false, args, message: '' }
+
+  const action = typeof args.action === 'string' ? args.action.trim().toLowerCase() : ''
+  if (!action) return { changed: false, args, message: '' }
+
+  const next = { ...args }
+  const changes: string[] = []
+
+  const typeActions = new Set([
+    'build',
+    'faction_build',
+    'personal_build',
+    'types',
+    'upgrade',
+    'upgrades',
+    'faction_upgrade',
+  ])
+  const idActions = new Set([
+    'toggle',
+    'transfer',
+    'list',
+    'faction_list',
+    'faction_toggle',
+    'personal_decorate',
+    'personal_visit',
+  ])
+
+  const normalizedType = pickFirstStringArg(
+    next.facility_type,
+    next.type,
+    next.facility,
+    next.base_type,
+    next.station_type,
+    next.upgrade_to,
+  )
+  const normalizedId = pickFirstStringArg(
+    next.facility_id,
+    next.id,
+    next.target,
+    next.target_id,
+    next.facility,
+  )
+
+  if (typeActions.has(action) && normalizedType && next.facility_type !== normalizedType) {
+    next.facility_type = normalizedType
+    changes.push(`facility_type=${normalizedType}`)
+  }
+
+  if (idActions.has(action) && normalizedId && next.facility_id !== normalizedId) {
+    next.facility_id = normalizedId
+    changes.push(`facility_id=${normalizedId}`)
+  }
+
+  const keysToDelete = new Set<string>()
+  if (typeActions.has(action) && normalizedType) {
+    for (const key of ['type', 'base_type', 'station_type', 'upgrade_to'] as const) keysToDelete.add(key)
+    if (next.facility === normalizedType) keysToDelete.add('facility')
+  }
+  if (idActions.has(action) && normalizedId) {
+    for (const key of ['id', 'target', 'target_id'] as const) keysToDelete.add(key)
+    if (next.facility === normalizedId) keysToDelete.add('facility')
+  }
+  for (const key of keysToDelete) {
+    if (key in next) delete next[key]
+  }
+
+  if (changes.length === 0) return { changed: false, args, message: '' }
+
+  return {
+    changed: true,
+    args: next,
+    message: `Normalized facility args for action=${action}: ${changes.join(', ')}`,
+  }
+}
+
+function normalizeStorageArgs(
+  command: string,
+  args: Record<string, unknown> | undefined,
+): { changed: boolean; args: Record<string, unknown> | undefined; message: string } {
+  if (command !== 'storage' || !args) return { changed: false, args, message: '' }
+
+  const next = { ...args }
+  const changes: string[] = []
+  const action = typeof next.action === 'string' ? next.action.trim().toLowerCase() : ''
+
+  const normalizedAction = pickFirstStringArg(next.action, next.mode, next.operation, next.command)
+  if (normalizedAction && normalizedAction !== next.action) {
+    next.action = normalizedAction.toLowerCase()
+    changes.push(`action=${next.action}`)
+  }
+
+  const normalizedItemId = pickFirstStringArg(next.item_id, next.item, next.item_name, next.id)
+  if (normalizedItemId && next.item_id !== normalizedItemId) {
+    next.item_id = normalizedItemId
+    changes.push(`item_id=${normalizedItemId}`)
+  }
+
+  if (action === 'view') {
+    const stationId = pickFirstStringArg(next.station_id, next.station, next.base, next.location)
+    if (stationId && next.station_id !== stationId) {
+      next.station_id = stationId
+      changes.push(`station_id=${stationId}`)
+    }
+  }
+
+  if (action === 'deposit' || action === 'withdraw') {
+    const target = pickFirstStringArg(next.target, next.destination, next.player)
+    if (target) {
+      const normalizedTarget = target.toLowerCase()
+      if (normalizedTarget === 'station' || normalizedTarget === 'station_storage' || normalizedTarget === 'storage' || normalizedTarget === 'local_storage') {
+        if ('target' in next) delete next.target
+        if ('destination' in next) delete next.destination
+        if ('player' in next) delete next.player
+        changes.push('removed implicit station target')
+      } else if (next.target !== target) {
+        next.target = target
+        changes.push(`target=${target}`)
+      }
+    }
+  }
+
+  for (const key of ['mode', 'operation', 'command'] as const) {
+    if (key in next) delete next[key]
+  }
+
+  if (normalizedItemId) {
+    for (const key of ['item', 'item_name'] as const) {
+      if (key in next) delete next[key]
+    }
+    if (next.id === normalizedItemId) delete next.id
+  }
+
+  if (action === 'view' && next.station_id) {
+    for (const key of ['station', 'base', 'location'] as const) {
+      if (key in next) delete next[key]
+    }
+  }
+
+  if (changes.length === 0) return { changed: false, args, message: '' }
+
+  return {
+    changed: true,
+    args: next,
+    message: `Normalized storage args${next.action ? ` for action=${next.action}` : ''}: ${changes.join(', ')}`,
+  }
+}
+
+function validateStorageCommand(
+  args: Record<string, unknown> | undefined,
+): { systemMessage: string; errorMessage: string } | null {
+  if (!args || Object.keys(args).length === 0) return null
+
+  const action = typeof args.action === 'string' ? args.action.trim().toLowerCase() : ''
+  if (!action) {
+    return {
+      systemMessage: 'Blocked storage locally: missing action.',
+      errorMessage: formatCommandError('storage', 'invalid_payload', 'invalid_payload: storage requires action=view, action=deposit, or action=withdraw.'),
+    }
+  }
+
+  if (!['view', 'deposit', 'withdraw'].includes(action)) {
+    return {
+      systemMessage: `Blocked storage locally: unsupported action '${action}'.`,
+      errorMessage: formatCommandError('storage', 'invalid_payload', `invalid_payload: unsupported storage action '${action}'. Use view, deposit, or withdraw.`),
+    }
+  }
+
+  if (action === 'deposit' || action === 'withdraw') {
+    const itemId = pickFirstStringArg(args.item_id, args.item, args.item_name, args.id)
+    if (!itemId) {
+      return {
+        systemMessage: `Blocked storage locally: ${action} is missing item_id.`,
+        errorMessage: formatCommandError('storage', 'invalid_payload', `invalid_payload: storage(action="${action}") requires item_id.`),
+      }
+    }
+
+    const target = pickFirstStringArg(args.target, args.destination, args.player)
+    if (target && target.trim().toLowerCase() === 'station') {
+      return {
+        systemMessage: `Blocked storage locally: ${action} used target='station', which the API may misread as a player name.`,
+        errorMessage: formatCommandError('storage', 'invalid_payload', `invalid_payload: storage(action="${action}") should omit target for station storage. Use target="self" only for carrier-bay transfers.`),
+      }
+    }
+  }
+
+  return null
 }
 
 function pickFirstStringArg(...values: unknown[]): string | null {

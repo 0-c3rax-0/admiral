@@ -1,5 +1,10 @@
 # Admiral API Audit
 
+Note: this audit reflects Admiral's integration behavior, but the checked-in `docs/openapi-v1.json`
+and `docs/openapi-v2.json` snapshots can lag behind live SpaceMolt gameplay changes. When a game diff
+removes or repurposes a command, prefer runtime discovery (`get_commands`) or the live OpenAPI fetch
+path over assumptions based only on these local snapshots.
+
 Auditing all connection implementations + agent tooling against:
 - `docs/openapi-v1.json` — 161 endpoints (flat, no prefix)
 - `docs/openapi-v2.json` — 187 endpoints (namespaced under `/api/v2/`)
@@ -185,10 +190,16 @@ V2 replaced command-specific named parameters with a **generic unified scheme**:
 | `quantity` | `quantity` | Same name, no change |
 | `channel`, `target_id` (chat) | `target` | Chat target/channel |
 | `target` (refuel) | removed | Fuel target |
-| `auto_list`, `deliver_to` (buy/sell) | removed | Removed options |
+| `auto_list` (buy/sell) | removed | Removed option |
+| `deliver_to` (buy/sell) | changed over time | Do not assume removal globally; current gameplay diffs have reintroduced `deliver_to=storage` for `craft`, and newer command semantics may diverge from this local snapshot |
 | `target_system` (jump) | `id` | Jump destination |
 
 **CONFIRMED NON-ISSUE for admiral:** `v2_translate.go` has explicit passthrough — any param NOT in the declared rename mapping passes through unchanged to the v1 handler (v2_translate.go:50-55). Go's JSON unmarshaling ignores unknown fields. So `{target_poi: "sol_belt"}`, `{item_id: "iron_ore"}`, `{channel: "system"}` all work on v2 unchanged. v1-style param names are fully backward compatible.
+
+Important caveat: the local spec snapshots include stale command-era details in a few places. Recent live
+diffs changed gameplay around facilities, smuggling/customs, `distress_signal`, and `craft deliver_to`
+behavior. Treat those as runtime/live-doc concerns rather than as authoritative truths from the checked-in
+snapshot files alone.
 
 Notable v2 renames (documented in spec, but both styles work):
 - `chat`: `channel` → `target`, `target_id` → `target`

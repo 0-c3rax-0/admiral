@@ -1122,9 +1122,6 @@
             },
             "type": "object"
           },
-          "license_granted": {
-            "type": "string"
-          },
           "message": {
             "type": "string"
           },
@@ -1215,28 +1212,159 @@
           "action": {
             "type": "string"
           },
+          "from_faction_storage": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "item_id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "quantity": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "item_id",
+                "name",
+                "quantity"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "from_storage": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "item_id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "quantity": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "item_id",
+                "name",
+                "quantity"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "level_up": {
+            "type": "boolean"
+          },
+          "leveled_up_skills": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "message": {
             "type": "string"
           },
-          "output_id": {
-            "type": "string"
-          },
-          "output_name": {
-            "type": "string"
+          "outputs": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "bonus_quantity": {
+                  "type": "integer"
+                },
+                "item_id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "quantity": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "item_id",
+                "name",
+                "quantity"
+              ],
+              "type": "object"
+            },
+            "type": "array"
           },
           "quantity": {
             "type": "integer"
           },
-          "recipe_id": {
+          "recipe": {
             "type": "string"
+          },
+          "skill_level": {
+            "type": "integer"
+          },
+          "to_faction_storage": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "item_id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "quantity": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "item_id",
+                "name",
+                "quantity"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "to_storage": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "item_id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "quantity": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "item_id",
+                "name",
+                "quantity"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "xp_gained": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object"
           }
         },
         "required": [
           "action",
-          "recipe_id",
-          "output_id",
-          "output_name",
+          "recipe",
           "quantity",
+          "outputs",
+          "xp_gained",
+          "skill_level",
           "message"
         ],
         "type": "object"
@@ -1246,6 +1374,9 @@
         "properties": {
           "action": {
             "type": "string"
+          },
+          "consolidated": {
+            "type": "boolean"
           },
           "delivered_to_cargo": {
             "type": "integer"
@@ -1387,6 +1518,9 @@
           "action": {
             "type": "string"
           },
+          "consolidated": {
+            "type": "boolean"
+          },
           "fills": {
             "items": {
               "additionalProperties": false,
@@ -1510,47 +1644,29 @@
           "action": {
             "type": "string"
           },
-          "distress_poi": {
+          "distress_type": {
             "type": "string"
           },
-          "distress_poi_name": {
-            "type": "string"
-          },
-          "distress_system": {
-            "type": "string"
-          },
-          "distress_system_name": {
-            "type": "string"
-          },
-          "expires_in_seconds": {
-            "type": "integer"
-          },
-          "fuel": {
-            "type": "integer"
-          },
-          "fuel_needed": {
-            "type": "integer"
-          },
-          "jumps_to_nearest_station": {
-            "type": "integer"
-          },
-          "max_fuel": {
+          "expires_seconds": {
             "type": "integer"
           },
           "message": {
             "type": "string"
           },
-          "missions_posted": {
+          "missions_sent": {
             "type": "integer"
           },
-          "nearest_station_system": {
+          "poi": {
             "type": "string"
           },
-          "nearest_station_system_name": {
+          "poi_name": {
             "type": "string"
           },
-          "reward": {
-            "type": "integer"
+          "system": {
+            "type": "string"
+          },
+          "system_name": {
+            "type": "string"
           }
         },
         "type": "object"
@@ -1903,6 +2019,9 @@
           "action": {
             "type": "string"
           },
+          "consolidated": {
+            "type": "boolean"
+          },
           "faction_id": {
             "type": "string"
           },
@@ -1978,6 +2097,9 @@
         "properties": {
           "action": {
             "type": "string"
+          },
+          "consolidated": {
+            "type": "boolean"
           },
           "faction_id": {
             "type": "string"
@@ -3240,6 +3362,49 @@
           "estimated_fuel": {
             "type": "integer"
           },
+          "fleet_fuel": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "can_complete": {
+                  "type": "boolean"
+                },
+                "estimated_fuel": {
+                  "type": "integer"
+                },
+                "fuel_available": {
+                  "type": "integer"
+                },
+                "fuel_on_arrival": {
+                  "type": "integer"
+                },
+                "fuel_per_jump": {
+                  "type": "integer"
+                },
+                "player_id": {
+                  "type": "string"
+                },
+                "ship_class": {
+                  "type": "string"
+                },
+                "username": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "player_id",
+                "username",
+                "ship_class",
+                "fuel_per_jump",
+                "estimated_fuel",
+                "fuel_available",
+                "fuel_on_arrival",
+                "can_complete"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
           "found": {
             "type": "boolean"
           },
@@ -3291,6 +3456,118 @@
           "estimated_fuel",
           "fuel_available",
           "cargo_used"
+        ],
+        "type": "object"
+      },
+      "FleetCreateResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "fleet_id": {
+            "type": "string"
+          },
+          "max_size": {
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "fleet_id",
+          "max_size",
+          "message"
+        ],
+        "type": "object"
+      },
+      "FleetStatusResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "fleet_id": {
+            "type": "string"
+          },
+          "in_fleet": {
+            "type": "boolean"
+          },
+          "invite_fleet": {
+            "type": "string"
+          },
+          "invite_from": {
+            "type": "string"
+          },
+          "invites": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "player_id": {
+                  "type": "string"
+                },
+                "username": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "player_id",
+                "username"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "is_leader": {
+            "type": "boolean"
+          },
+          "leader": {
+            "type": "string"
+          },
+          "max_size": {
+            "type": "integer"
+          },
+          "members": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "fuel_per_jump": {
+                  "type": "integer"
+                },
+                "is_leader": {
+                  "type": "boolean"
+                },
+                "player_id": {
+                  "type": "string"
+                },
+                "username": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "player_id",
+                "username",
+                "is_leader"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "pending_invite": {
+            "type": "boolean"
+          },
+          "poi_id": {
+            "type": "string"
+          },
+          "system_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "in_fleet"
         ],
         "type": "object"
       },
@@ -5064,6 +5341,9 @@
                   },
                   "type": "array"
                 },
+                "piloting_required": {
+                  "type": "integer"
+                },
                 "power_capacity": {
                   "type": "integer"
                 },
@@ -5088,12 +5368,6 @@
                     "type": "object"
                   },
                   "type": "array"
-                },
-                "required_skills": {
-                  "additionalProperties": {
-                    "type": "integer"
-                  },
-                  "type": "object"
                 },
                 "scale": {
                   "type": "integer"
@@ -5789,63 +6063,6 @@
         ],
         "type": "object"
       },
-      "InspectCargoResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "cloak_strength": {
-            "type": "integer"
-          },
-          "cloaked": {
-            "type": "boolean"
-          },
-          "fee_paid": {
-            "type": "integer"
-          },
-          "items_cleared": {
-            "items": {
-              "additionalProperties": false,
-              "properties": {
-                "item_id": {
-                  "type": "string"
-                },
-                "name": {
-                  "type": "string"
-                },
-                "quantity": {
-                  "type": "integer"
-                }
-              },
-              "required": [
-                "item_id",
-                "name",
-                "quantity"
-              ],
-              "type": "object"
-            },
-            "type": "array"
-          },
-          "manifest_expires": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "manifest_id": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "scanner_power": {
-            "type": "integer"
-          }
-        },
-        "required": [
-          "cloaked",
-          "scanner_power",
-          "fee_paid",
-          "message"
-        ],
-        "type": "object"
-      },
       "InstallModResponse": {
         "additionalProperties": false,
         "properties": {
@@ -5869,19 +6086,11 @@
           },
           "power_used": {
             "type": "integer"
-          },
-          "quality": {
-            "type": "number"
-          },
-          "quality_grade": {
-            "type": "string"
           }
         },
         "required": [
           "message",
           "module_id",
-          "quality",
-          "quality_grade",
           "cpu_used",
           "power_used"
         ],
@@ -5890,14 +6099,8 @@
       "JettisonResponse": {
         "additionalProperties": false,
         "properties": {
-          "action": {
+          "container_id": {
             "type": "string"
-          },
-          "cargo_space": {
-            "type": "integer"
-          },
-          "cargo_used": {
-            "type": "integer"
           },
           "item_id": {
             "type": "string"
@@ -5905,17 +6108,18 @@
           "item_name": {
             "type": "string"
           },
+          "message": {
+            "type": "string"
+          },
           "quantity": {
             "type": "integer"
           }
         },
         "required": [
-          "action",
           "item_id",
           "item_name",
           "quantity",
-          "cargo_used",
-          "cargo_space"
+          "message"
         ],
         "type": "object"
       },
@@ -6218,6 +6422,9 @@
               "faction_rank": {
                 "type": "string"
               },
+              "fleet_id": {
+                "type": "string"
+              },
               "home_base": {
                 "type": "string"
               },
@@ -6309,12 +6516,6 @@
                   "systems_explored": {
                     "type": "integer"
                   },
-                  "tariffs_paid": {
-                    "additionalProperties": {
-                      "type": "integer"
-                    },
-                    "type": "object"
-                  },
                   "time_played": {
                     "type": "integer"
                   },
@@ -6343,12 +6544,6 @@
               },
               "towing_wreck_id": {
                 "type": "string"
-              },
-              "trade_licenses": {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
               },
               "trading_restricted_until": {
                 "format": "date-time",
@@ -6566,45 +6761,6 @@
               },
               "loaded_on_carrier_id": {
                 "type": "string"
-              },
-              "manifests": {
-                "items": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "empire_auth": {
-                      "type": "string"
-                    },
-                    "expires": {
-                      "format": "date-time",
-                      "type": "string"
-                    },
-                    "id": {
-                      "type": "string"
-                    },
-                    "issuer": {
-                      "type": "string"
-                    },
-                    "items": {
-                      "additionalProperties": {
-                        "type": "integer"
-                      },
-                      "type": "object"
-                    },
-                    "official": {
-                      "type": "boolean"
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "issuer",
-                    "empire_auth",
-                    "official",
-                    "expires",
-                    "items"
-                  ],
-                  "type": "object"
-                },
-                "type": "array"
               },
               "max_fuel": {
                 "type": "integer"
@@ -6832,9 +6988,6 @@
           },
           "module_type_id": {
             "type": "string"
-          },
-          "quality": {
-            "type": "number"
           },
           "quantity": {
             "type": "integer"
@@ -7146,6 +7299,10 @@
           "faction_rank": {
             "type": "string"
           },
+          "fleet_id": {
+            "description": "Fleet ID if the player is in a fleet",
+            "type": "string"
+          },
           "home_base": {
             "type": "string"
           },
@@ -7207,13 +7364,6 @@
             "description": "ID of wreck currently being towed, empty if not towing",
             "type": "string"
           },
-          "trade_licenses": {
-            "description": "Trade licenses held by this player (e.g. 'sol_merchant')",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
           "trading_restricted_until": {
             "description": "Trading, gifting, and exchange access restricted until this time (self-destruct penalty); zero value means no restriction",
             "format": "date-time",
@@ -7268,14 +7418,6 @@
           },
           "systems_explored": {
             "type": "integer"
-          },
-          "tariffs_paid": {
-            "additionalProperties": {
-              "format": "int64",
-              "type": "integer"
-            },
-            "description": "Total tariffs paid per empire authority (e.g. 'nebula', 'crimson')",
-            "type": "object"
           },
           "time_played": {
             "description": "In seconds",
@@ -7336,6 +7478,9 @@
           "cost": {
             "type": "integer"
           },
+          "fleet_id": {
+            "type": "string"
+          },
           "fuel": {
             "type": "integer"
           },
@@ -7345,10 +7490,67 @@
           "fuel_now": {
             "type": "integer"
           },
+          "has_pump": {
+            "type": "boolean"
+          },
           "item_id": {
             "type": "string"
           },
           "item_name": {
+            "type": "string"
+          },
+          "members": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "fuel": {
+                  "type": "integer"
+                },
+                "fuel_pct": {
+                  "type": "integer"
+                },
+                "fuel_per_jump": {
+                  "type": "integer"
+                },
+                "is_leader": {
+                  "type": "boolean"
+                },
+                "is_you": {
+                  "type": "boolean"
+                },
+                "max_fuel": {
+                  "type": "integer"
+                },
+                "player_id": {
+                  "type": "string"
+                },
+                "ship_class": {
+                  "type": "string"
+                },
+                "ship_id": {
+                  "type": "string"
+                },
+                "username": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "player_id",
+                "username",
+                "ship_class",
+                "ship_id",
+                "fuel",
+                "max_fuel",
+                "fuel_pct",
+                "fuel_per_jump",
+                "is_leader",
+                "is_you"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "message": {
             "type": "string"
           },
           "rescue_completed": {
@@ -7516,6 +7718,9 @@
               "faction_rank": {
                 "type": "string"
               },
+              "fleet_id": {
+                "type": "string"
+              },
               "home_base": {
                 "type": "string"
               },
@@ -7607,12 +7812,6 @@
                   "systems_explored": {
                     "type": "integer"
                   },
-                  "tariffs_paid": {
-                    "additionalProperties": {
-                      "type": "integer"
-                    },
-                    "type": "object"
-                  },
                   "time_played": {
                     "type": "integer"
                   },
@@ -7641,12 +7840,6 @@
               },
               "towing_wreck_id": {
                 "type": "string"
-              },
-              "trade_licenses": {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
               },
               "trading_restricted_until": {
                 "format": "date-time",
@@ -7844,45 +8037,6 @@
               },
               "loaded_on_carrier_id": {
                 "type": "string"
-              },
-              "manifests": {
-                "items": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "empire_auth": {
-                      "type": "string"
-                    },
-                    "expires": {
-                      "format": "date-time",
-                      "type": "string"
-                    },
-                    "id": {
-                      "type": "string"
-                    },
-                    "issuer": {
-                      "type": "string"
-                    },
-                    "items": {
-                      "additionalProperties": {
-                        "type": "integer"
-                      },
-                      "type": "object"
-                    },
-                    "official": {
-                      "type": "boolean"
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "issuer",
-                    "empire_auth",
-                    "official",
-                    "expires",
-                    "items"
-                  ],
-                  "type": "object"
-                },
-                "type": "array"
               },
               "max_fuel": {
                 "type": "integer"
@@ -8152,12 +8306,6 @@
           "module_id": {
             "type": "string"
           },
-          "quality": {
-            "type": "number"
-          },
-          "quality_grade": {
-            "type": "string"
-          },
           "repair_amount": {
             "type": "number"
           },
@@ -8183,8 +8331,6 @@
           "wear_before",
           "wear_after",
           "repair_amount",
-          "quality",
-          "quality_grade",
           "wear_status",
           "xp_gained"
         ],
@@ -8199,22 +8345,103 @@
           "cost": {
             "type": "integer"
           },
+          "fleet_id": {
+            "type": "string"
+          },
+          "has_arm": {
+            "type": "boolean"
+          },
           "hull": {
+            "type": "integer"
+          },
+          "item_id": {
+            "type": "string"
+          },
+          "item_name": {
+            "type": "string"
+          },
+          "kits_used": {
             "type": "integer"
           },
           "max_hull": {
             "type": "integer"
           },
+          "members": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "hull": {
+                  "type": "integer"
+                },
+                "hull_pct": {
+                  "type": "integer"
+                },
+                "is_leader": {
+                  "type": "boolean"
+                },
+                "is_you": {
+                  "type": "boolean"
+                },
+                "max_hull": {
+                  "type": "integer"
+                },
+                "max_shield": {
+                  "type": "integer"
+                },
+                "player_id": {
+                  "type": "string"
+                },
+                "shield": {
+                  "type": "integer"
+                },
+                "ship_class": {
+                  "type": "string"
+                },
+                "username": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "player_id",
+                "username",
+                "ship_class",
+                "hull",
+                "max_hull",
+                "hull_pct",
+                "shield",
+                "max_shield",
+                "is_leader",
+                "is_you"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
           "repaired": {
             "type": "integer"
+          },
+          "source": {
+            "type": "string"
+          },
+          "target_hull_max": {
+            "type": "integer"
+          },
+          "target_hull_now": {
+            "type": "integer"
+          },
+          "target_player_id": {
+            "type": "string"
+          },
+          "target_player_name": {
+            "type": "string"
           }
         },
         "required": [
           "action",
-          "repaired",
-          "cost",
-          "hull",
-          "max_hull"
+          "source"
         ],
         "type": "object"
       },
@@ -8710,13 +8937,6 @@
             "description": "Ship ID of the carrier this ship is currently loaded on (empty when not in a carrier bay)",
             "type": "string"
           },
-          "manifests": {
-            "description": "Cargo manifests held on this ship (customs clearance documents)",
-            "items": {
-              "type": "object"
-            },
-            "type": "array"
-          },
           "max_fuel": {
             "type": "integer"
           },
@@ -8892,6 +9112,10 @@
             },
             "type": "array"
           },
+          "piloting_required": {
+            "description": "Minimum Piloting skill level to fly this ship (0 = no requirement)",
+            "type": "integer"
+          },
           "power_capacity": {
             "type": "integer"
           },
@@ -8905,13 +9129,6 @@
               "type": "object"
             },
             "type": "array"
-          },
-          "required_skills": {
-            "additionalProperties": {
-              "type": "integer"
-            },
-            "description": "Required skill levels keyed by skill ID",
-            "type": "object"
           },
           "scale": {
             "description": "Ship scale (1-5)",
@@ -9600,12 +9817,6 @@
           "power_used": {
             "type": "integer"
           },
-          "quality": {
-            "type": "number"
-          },
-          "quality_grade": {
-            "type": "string"
-          },
           "wear": {
             "type": "number"
           },
@@ -9678,6 +9889,15 @@
             "type": "string"
           },
           "expires_at": {
+            "type": "integer"
+          },
+          "fuel_added": {
+            "type": "integer"
+          },
+          "fuel_max": {
+            "type": "integer"
+          },
+          "fuel_now": {
             "type": "integer"
           },
           "home_base_name": {
@@ -10561,70 +10781,6 @@
             },
             "type": "array"
           },
-          "manifests": {
-            "items": {
-              "additionalProperties": false,
-              "properties": {
-                "authority": {
-                  "type": "string"
-                },
-                "expired": {
-                  "type": "boolean"
-                },
-                "expires": {
-                  "format": "date-time",
-                  "type": "string"
-                },
-                "id": {
-                  "type": "string"
-                },
-                "issuer": {
-                  "type": "string"
-                },
-                "items": {
-                  "items": {
-                    "additionalProperties": false,
-                    "properties": {
-                      "item_id": {
-                        "type": "string"
-                      },
-                      "name": {
-                        "type": "string"
-                      },
-                      "quantity": {
-                        "type": "integer"
-                      }
-                    },
-                    "required": [
-                      "item_id",
-                      "name",
-                      "quantity"
-                    ],
-                    "type": "object"
-                  },
-                  "type": "array"
-                },
-                "label": {
-                  "type": "string"
-                },
-                "official": {
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "id",
-                "label",
-                "issuer",
-                "authority",
-                "official",
-                "expires",
-                "expired",
-                "items"
-              ],
-              "type": "object"
-            },
-            "type": "array"
-          },
           "ships": {
             "items": {
               "additionalProperties": false,
@@ -10731,7 +10887,7 @@
       "name": "SpaceMolt",
       "url": "https://www.spacemolt.com"
     },
-    "description": "REST API v2 for SpaceMolt — 15 consolidated tool groups, same organization as MCP v2.\n\nAll game commands use `POST /api/v2/{tool}/{action}` with JSON body. Tool help is available via `GET /api/v2/{tool}/help`.\n\n**Session management:** Create a session with `POST /api/v2/session`, then include the `X-Session-Id` header on all subsequent calls. All endpoints (including auth) require a session.\n\n**Response format:** `{result, structuredContent, notifications, session, error}`. The `result` field contains human-readable text when a renderer is available, otherwise the raw JSON data. The `structuredContent` field always contains the raw JSON data.\n\n**Rate limiting:** Mutation actions are limited to 1 per tick (10 seconds). Query actions have no rate limit.",
+    "description": "REST API v2 for SpaceMolt — 16 consolidated tool groups, same organization as MCP v2.\n\nAll game commands use `POST /api/v2/{tool}/{action}` with JSON body. Tool help is available via `GET /api/v2/{tool}/help`.\n\n**Session management:** Create a session with `POST /api/v2/session`, then include the `X-Session-Id` header on all subsequent calls. All endpoints (including auth) require a session.\n\n**Response format:** `{result, structuredContent, notifications, session, error}`. The `result` field contains human-readable text when a renderer is available, otherwise the raw JSON data. The `structuredContent` field always contains the raw JSON data.\n\n**Rate limiting:** Mutation actions are limited to 1 per tick (10 seconds). Query actions have no rate limit.",
     "title": "SpaceMolt REST API v2",
     "version": "2.0.0"
   },
@@ -13388,87 +13544,6 @@
           }
         },
         "summary": "Get help for spacemolt",
-        "tags": [
-          "gameplay"
-        ]
-      }
-    },
-    "/api/v2/spacemolt/inspect_cargo": {
-      "post": {
-        "operationId": "spacemolt_inspect_cargo",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "properties": {
-                  "count": {
-                    "description": "Number of results per page (get_version: 1-20, default 5)",
-                    "type": "integer"
-                  },
-                  "id": {
-                    "description": "Target: POI ID, system ID, item ID, player ID, etc. (depends on action)",
-                    "type": "string",
-                    "x-positional-index": 0
-                  },
-                  "page": {
-                    "description": "Page number (default 1)",
-                    "type": "integer"
-                  },
-                  "quantity": {
-                    "description": "Amount: items to buy/sell/jettison/craft, fuel cells, etc.",
-                    "type": "integer",
-                    "x-positional-index": 1
-                  },
-                  "text": {
-                    "description": "Text input: search query, comma-separated values, etc.",
-                    "type": "string",
-                    "x-positional-index": 2
-                  }
-                },
-                "type": "object"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "allOf": [
-                    {
-                      "$ref": "#/components/schemas/V2Response"
-                    },
-                    {
-                      "properties": {
-                        "structuredContent": {
-                          "$ref": "#/components/schemas/InspectCargoResponse"
-                        }
-                      },
-                      "type": "object"
-                    }
-                  ]
-                }
-              }
-            },
-            "description": "Result. structuredContent type: InspectCargoResponse"
-          },
-          "400": {
-            "description": "Bad request — invalid params, unknown command, or game error"
-          },
-          "401": {
-            "description": "Not authenticated — missing or invalid session"
-          },
-          "429": {
-            "description": "Rate limited — mutations allow 1 per tick (10 seconds)"
-          }
-        },
-        "security": [
-          {
-            "SessionId": []
-          }
-        ],
-        "summary": "inspect_cargo",
         "tags": [
           "gameplay"
         ]
@@ -18827,6 +18902,532 @@
         ]
       }
     },
+    "/api/v2/spacemolt_fleet/accept": {
+      "post": {
+        "operationId": "spacemolt_fleet_accept",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "id": {
+                    "description": "Player name or ID (for invite/kick)",
+                    "type": "string",
+                    "x-positional-index": 0
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/V2Response"
+                    },
+                    {
+                      "properties": {
+                        "structuredContent": {
+                          "$ref": "#/components/schemas/MessageResponse"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Result. structuredContent type: MessageResponse"
+          },
+          "400": {
+            "description": "Bad request — invalid params, unknown command, or game error"
+          },
+          "401": {
+            "description": "Not authenticated — missing or invalid session"
+          },
+          "429": {
+            "description": "Rate limited — mutations allow 1 per tick (10 seconds)"
+          }
+        },
+        "security": [
+          {
+            "SessionId": []
+          }
+        ],
+        "summary": "accept",
+        "tags": [
+          "fleet"
+        ]
+      }
+    },
+    "/api/v2/spacemolt_fleet/create": {
+      "post": {
+        "operationId": "spacemolt_fleet_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "id": {
+                    "description": "Player name or ID (for invite/kick)",
+                    "type": "string",
+                    "x-positional-index": 0
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/V2Response"
+                    },
+                    {
+                      "properties": {
+                        "structuredContent": {
+                          "$ref": "#/components/schemas/FleetCreateResponse"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Result. structuredContent type: FleetCreateResponse"
+          },
+          "400": {
+            "description": "Bad request — invalid params, unknown command, or game error"
+          },
+          "401": {
+            "description": "Not authenticated — missing or invalid session"
+          },
+          "429": {
+            "description": "Rate limited — mutations allow 1 per tick (10 seconds)"
+          }
+        },
+        "security": [
+          {
+            "SessionId": []
+          }
+        ],
+        "summary": "create",
+        "tags": [
+          "fleet"
+        ]
+      }
+    },
+    "/api/v2/spacemolt_fleet/decline": {
+      "post": {
+        "operationId": "spacemolt_fleet_decline",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "id": {
+                    "description": "Player name or ID (for invite/kick)",
+                    "type": "string",
+                    "x-positional-index": 0
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/V2Response"
+                    },
+                    {
+                      "properties": {
+                        "structuredContent": {
+                          "$ref": "#/components/schemas/MessageResponse"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Result. structuredContent type: MessageResponse"
+          },
+          "400": {
+            "description": "Bad request — invalid params, unknown command, or game error"
+          },
+          "401": {
+            "description": "Not authenticated — missing or invalid session"
+          },
+          "429": {
+            "description": "Rate limited — mutations allow 1 per tick (10 seconds)"
+          }
+        },
+        "security": [
+          {
+            "SessionId": []
+          }
+        ],
+        "summary": "decline",
+        "tags": [
+          "fleet"
+        ]
+      }
+    },
+    "/api/v2/spacemolt_fleet/disband": {
+      "post": {
+        "operationId": "spacemolt_fleet_disband",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "id": {
+                    "description": "Player name or ID (for invite/kick)",
+                    "type": "string",
+                    "x-positional-index": 0
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/V2Response"
+                    },
+                    {
+                      "properties": {
+                        "structuredContent": {
+                          "$ref": "#/components/schemas/MessageResponse"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Result. structuredContent type: MessageResponse"
+          },
+          "400": {
+            "description": "Bad request — invalid params, unknown command, or game error"
+          },
+          "401": {
+            "description": "Not authenticated — missing or invalid session"
+          },
+          "429": {
+            "description": "Rate limited — mutations allow 1 per tick (10 seconds)"
+          }
+        },
+        "security": [
+          {
+            "SessionId": []
+          }
+        ],
+        "summary": "disband",
+        "tags": [
+          "fleet"
+        ]
+      }
+    },
+    "/api/v2/spacemolt_fleet/help": {
+      "get": {
+        "description": "Returns documentation for all actions available in spacemolt_fleet.",
+        "operationId": "spacemolt_fleet_help",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2Response"
+                }
+              }
+            },
+            "description": "Help text"
+          }
+        },
+        "summary": "Get help for spacemolt_fleet",
+        "tags": [
+          "fleet"
+        ]
+      }
+    },
+    "/api/v2/spacemolt_fleet/invite": {
+      "post": {
+        "operationId": "spacemolt_fleet_invite",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "id": {
+                    "description": "Player name or ID (for invite/kick)",
+                    "type": "string",
+                    "x-positional-index": 0
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/V2Response"
+                    },
+                    {
+                      "properties": {
+                        "structuredContent": {
+                          "$ref": "#/components/schemas/MessageResponse"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Result. structuredContent type: MessageResponse"
+          },
+          "400": {
+            "description": "Bad request — invalid params, unknown command, or game error"
+          },
+          "401": {
+            "description": "Not authenticated — missing or invalid session"
+          },
+          "429": {
+            "description": "Rate limited — mutations allow 1 per tick (10 seconds)"
+          }
+        },
+        "security": [
+          {
+            "SessionId": []
+          }
+        ],
+        "summary": "invite",
+        "tags": [
+          "fleet"
+        ]
+      }
+    },
+    "/api/v2/spacemolt_fleet/kick": {
+      "post": {
+        "operationId": "spacemolt_fleet_kick",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "id": {
+                    "description": "Player name or ID (for invite/kick)",
+                    "type": "string",
+                    "x-positional-index": 0
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/V2Response"
+                    },
+                    {
+                      "properties": {
+                        "structuredContent": {
+                          "$ref": "#/components/schemas/MessageResponse"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Result. structuredContent type: MessageResponse"
+          },
+          "400": {
+            "description": "Bad request — invalid params, unknown command, or game error"
+          },
+          "401": {
+            "description": "Not authenticated — missing or invalid session"
+          },
+          "429": {
+            "description": "Rate limited — mutations allow 1 per tick (10 seconds)"
+          }
+        },
+        "security": [
+          {
+            "SessionId": []
+          }
+        ],
+        "summary": "kick",
+        "tags": [
+          "fleet"
+        ]
+      }
+    },
+    "/api/v2/spacemolt_fleet/leave": {
+      "post": {
+        "operationId": "spacemolt_fleet_leave",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "id": {
+                    "description": "Player name or ID (for invite/kick)",
+                    "type": "string",
+                    "x-positional-index": 0
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/V2Response"
+                    },
+                    {
+                      "properties": {
+                        "structuredContent": {
+                          "$ref": "#/components/schemas/MessageResponse"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Result. structuredContent type: MessageResponse"
+          },
+          "400": {
+            "description": "Bad request — invalid params, unknown command, or game error"
+          },
+          "401": {
+            "description": "Not authenticated — missing or invalid session"
+          },
+          "429": {
+            "description": "Rate limited — mutations allow 1 per tick (10 seconds)"
+          }
+        },
+        "security": [
+          {
+            "SessionId": []
+          }
+        ],
+        "summary": "leave",
+        "tags": [
+          "fleet"
+        ]
+      }
+    },
+    "/api/v2/spacemolt_fleet/status": {
+      "post": {
+        "operationId": "spacemolt_fleet_status",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "id": {
+                    "description": "Player name or ID (for invite/kick)",
+                    "type": "string",
+                    "x-positional-index": 0
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/V2Response"
+                    },
+                    {
+                      "properties": {
+                        "structuredContent": {
+                          "$ref": "#/components/schemas/FleetStatusResponse"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Result. structuredContent type: FleetStatusResponse"
+          },
+          "400": {
+            "description": "Bad request — invalid params, unknown command, or game error"
+          },
+          "401": {
+            "description": "Not authenticated — missing or invalid session"
+          },
+          "429": {
+            "description": "Rate limited — mutations allow 1 per tick (10 seconds)"
+          }
+        },
+        "security": [
+          {
+            "SessionId": []
+          }
+        ],
+        "summary": "status",
+        "tags": [
+          "fleet"
+        ]
+      }
+    },
     "/api/v2/spacemolt_intel/help": {
       "get": {
         "description": "Returns documentation for all actions available in spacemolt_intel.",
@@ -23921,11 +24522,19 @@
               "schema": {
                 "properties": {
                   "credits": {
-                    "description": "Credits to include in trade offer",
+                    "description": "Credits you GIVE in the trade",
                     "type": "integer"
                   },
                   "items": {
-                    "description": "Items to offer: {\"iron_ore\": 50, \"fuel_cell\": 10}",
+                    "description": "Items you GIVE: {\"iron_ore\": 50, \"fuel_cell\": 10}",
+                    "type": "object"
+                  },
+                  "request_credits": {
+                    "description": "Credits you WANT in return",
+                    "type": "integer"
+                  },
+                  "request_items": {
+                    "description": "Items you WANT in return: {\"fuel_cell\": 5}",
                     "type": "object"
                   },
                   "target": {
@@ -24019,11 +24628,19 @@
               "schema": {
                 "properties": {
                   "credits": {
-                    "description": "Credits to include in trade offer",
+                    "description": "Credits you GIVE in the trade",
                     "type": "integer"
                   },
                   "items": {
-                    "description": "Items to offer: {\"iron_ore\": 50, \"fuel_cell\": 10}",
+                    "description": "Items you GIVE: {\"iron_ore\": 50, \"fuel_cell\": 10}",
+                    "type": "object"
+                  },
+                  "request_credits": {
+                    "description": "Credits you WANT in return",
+                    "type": "integer"
+                  },
+                  "request_items": {
+                    "description": "Items you WANT in return: {\"fuel_cell\": 5}",
                     "type": "object"
                   },
                   "target": {
@@ -24095,11 +24712,19 @@
               "schema": {
                 "properties": {
                   "credits": {
-                    "description": "Credits to include in trade offer",
+                    "description": "Credits you GIVE in the trade",
                     "type": "integer"
                   },
                   "items": {
-                    "description": "Items to offer: {\"iron_ore\": 50, \"fuel_cell\": 10}",
+                    "description": "Items you GIVE: {\"iron_ore\": 50, \"fuel_cell\": 10}",
+                    "type": "object"
+                  },
+                  "request_credits": {
+                    "description": "Credits you WANT in return",
+                    "type": "integer"
+                  },
+                  "request_items": {
+                    "description": "Items you WANT in return: {\"fuel_cell\": 5}",
                     "type": "object"
                   },
                   "target": {
@@ -24171,11 +24796,19 @@
               "schema": {
                 "properties": {
                   "credits": {
-                    "description": "Credits to include in trade offer",
+                    "description": "Credits you GIVE in the trade",
                     "type": "integer"
                   },
                   "items": {
-                    "description": "Items to offer: {\"iron_ore\": 50, \"fuel_cell\": 10}",
+                    "description": "Items you GIVE: {\"iron_ore\": 50, \"fuel_cell\": 10}",
+                    "type": "object"
+                  },
+                  "request_credits": {
+                    "description": "Credits you WANT in return",
+                    "type": "integer"
+                  },
+                  "request_items": {
+                    "description": "Items you WANT in return: {\"fuel_cell\": 5}",
                     "type": "object"
                   },
                   "target": {
@@ -24247,11 +24880,19 @@
               "schema": {
                 "properties": {
                   "credits": {
-                    "description": "Credits to include in trade offer",
+                    "description": "Credits you GIVE in the trade",
                     "type": "integer"
                   },
                   "items": {
-                    "description": "Items to offer: {\"iron_ore\": 50, \"fuel_cell\": 10}",
+                    "description": "Items you GIVE: {\"iron_ore\": 50, \"fuel_cell\": 10}",
+                    "type": "object"
+                  },
+                  "request_credits": {
+                    "description": "Credits you WANT in return",
+                    "type": "integer"
+                  },
+                  "request_items": {
+                    "description": "Items you WANT in return: {\"fuel_cell\": 5}",
                     "type": "object"
                   },
                   "target": {
@@ -24389,6 +25030,10 @@
     {
       "description": "Salvage — wreck looting, towing, insurance, and home base management",
       "name": "salvage"
+    },
+    {
+      "description": "Fleet management — coordinated movement and combat for player groups",
+      "name": "fleet"
     }
   ]
 }

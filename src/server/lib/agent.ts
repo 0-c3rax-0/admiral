@@ -282,11 +282,11 @@ export class Agent {
     const [statusResp, locationResp, queueResp] = await Promise.all([
       this.executeSilentQuery('get_status'),
       hasPendingNavigation ? this.executeSilentQuery('get_location') : Promise.resolve(null),
-      needsQueue ? this.executeSilentQuery('v2_get_queue') : Promise.resolve(null),
+      needsQueue ? this.executeSilentQuery('get_queue') : Promise.resolve(null),
     ])
     if (statusResp) this.cacheGameState(statusResp, 'get_status')
     if (locationResp) this.cacheGameState(locationResp, 'get_location')
-    if (queueResp) this.cacheGameState(queueResp, 'v2_get_queue')
+    if (queueResp) this.cacheGameState(queueResp, 'get_queue')
     return { statusResp, locationResp, queueResp }
   }
 
@@ -883,7 +883,7 @@ export class Agent {
     // navigation flags against the server's actual queue state.
     if (profile.connection_mode === 'websocket_v2' || profile.connection_mode === 'http_v2' || profile.connection_mode === 'mcp_v2') {
       try {
-        const queueResp = await this.connection.execute('v2_get_queue')
+        const queueResp = await this.connection.execute('get_queue')
         reconcilePendingNavigationWithStatus(this.profileId, queueResp)
       } catch { /* ignore */ }
     }
@@ -1724,6 +1724,8 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - If the market has no meaningful buy orders or bid-side depth, do not dump cargo into a bad or empty instant market. Prefer putting the goods into local station storage first so the ship can resume work with free cargo space, then batch inventory and decide whether to create a well-placed sell order from that station later.
 - If your sell attempt returns \`quantity_sold: 0\`, \`total_earned: 0\`, or leaves cargo unchanged, interpret that as no fill or a bad market fit. Re-check docked state, orders, and the local orderbook before attempting another sell.
 - When using the storage fallback, use the station's personal/local storage, confirm the cargo actually moved, and keep a note of what was stored and where.
+- For normal station storage, use \`storage(action="deposit", item_id=..., quantity?...)\`, \`storage(action="withdraw", item_id=..., quantity?...)\`, or \`storage(action="view")\` / \`storage_view()\`. Do not invent \`target="station"\`, \`player="station"\`, or similar placeholders; station storage is the default and should omit \`target\`.
+- Reserve \`target="self"\` only for carrier-bay transfers on carrier ships. If you are not explicitly loading a ship into your own carrier bay, do not set \`target\` on storage deposit/withdraw commands.
 - Treat \`create_sell_order\` as fee-bearing. Before listing, inspect the listing fee and compare it to the expected total sale value and expected margin. Do not create tiny low-value orders where the fee eats a meaningful share of proceeds, and prefer larger batched listings when that materially improves fee efficiency.
 - Prefer batching sale inventory in local station storage and waiting until you have a meaningfully larger stack before creating a sell order. Note: creating multiple orders for the same item at the exact same price will automatically consolidate them into one order.
 - "Batching" can include running multiple mining trips first: if the current station and route are still good for the same ore family, it is often better to unload to local storage, return to the belt for more, and combine several trips into one later sell order instead of listing every small haul immediately.

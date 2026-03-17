@@ -119,10 +119,11 @@ export async function runAgentTurn(
       log('system', `Alternative solver activated after loop/stall detection: ${describeAdvisorTrigger(advisorState)}. Model: ${modelName}`)
     }
 
-    enforceContextMessageCap(context)
-    if (options?.compactInputEnabled) {
+    const shouldCompactForMessageCount = context.messages.length > MAX_CONTEXT_MESSAGES
+    if (shouldCompactForMessageCount || options?.compactInputEnabled) {
       await compactContext(summaryModel, context, compaction, { ...options, apiKey: activeApiKey }, log)
     }
+    enforceContextMessageCap(context)
 
     options?.onActivity?.('Waiting for LLM response...')
     let response: AssistantMessage
@@ -156,6 +157,8 @@ export async function runAgentTurn(
       }, null, 2))
       return
     }
+
+    sanitizeMessageToolIdentifiers([response])
 
     // Log rich LLM call metadata
     {
@@ -341,11 +344,20 @@ export function shouldRetryUninterpretableResponse(response: AssistantMessage): 
   return looksLikeBrokenToolOutput && plainText.length < 80
 }
 
+export function isSessionHistorySummaryMessage(msg: Message | undefined): boolean {
+  return msg?.role === 'user'
+    && typeof msg.content === 'string'
+    && msg.content.startsWith('## Session History Summary')
+}
+
 function enforceContextMessageCap(context: Context): void {
-  // Keep the initial mission message at index 0 and trim oldest middle messages first.
+  // Keep the initial mission message at index 0. If a compaction summary exists at
+  // index 1, preserve it and trim from the oldest recent messages instead.
   while (context.messages.length > MAX_CONTEXT_MESSAGES) {
     if (context.messages.length <= 2) break
-    context.messages.splice(1, 1)
+    const trimIndex = isSessionHistorySummaryMessage(context.messages[1]) ? 2 : 1
+    if (trimIndex >= context.messages.length) break
+    context.messages.splice(trimIndex, 1)
   }
 }
 
@@ -407,6 +419,102 @@ function totalMessageTokens(messages: Message[]): number {
   let total = 0
   for (const msg of messages) total += estimateMessageTokens(msg)
   return total
+}
+
+function generateToolCallId(): string {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+  let out = ''
+  for (let i = 0; i < 9; i++) {
+    out += alphabet[Math.floor(Math.random() * alphabet.length)]
+  }
+  return out
+}
+
+function isValidProviderToolCallId(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9]{9}$/.test(value)
+}
+
+export function sanitizeMessageToolIdentifiers(messages: Message[]): void {
+  const fallbackIds = new Set<string>()
+  const currentIds = new Set<string>()
+
+  for (const msg of messages) {
+    if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue
+    for (const block of msg.content as any[]) {
+      if (block?.type !== 'toolCall') continue
+      if (typeof block.id === 'string' && block.id.startsWith('fallback-tool-')) {
+        fallbackIds.add(block.id)
+      }
+      if (typeof block.id === 'string' && block.id.trim()) {
+        currentIds.add(block.id)
+      }
+    }
+  }
+
+  const remap = new Map<string, string>()
+  const usedIds = new Set(currentIds)
+  const nextId = (): string => {
+    let candidate = generateToolCallId()
+    while (usedIds.has(candidate)) candidate = generateToolCallId()
+    usedIds.add(candidate)
+    return candidate
+  }
+
+  for (const msg of messages) {
+    if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue
+    for (const block of msg.content as any[]) {
+      if (block?.type !== 'toolCall') continue
+      const originalId = typeof block.id === 'string' ? block.id : ''
+      if (isValidProviderToolCallId(originalId)) continue
+      const replacement = remap.get(originalId) || nextId()
+      remap.set(originalId, replacement)
+      block.id = replacement
+    }
+  }
+
+  if (remap.size === 0) return
+
+  for (const msg of messages) {
+    if (msg.role !== 'toolResult') continue
+    const originalId = typeof (msg as any).toolCallId === 'string' ? (msg as any).toolCallId : ''
+    const replacement = remap.get(originalId)
+    if (replacement) {
+      ;(msg as any).toolCallId = replacement
+      continue
+    }
+    if (!isValidProviderToolCallId(originalId) && (!originalId || fallbackIds.has(originalId))) {
+      ;(msg as any).toolCallId = nextId()
+    }
+  }
+}
+
+export function sanitizeProviderMessageSequence(messages: Message[]): void {
+  for (let i = 1; i < messages.length; i++) {
+    const previous = messages[i - 1]
+    const current = messages[i]
+    if (previous.role !== 'toolResult' || current.role !== 'user') continue
+
+    const text = typeof current.content === 'string'
+      ? current.content
+      : Array.isArray(current.content)
+        ? current.content.map((block: any) => {
+          if (typeof block?.text === 'string') return block.text
+          if (typeof block?.thinking === 'string') return block.thinking
+          return ''
+        }).filter(Boolean).join('\n')
+        : ''
+
+    messages[i] = {
+      role: 'assistant',
+      content: [{ type: 'text', text: text || '(system recovery note)' }],
+      timestamp: (current as any).timestamp ?? Date.now(),
+    } as Message
+  }
+}
+
+export function sanitizeProviderContextMessages(messages: Message[]): void {
+  sanitizeMessageToolIdentifiers(messages)
+  sanitizeProviderMessageSequence(messages)
 }
 
 function estimateRequestTokens(context: Context): number {
@@ -776,6 +884,7 @@ async function completeWithRetry(
   compaction?: CompactionState,
 ): Promise<AssistantMessage> {
   let lastError: Error | null = null
+  sanitizeProviderContextMessages(context.messages)
   const primaryKey = options?.apiKey
   const failoverKey = options?.failoverApiKey
   // Always try primary first when available; failover is activated on demand.
@@ -805,6 +914,7 @@ async function completeWithRetry(
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
+      sanitizeProviderContextMessages(context.messages)
       if (options?.compactInputEnabled) {
         const beforeEstimatedRequestTokens = estimateRequestTokens(context)
         const effectiveLimit = getEffectiveContextLimit(model)
@@ -837,6 +947,7 @@ async function completeWithRetry(
           )
         }
       }
+      sanitizeProviderContextMessages(context.messages)
       markLlmRequestProcessing(request.id, (existing?.attemptCount || 0) + attempt + 1)
       const timeoutController = new AbortController()
       const timeout = setTimeout(() => timeoutController.abort(), timeoutMs)

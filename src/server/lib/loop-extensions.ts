@@ -71,6 +71,23 @@ export function extractFallbackToolCalls(response: AssistantMessage): ToolCall[]
     }
   }
 
+  const inlineGameRegex = /game\(\s*,\s*command=([a-zA-Z0-9_:-]+)(?:\s+args=(\{[\s\S]*?\}))?\s*\)/g
+  for (const match of text.matchAll(inlineGameRegex)) {
+    const command = match[1]
+    let nestedArgs: Record<string, unknown> = {}
+    if (match[2]) {
+      try {
+        const parsed = JSON.parse(match[2]) as unknown
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          nestedArgs = parsed as Record<string, unknown>
+        }
+      } catch {
+        // Ignore malformed inline args fragments.
+      }
+    }
+    addCall('game', { command, args: nestedArgs })
+  }
+
   return discovered
 }
 

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { rememberMarketSnapshot, rememberZeroFillSell } from './runtime-guards'
-import { executeTool, findCanonicalAlias } from './tools'
+import { executeTool, findCanonicalAlias, mergeGameStateSnapshot } from './tools'
+import { createProfile } from './db'
 
 describe('sell rerouting', () => {
   test('reroutes repeated zero-fill sell attempts to create_sell_order', async () => {
@@ -89,6 +90,16 @@ describe('command aliases', () => {
     expect(alias).toBe('view_market')
   })
 
+  test('maps market_view to view_market when the API exposes view_market', () => {
+    const alias = findCanonicalAlias('market_view', [
+      'get_status',
+      'view_market',
+      'view_orders',
+    ])
+
+    expect(alias).toBe('view_market')
+  })
+
   test('rewrites facility_types to facility(action=types) before execution', async () => {
     const calls: Array<{ command: string; args: Record<string, unknown> | undefined }> = []
 
@@ -100,6 +111,52 @@ describe('command aliases', () => {
       },
       {
         profileId: `test-${Date.now()}-facility-types-rewrite`,
+        todo: '',
+        log: () => {},
+        connection: {
+          mode: 'websocket_v2',
+          connect: async () => {},
+          login: async () => ({ success: true }),
+          register: async () => ({ success: true }),
+          execute: async (command, args) => {
+            if (command === 'get_commands') {
+              return {
+                result: {
+                  commands: [
+                    { name: 'login' },
+                  ],
+                },
+              } as any
+            }
+            calls.push({ command, args })
+            return { result: { ok: true } }
+          },
+          onNotification: () => {},
+          disconnect: async () => {},
+          isConnected: () => true,
+        },
+      },
+    )
+
+    expect(calls).toEqual([
+      {
+        command: 'facility',
+        args: { action: 'types' },
+      },
+    ])
+  })
+
+  test('normalizes personal_build type args to facility_type before execution', async () => {
+    const calls: Array<{ command: string; args: Record<string, unknown> | undefined }> = []
+
+    await executeTool(
+      'game',
+      {
+        command: 'personal_build',
+        args: { type: 'personal_quarters' },
+      },
+      {
+        profileId: `test-${Date.now()}-facility-personal-build-normalization`,
         todo: '',
         log: () => {},
         connection: {
@@ -121,7 +178,269 @@ describe('command aliases', () => {
     expect(calls).toEqual([
       {
         command: 'facility',
-        args: { action: 'types' },
+        args: { action: 'personal_build', facility_type: 'personal_quarters' },
+      },
+    ])
+  })
+
+  test('normalizes facility build type-style args to facility_type before execution', async () => {
+    const calls: Array<{ command: string; args: Record<string, unknown> | undefined }> = []
+
+    await executeTool(
+      'game',
+      {
+        command: 'facility',
+        args: { action: 'build', type: 'faction_workshop' },
+      },
+      {
+        profileId: `test-${Date.now()}-facility-build-normalization`,
+        todo: '',
+        log: () => {},
+        connection: {
+          mode: 'http_v2',
+          connect: async () => {},
+          login: async () => ({ success: true }),
+          register: async () => ({ success: true }),
+          execute: async (command, args) => {
+            calls.push({ command, args })
+            return { result: { ok: true } }
+          },
+          onNotification: () => {},
+          disconnect: async () => {},
+          isConnected: () => true,
+        },
+      },
+    )
+
+    expect(calls).toEqual([
+      {
+        command: 'facility',
+        args: { action: 'build', facility_type: 'faction_workshop' },
+      },
+    ])
+  })
+
+  test('normalizes facility toggle id-style args to facility_id before execution', async () => {
+    const calls: Array<{ command: string; args: Record<string, unknown> | undefined }> = []
+
+    await executeTool(
+      'game',
+      {
+        command: 'facility',
+        args: { action: 'toggle', id: 'fac_123' },
+      },
+      {
+        profileId: `test-${Date.now()}-facility-toggle-normalization`,
+        todo: '',
+        log: () => {},
+        connection: {
+          mode: 'http_v2',
+          connect: async () => {},
+          login: async () => ({ success: true }),
+          register: async () => ({ success: true }),
+          execute: async (command, args) => {
+            calls.push({ command, args })
+            return { result: { ok: true } }
+          },
+          onNotification: () => {},
+          disconnect: async () => {},
+          isConnected: () => true,
+        },
+      },
+    )
+
+    expect(calls).toEqual([
+      {
+        command: 'facility',
+        args: { action: 'toggle', facility_id: 'fac_123' },
+      },
+    ])
+  })
+
+  test('repairs malformed nested game invocation with empty top-level command', async () => {
+    const calls: Array<{ command: string; args: Record<string, unknown> | undefined }> = []
+
+    await executeTool(
+      'game',
+      {
+        command: '',
+        args: {
+          command: 'facility_personal_build',
+          args: { facility_type: 'crew_bunk' },
+        },
+      },
+      {
+        profileId: `test-${Date.now()}-nested-game-repair`,
+        todo: '',
+        log: () => {},
+        connection: {
+          mode: 'http_v2',
+          connect: async () => {},
+          login: async () => ({ success: true }),
+          register: async () => ({ success: true }),
+          execute: async (command, args) => {
+            calls.push({ command, args })
+            return { result: { ok: true } }
+          },
+          onNotification: () => {},
+          disconnect: async () => {},
+          isConnected: () => true,
+        },
+      },
+    )
+
+    expect(calls).toEqual([
+      {
+        command: 'facility',
+        args: { action: 'personal_build', facility_type: 'crew_bunk' },
+      },
+    ])
+  })
+
+  test('rewrites get_recipes to catalog(type=recipes) before execution', async () => {
+    const calls: Array<{ command: string; args: Record<string, unknown> | undefined }> = []
+
+    await executeTool(
+      'game',
+      {
+        command: 'get_recipes',
+        args: {},
+      },
+      {
+        profileId: `test-${Date.now()}-get-recipes-rewrite`,
+        todo: '',
+        log: () => {},
+        connection: {
+          mode: 'http_v2',
+          connect: async () => {},
+          login: async () => ({ success: true }),
+          register: async () => ({ success: true }),
+          execute: async (command, args) => {
+            calls.push({ command, args })
+            return { result: { ok: true } }
+          },
+          onNotification: () => {},
+          disconnect: async () => {},
+          isConnected: () => true,
+        },
+      },
+    )
+
+    expect(calls).toEqual([
+      {
+        command: 'catalog',
+        args: { type: 'recipes' },
+      },
+    ])
+  })
+
+  test('rewrites auth_login to login before execution', async () => {
+    const calls: Array<{ command: string; args: Record<string, unknown> | undefined }> = []
+    const suppliedUsername = 'test_login_user'
+    const suppliedPassword = 'secret'
+    const suppliedEmpire = 'solarian'
+
+    await executeTool(
+      'game',
+      {
+        command: 'auth_login',
+        args: { username: suppliedUsername, password: suppliedPassword, empire: suppliedEmpire },
+      },
+      {
+        profileId: `test-${Date.now()}-auth-login-rewrite`,
+        todo: '',
+        log: () => {},
+        connection: {
+          mode: 'http_v2',
+          connect: async () => {},
+          login: async () => ({ success: true }),
+          register: async () => ({ success: true }),
+          execute: async (command, args) => {
+            calls.push({ command, args })
+            return { result: { ok: true } }
+          },
+          onNotification: () => {},
+          disconnect: async () => {},
+          isConnected: () => true,
+        },
+      },
+    )
+
+    expect(calls).toEqual([
+      {
+        command: 'login',
+        args: { username: suppliedUsername, password: suppliedPassword, empire: suppliedEmpire },
+      },
+    ])
+  })
+
+  test('forces login to use stored profile credentials instead of hallucinated username', async () => {
+    const profileId = `test-${Date.now()}-login-credential-normalization`
+    const storedUsername = 'stored_profile_user'
+    const storedPassword = 'stored-password'
+    const suppliedUsername = 'mismatched_model_user'
+    const suppliedPassword = 'wrong-password'
+    createProfile({
+      id: profileId,
+      name: profileId,
+      username: storedUsername,
+      password: storedPassword,
+      empire: 'solarian',
+      player_id: '',
+      provider: 'openrouter',
+      model: 'openrouter/free',
+      failover_provider: 'nvidia',
+      failover_model: 'mistralai/ministral-14b-instruct-2512',
+      directive: '',
+      todo: '',
+      connection_mode: 'http_v2',
+      server_url: 'https://game.spacemolt.com',
+      autoconnect: false,
+      enabled: true,
+      context_budget: null,
+    })
+
+    const calls: Array<{ command: string; args: Record<string, unknown> | undefined }> = []
+
+    await executeTool(
+      'game',
+      {
+        command: 'login',
+        args: { username: suppliedUsername, password: suppliedPassword, empire: 'pirate' },
+      },
+      {
+        profileId,
+        todo: '',
+        log: () => {},
+        connection: {
+          mode: 'websocket_v2',
+          connect: async () => {},
+          login: async () => ({ success: true }),
+          register: async () => ({ success: true }),
+          execute: async (command, args) => {
+            if (command === 'get_commands') {
+              return {
+                result: {
+                  commands: [
+                    { name: 'login' },
+                  ],
+                },
+              } as any
+            }
+            calls.push({ command, args })
+            return { result: { ok: true } }
+          },
+          onNotification: () => {},
+          disconnect: async () => {},
+          isConnected: () => true,
+        },
+      },
+    )
+
+    expect(calls).toEqual([
+      {
+        command: 'login',
+        args: { username: storedUsername, password: storedPassword, empire: 'solarian' },
       },
     ])
   })
@@ -323,6 +642,82 @@ describe('navigation argument normalization', () => {
   })
 })
 
+describe('state inference from command errors', () => {
+  test('treats dock + already_docked as a docked local state hint', () => {
+    const merged = mergeGameStateSnapshot(
+      {
+        player: {
+          current_system: 'Nova Terra',
+          current_poi: 'Deep Belt',
+        },
+        location: {
+          system_name: 'Nova Terra',
+          poi_name: 'Deep Belt',
+          poi_type: 'asteroid_belt',
+          in_transit: true,
+          ticks_remaining: 1,
+        },
+      },
+      {
+        error: {
+          code: 'already_docked',
+          message: 'Already docked',
+        },
+      },
+      'dock',
+      { station_id: 'nova_terra_central' },
+    )
+
+    expect(merged).toMatchObject({
+      player: {
+        current_poi: 'nova_terra_central',
+      },
+      location: {
+        docked_at: 'nova_terra_central',
+        poi_name: 'nova_terra_central',
+        poi_type: 'station',
+        in_transit: false,
+        ticks_remaining: 0,
+      },
+    })
+  })
+
+  test('treats undock + not_docked as an undocked local state hint', () => {
+    const merged = mergeGameStateSnapshot(
+      {
+        player: {
+          current_system: 'Nova Terra',
+          current_poi: 'nova_terra_central',
+        },
+        location: {
+          system_name: 'Nova Terra',
+          poi_name: 'nova_terra_central',
+          poi_type: 'station',
+          docked_at: 'nova_terra_central',
+          in_transit: false,
+          ticks_remaining: 0,
+        },
+      },
+      {
+        error: {
+          code: 'not_docked',
+          message: 'You are not docked',
+        },
+      },
+      'undock',
+      {},
+    )
+
+    expect(merged).toMatchObject({
+      location: {
+        docked_at: null,
+        in_transit: false,
+        ticks_remaining: 0,
+      },
+    })
+  })
+})
+
 describe('tool argument normalization', () => {
   test('parses stringified JSON args for game tool calls', async () => {
     const calls: Array<{ command: string; args: Record<string, unknown> | undefined }> = []
@@ -397,6 +792,99 @@ describe('tool argument normalization', () => {
     expect(logs.some((entry) => entry.summary.includes("invalid 'args' payload"))).toBe(true)
     expect(logs.some((entry) => entry.summary.includes('0='))).toBe(false)
   })
+
+  test('normalizes singular type arguments in catalog', async () => {
+    const calls: Array<{ command: string; args: Record<string, unknown> | undefined }> = []
+
+    await executeTool(
+      'game',
+      {
+        command: 'catalog',
+        args: { type: 'item' },
+      },
+      {
+        profileId: `test-${Date.now()}-catalog-type-norm`,
+        todo: '',
+        log: () => {},
+        connection: {
+          mode: 'http_v2',
+          connect: async () => {},
+          login: async () => ({ success: true }),
+          register: async () => ({ success: true }),
+          execute: async (command, args) => {
+            calls.push({ command, args })
+            return { result: { ok: true } }
+          },
+          onNotification: () => {},
+          disconnect: async () => {},
+          isConnected: () => true,
+        },
+      },
+    )
+
+    expect(calls).toEqual([
+      {
+        command: 'catalog',
+        args: { type: 'items' },
+      },
+    ])
+  })
+
+  test('blocks facility personal_build without facility_type with a clearer local error', async () => {
+    const result = await executeTool(
+      'game',
+      {
+        command: 'facility',
+        args: { action: 'personal_build' },
+      },
+      {
+        profileId: `test-${Date.now()}-facility-build-missing-type`,
+        todo: '',
+        log: () => {},
+        connection: {
+          mode: 'http_v2',
+          connect: async () => {},
+          login: async () => ({ success: true }),
+          register: async () => ({ success: true }),
+          execute: async () => ({ result: { ok: true } }),
+          onNotification: () => {},
+          disconnect: async () => {},
+          isConnected: () => true,
+        },
+      },
+    )
+
+    expect(result).toContain("Must specify 'facility_type'")
+    expect(result).toContain('category="personal"')
+  })
+
+  test('blocks facility build without facility_type with a clearer local error', async () => {
+    const result = await executeTool(
+      'game',
+      {
+        command: 'facility',
+        args: { action: 'build' },
+      },
+      {
+        profileId: `test-${Date.now()}-facility-build-missing-type`,
+        todo: '',
+        log: () => {},
+        connection: {
+          mode: 'http_v2',
+          connect: async () => {},
+          login: async () => ({ success: true }),
+          register: async () => ({ success: true }),
+          execute: async () => ({ result: { ok: true } }),
+          onNotification: () => {},
+          disconnect: async () => {},
+          isConnected: () => true,
+        },
+      },
+    )
+
+    expect(result).toContain("Must specify 'facility_type'")
+    expect(result).toContain('action="types"')
+  })
 })
 
 describe('backoff hints', () => {
@@ -456,10 +944,16 @@ describe('local tool guardrails', () => {
         log: (type, summary) => logs.push({ type, summary }),
         connection: {
           mode: 'http_v2',
+          connect: async () => {},
+          login: async () => ({ success: true }),
+          register: async () => ({ success: true }),
           execute: async () => {
             executeCalled = true
             return { result: { ok: true } }
           },
+          onNotification: () => {},
+          disconnect: async () => {},
+          isConnected: () => true,
         },
       },
     )

@@ -91,13 +91,13 @@ export function PlayerStatus({ data, storage = null }: Props) {
   if (compact) {
     return (
       <div
-        className="flex items-center gap-3 px-3 py-1.5 bg-card border-b border-border cursor-pointer hover:opacity-80 transition-opacity overflow-x-auto"
+        className="grid grid-cols-[repeat(auto-fit,minmax(10rem,1fr))] gap-px bg-border border-b border-border cursor-pointer hover:opacity-80 transition-opacity"
         onClick={toggle}
       >
         {stats.map(s => (
-          <span key={s.label} className="flex items-center gap-1 shrink-0">
-            <span style={s.color ? { color: `hsl(${s.color})` } : undefined} className={s.color ? '' : 'text-muted-foreground'}>{s.icon}</span>
-            <span className="text-[11px] text-foreground/80">{s.label === 'Location' ? `${s.value}${s.sub && s.sub !== '?' ? ` / ${s.sub}` : ''}` : s.value}</span>
+          <span key={s.label} className="flex min-w-0 items-center gap-1 bg-card px-3 py-1.5">
+            <span style={s.color ? { color: `hsl(${s.color})` } : undefined} className={`shrink-0 ${s.color ? '' : 'text-muted-foreground'}`}>{s.icon}</span>
+            <span className="truncate text-[11px] text-foreground/80">{s.label === 'Location' ? `${s.value}${s.sub && s.sub !== '?' ? ` / ${s.sub}` : ''}` : s.value}</span>
           </span>
         ))}
       </div>
@@ -106,28 +106,28 @@ export function PlayerStatus({ data, storage = null }: Props) {
 
   return (
     <div
-      className="group/status flex items-stretch gap-[1px] bg-border border-b border-border cursor-pointer hover:opacity-80 transition-opacity overflow-x-auto"
+      className="group/status grid w-full grid-cols-[repeat(auto-fit,minmax(10rem,1fr))] gap-px bg-border border-b border-border cursor-pointer hover:opacity-80 transition-opacity"
       onClick={toggle}
     >
-      {stats.map(s => <StatCard key={s.label} {...s} />)}
+      {stats.map(s => <StatCard key={s.label} wide={s.label === 'Location' || s.label === 'Storage'} {...s} />)}
     </div>
   )
 }
 
-function StatCard({ icon, label, value, sub, color }: { icon: React.ReactNode; label: string; value: string; sub?: string; color?: string }) {
+function StatCard({ icon, label, value, sub, color, wide = false }: { icon: React.ReactNode; label: string; value: string; sub?: string; color?: string; wide?: boolean }) {
   return (
-    <div className="bg-card p-2 px-2.5 min-w-[112px] shrink-0">
+    <div className={`min-w-0 bg-card p-2 px-2.5 ${wide ? 'md:col-span-2' : ''}`}>
       <div className="flex items-center gap-1 mb-0.5">
         <span style={color ? { color: `hsl(${color})` } : undefined} className={color ? '' : 'text-muted-foreground'}>{icon}</span>
         <span className="text-[10px] text-muted-foreground tracking-[1.2px] uppercase">{label}</span>
       </div>
       <span
-        className="text-[15px] leading-tight font-medium tracking-tight block"
+        className="block truncate text-[15px] leading-tight font-medium tracking-tight"
         style={color ? { color: `hsl(${color})` } : undefined}
       >
         {value}
       </span>
-      {sub && <span className="text-[9px] text-muted-foreground mt-0.5 block truncate">{sub}</span>}
+      {sub && <span className="mt-0.5 block truncate text-[9px] text-muted-foreground">{sub}</span>}
     </div>
   )
 }

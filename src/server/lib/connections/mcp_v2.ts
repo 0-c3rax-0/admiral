@@ -99,9 +99,14 @@ export class McpV2Connection implements GameConnection {
         if (alias) this.addActionTool(alias, name)
       }
 
-      // For tools without action param (like catalog), map tool name itself
+      // For tools without action param (like spacemolt_catalog), map both the
+      // discovered tool name and a short alias when one can be derived.
       if (!hasActionParam) {
         this.addActionTool(name, name)
+        const shortAlias = name.replace(/^spacemolt_?/, '')
+        if (shortAlias && shortAlias !== name) {
+          this.addActionTool(shortAlias, name)
+        }
       }
     }
   }
