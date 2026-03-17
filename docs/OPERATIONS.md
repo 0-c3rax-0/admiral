@@ -6,6 +6,7 @@ This document describes how to run and operate this Admiral fork in production.
 
 Production on this host is managed through:
 
+- `admiral-broker.service`
 - `admiral.service`
 - `admiral-healthcheck.service`
 - `admiral-healthcheck.timer`
@@ -13,14 +14,18 @@ Production on this host is managed through:
 Useful commands:
 
 ```bash
+systemctl status admiral-broker.service --no-pager
 systemctl status admiral.service --no-pager
+systemctl restart admiral-broker.service
 systemctl restart admiral.service
+journalctl -u admiral-broker.service -n 50 --no-pager
 journalctl -u admiral.service -n 50 --no-pager
 ```
 
-The service binary path is:
+The service binary paths are:
 
 ```text
+/root/spacemolt-admiral/admiral/admiral-broker
 /root/spacemolt-admiral/admiral/admiral
 ```
 
@@ -32,9 +37,16 @@ Build:
 bun run build
 ```
 
-Restart:
+Restart worker only:
 
 ```bash
+systemctl restart admiral.service
+```
+
+Restart broker and worker:
+
+```bash
+systemctl restart admiral-broker.service
 systemctl restart admiral.service
 ```
 
@@ -43,11 +55,13 @@ Do not rely on ad-hoc background starts when the systemd service is the intended
 ## Important Paths
 
 - `data/admiral.db`
+- `data/broker-sessions.json`
 - `data/memory/`
 - `data/spacemolt-kb/`
 - `data/spacemolt-kb/manifest.json`
 - `data/system-kb-cache.json`
 - `data/ship-kb-cache.json`
+- `/etc/systemd/system/admiral-broker.service`
 - `/etc/systemd/system/admiral.service`
 - `/etc/systemd/system/admiral-healthcheck.service`
 - `/etc/systemd/system/admiral-healthcheck.timer`
@@ -81,6 +95,13 @@ For most profiles:
 - profile failover: a more available backup model
 
 Use `websocket_v2` only if you specifically want a persistent socket transport and the server path is stable enough.
+
+Current architecture:
+
+- `admiral-broker.service` owns long-lived SpaceMolt `websocket_v2` sessions
+- `admiral.service` talks to the broker over HTTP at `ADMIRAL_BROKER_URL` (default `http://127.0.0.1:3032`)
+- restarting only `admiral.service` preserves the broker-owned game socket and lets Admiral reattach on startup
+- restarting `admiral-broker.service` still drops the underlying game socket
 
 Operational note:
 

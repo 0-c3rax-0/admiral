@@ -24,6 +24,7 @@ const RESPONSE_TYPES = new Set([
 ])
 
 const AUTH_RECOVERABLE_ERRORS = new Set(['not_authenticated', 'session_invalid', 'session_expired'])
+const SUPPORTS_UNEXPECTED_RESPONSE = typeof (globalThis as { Bun?: unknown }).Bun === 'undefined'
 
 interface PendingCommand {
   resolve: (value: CommandResult) => void
@@ -82,14 +83,16 @@ export class WebSocketV2Connection implements GameConnection {
         reject(new Error('WebSocket connection timed out during open handshake'))
       }, CONNECT_TIMEOUT)
       try {
-        currentWs.on('unexpected-response', (_req, res) => {
-          if (!this.connected && !settled) {
-            settled = true
-            if (connectTimer) clearTimeout(connectTimer)
-            this.noteHandshakeFailure(`HTTP ${res.statusCode}`)
-            reject(new Error(`WebSocket handshake failed: HTTP ${res.statusCode}`))
-          }
-        })
+        if (SUPPORTS_UNEXPECTED_RESPONSE) {
+          currentWs.on('unexpected-response', (_req, res) => {
+            if (!this.connected && !settled) {
+              settled = true
+              if (connectTimer) clearTimeout(connectTimer)
+              this.noteHandshakeFailure(`HTTP ${res.statusCode}`)
+              reject(new Error(`WebSocket handshake failed: HTTP ${res.statusCode}`))
+            }
+          })
+        }
 
         currentWs.onopen = () => {
           if (this.ws !== currentWs) return
@@ -177,7 +180,10 @@ export class WebSocketV2Connection implements GameConnection {
 
   async login(username: string, password: string): Promise<LoginResult> {
     this.credentials = { username, password }
-    const resp = await this.sendCommand('login', { username, password }, false)
+    const resp = this.normalizeLoginCommandResult(
+      await this.sendCommand('login', { username, password }, false),
+      username,
+    )
     if (resp.error) {
       return { success: false, error: resp.error.message }
     }
@@ -523,10 +529,13 @@ export class WebSocketV2Connection implements GameConnection {
     if (this.reauthInFlight) return this.reauthInFlight
 
     this.reauthInFlight = (async () => {
-      const loginResp = await this.sendCommand('login', {
-        username: this.credentials!.username,
-        password: this.credentials!.password,
-      }, false)
+      const loginResp = this.normalizeLoginCommandResult(
+        await this.sendCommand('login', {
+          username: this.credentials!.username,
+          password: this.credentials!.password,
+        }, false),
+        this.credentials!.username,
+      )
       return !loginResp.error
     })()
 
@@ -534,6 +543,17 @@ export class WebSocketV2Connection implements GameConnection {
       return await this.reauthInFlight
     } finally {
       this.reauthInFlight = null
+    }
+  }
+
+  private normalizeLoginCommandResult(result: CommandResult, username: string): CommandResult {
+    if (!result.error) return result
+    const message = `${result.error.message || ''}`.toLowerCase()
+    if (!message.includes('already logged in')) return result
+    const wanted = username.trim().toLowerCase()
+    if (wanted && !message.includes(`'${wanted}'`) && !message.includes(`"${wanted}"`)) return result
+    return {
+      result: { already_logged_in: true, username },
     }
   }
 }

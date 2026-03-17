@@ -304,14 +304,7 @@ export async function fetchOpenApiSpec(
 /**
  * Fetch the OpenAPI spec from the gameserver and extract commands with params.
  */
-export async function fetchGameCommands(baseUrl: string, log?: SpecLogFn): Promise<GameCommandInfo[]> {
-  let spec: Record<string, unknown> | null = null
-  for (const specUrl of getOpenApiSpecUrls(baseUrl)) {
-    spec = await fetchOpenApiSpec(specUrl, log)
-    if (spec) break
-  }
-  if (!spec) return []
-
+export function extractGameCommandsFromOpenApiSpec(spec: Record<string, unknown>): GameCommandInfo[] {
   const paths = (spec.paths ?? {}) as Record<string, Record<string, Record<string, unknown>>>
   const commands: GameCommandInfo[] = []
   const toolPrefixes = new Set<string>()
@@ -371,6 +364,17 @@ export async function fetchGameCommands(baseUrl: string, log?: SpecLogFn): Promi
   return commands
     .sort((a, b) => a.name.localeCompare(b.name))
     .filter((cmd, index, list) => list.findIndex((other) => other.name === cmd.name) === index)
+}
+
+export async function fetchGameCommands(baseUrl: string, log?: SpecLogFn): Promise<GameCommandInfo[]> {
+  let spec: Record<string, unknown> | null = null
+  for (const specUrl of getOpenApiSpecUrls(baseUrl)) {
+    spec = await fetchOpenApiSpec(specUrl, log)
+    if (spec) break
+  }
+  if (!spec) return []
+
+  return extractGameCommandsFromOpenApiSpec(spec)
 }
 
 /**

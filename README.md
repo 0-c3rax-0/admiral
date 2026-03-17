@@ -25,6 +25,7 @@ That KB is now used by this fork for external map lookups and for the local mirr
 - free-query telemetry injected into the agent loop
 - normalized mutation metadata across HTTP, `websocket_v2`, and `mcp_v2`
 - restart-safe pending navigation guards backed by SQLite
+- optional brokered `websocket_v2` ownership so `admiral.service` can restart without dropping the game socket
 - local per-account mutation-stall detection instead of premature server-wide deadlock claims
 - dashboard-visible 429 risk indicators instead of pure log spam
 - live dashboard refresh controls plus `Get Status All` / `Nudge All` actions
@@ -57,24 +58,28 @@ Production:
 
 ```bash
 bun run build
+./admiral-broker
 ./admiral
 ```
 
 Systemd deployments in this repo use:
 
 ```text
+admiral-broker.service
 admiral.service
 ```
 
 Important local paths:
 
 - `data/admiral.db`
+- `data/broker-sessions.json`
 - `data/memory/`
 - `data/spacemolt-kb/`
 - `data/spacemolt-kb/manifest.json`
 - `data/system-kb-cache.json`
 - `data/admiral.db` table `pending_mutations`
 - `dist/`
+- `/etc/systemd/system/admiral-broker.service`
 - `/etc/systemd/system/admiral.service`
 
 ## Runtime Model
@@ -101,6 +106,12 @@ Supported connection modes:
 Recommended default:
 
 - `http_v2`
+
+Recommended `websocket_v2` deployment:
+
+- run `admiral-broker.service`
+- keep `admiral.service` pointed at `ADMIRAL_BROKER_URL=http://127.0.0.1:3032`
+- use brokered `websocket_v2` if you want the SpaceMolt socket to survive `systemctl restart admiral.service`
 
 ## LLM Routing
 

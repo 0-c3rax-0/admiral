@@ -1,0 +1,15 @@
+[Unit]
+Description=Admiral websocket_v2 broker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/spacemolt-admiral/admiral
+ExecStart=/root/spacemolt-admiral/admiral/admiral-broker
+Restart=always
+RestartSec=5
+Environment=ADMIRAL_BROKER_PORT=3032
+
+[Install]
+WantedBy=multi-user.target

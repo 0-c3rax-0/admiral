@@ -2,6 +2,7 @@ import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection, CommandResult } from './connections/interface'
 import { getProfile, updateProfile } from './db'
+import { HttpV2Connection } from './connections/http_v2'
 import { fetchGameCommands, parseRuntimeCommandResult } from './schema'
 import { getPendingNavigation, reconcilePendingNavigationWithStatus, updatePendingNavigationFromResult } from './navigation-guard'
 import { classifyMiningFit } from './mining-fit'
@@ -24,6 +25,7 @@ import {
 import { ingestSynchronousTrade } from './agent-extensions'
 import { getRecipe, deleteRecipe } from './economy-db'
 import { getLatestStorageSnapshot } from './agent-learning'
+import { lookupShipKbRecord } from './ship-kb'
 
 // --- Tool Definitions ---
 
@@ -83,6 +85,14 @@ const BLOCKED_GAME_COMMAND_PATTERNS = [
   /\bwipe_(account|character|player|profile)\b/,
   /\bterminate_(account|character|player|profile)\b/,
 ] as const
+const HTTP_V2_FALLBACK_QUERY_COMMANDS = new Set([
+  'get_status', 'get_location', 'get_system', 'get_poi', 'get_cargo', 'get_ship', 'get_skills',
+  'get_missions', 'get_active_missions', 'get_nearby', 'get_action_log', 'view_market', 'analyze_market',
+  'estimate_purchase', 'catalog', 'browse_ships', 'list_ships', 'quote', 'wrecks', 'forum_list', 'forum_get_thread',
+  'captains_log_list', 'captains_log_get', 'social_captains_log_list', 'social_captains_log_get',
+  'get_commands', 'get_base', 'view_orders', 'search_systems', 'find_route', 'storage_view', 'salvage_quote',
+  'fleet_status',
+])
 
 export type LogFn = (type: string, summary: string, detail?: string) => void
 
@@ -215,6 +225,11 @@ export async function executeTool(
       commandArgs = normalizedStorage.args
       ctx.log('system', normalizedStorage.message)
     }
+    const normalizedSellShip = normalizeSellShipArgs(command, commandArgs)
+    if (normalizedSellShip.changed) {
+      commandArgs = normalizedSellShip.args
+      ctx.log('system', normalizedSellShip.message)
+    }
     const normalizedSellOrder = normalizeSellOrderArgs(ctx.profileId, command, commandArgs, ctx.gameState)
     if (normalizedSellOrder.changed) {
       commandArgs = normalizedSellOrder.args
@@ -308,10 +323,64 @@ export async function executeTool(
     ctx.log('tool_result', truncate(result, 200), truncateResultForLog(result))
     return truncateResult(result)
   } catch (err) {
+    const fallback = await tryHttpV2FallbackForTool(ctx, command, commandArgs, err)
+    if (fallback) {
+      ctx.onGameCommandResult?.(command, commandArgs, fallback)
+      if (fallback.error) {
+        const errMsg = formatCommandError(command, fallback.error.code, fallback.error.message)
+        ctx.log('tool_result', errMsg)
+        return errMsg
+      }
+      const result = formatToolResult(command, fallback.result, fallback.notifications)
+      ctx.log('tool_result', truncate(result, 200), truncateResultForLog(result))
+      return truncateResult(result)
+    }
+
     const msg = err instanceof Error ? err.message : String(err)
     const errMsg = `Error executing ${command}: ${msg}`
     ctx.log('error', errMsg)
     return errMsg
+  }
+}
+
+async function tryHttpV2FallbackForTool(
+  ctx: ToolContext,
+  command: string,
+  args: Record<string, unknown> | undefined,
+  originalError: unknown,
+): Promise<CommandResult | null> {
+  if (ctx.connection.mode !== 'websocket_v2') return null
+  if (!HTTP_V2_FALLBACK_QUERY_COMMANDS.has(command)) return null
+
+  const profile = getProfile(ctx.profileId)
+  if (!profile?.username || !profile.password) return null
+
+  const fallback = new HttpV2Connection(profile.server_url)
+  try {
+    await fallback.connect()
+    const login = await fallback.login(profile.username, profile.password)
+    if (!login.success) {
+      ctx.log('system', `HTTP v2 fallback login failed for ${command}: ${login.error || 'unknown error'}`)
+      return null
+    }
+    const result = await fallback.execute(command, args)
+    if (result.error) {
+      ctx.log('system', `HTTP v2 fallback for ${command} also failed: ${result.error.code}`)
+    } else {
+      ctx.log('system', `HTTP v2 fallback served ${command} after websocket_v2 transport exception`)
+    }
+    return result
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    const original = originalError instanceof Error ? originalError.message : String(originalError)
+    ctx.log('system', `HTTP v2 fallback for ${command} failed after websocket_v2 exception: ${original}; fallback=${msg}`)
+    return null
+  } finally {
+    try {
+      await fallback.disconnect()
+    } catch {
+      // ignore cleanup failures for one-shot fallback connections
+    }
   }
 }
 
@@ -422,6 +491,10 @@ async function validateLocalGameCommand(
 
   if (command === 'facility') {
     return validateFacilityCommand(args)
+  }
+
+  if (normalizeCommand(command).endsWith('sell_ship')) {
+    return validateSellShipCommand(args, gameState)
   }
 
   if (command !== 'sell') return null
@@ -719,6 +792,90 @@ function validateFacilityCommand(
   }
 
   return null
+}
+
+function normalizeSellShipArgs(
+  command: string,
+  args: Record<string, unknown> | undefined,
+): { changed: boolean; args: Record<string, unknown> | undefined; message: string } {
+  if (!args || !normalizeCommand(command).endsWith('sell_ship')) return { changed: false, args, message: '' }
+
+  const shipId = pickFirstStringArg(args.ship_id, args.id, args.item_id)
+  if (!shipId) return { changed: false, args, message: '' }
+
+  const next = { ...args, ship_id: shipId }
+  for (const key of ['id', 'item_id', 'quantity', 'qty', 'amount'] as const) {
+    if (key in next) delete (next as Record<string, unknown>)[key]
+  }
+
+  const changed = JSON.stringify(next) !== JSON.stringify(args)
+  if (!changed) return { changed: false, args, message: '' }
+
+  return {
+    changed: true,
+    args: next,
+    message: `Normalized sell_ship args: ship_id=${shipId}`,
+  }
+}
+
+function validateSellShipCommand(
+  args: Record<string, unknown> | undefined,
+  gameState: Record<string, unknown> | null | undefined,
+): { systemMessage: string; errorMessage: string } | null {
+  const shipId = pickFirstStringArg(args?.ship_id, args?.id, args?.item_id)
+  if (!shipId) {
+    return {
+      systemMessage: 'Blocked sell_ship locally: missing ship_id. Use list_ships and sell only by exact stored ship id.',
+      errorMessage: 'Error: [invalid_payload] sell_ship requires ship_id. Do not pass item_id, quantity, or a vague ship reference.',
+    }
+  }
+
+  const activeShip = extractActiveShipIdentity(gameState)
+  if (activeShip.ids.has(shipId) || activeShip.names.has(normalizeShipReference(shipId))) {
+    const miningSuffix = activeShip.isMiningHull ? ' It also appears to be the current mining hull.' : ''
+    return {
+      systemMessage: `Blocked sell_ship locally: target ${shipId} matches the active ship.${miningSuffix}`,
+      errorMessage: `Error: [active_ship_blocked] Refusing to sell the active ship (${activeShip.label || shipId}). Switch to another hull first and only sell a confirmed stored ship.${miningSuffix}`,
+    }
+  }
+
+  return null
+}
+
+function extractActiveShipIdentity(gameState: Record<string, unknown> | null | undefined): {
+  ids: Set<string>
+  names: Set<string>
+  isMiningHull: boolean
+  label: string | null
+} {
+  const ship = (gameState?.ship && typeof gameState.ship === 'object' ? gameState.ship : {}) as Record<string, unknown>
+  const ids = new Set<string>()
+  const rawIds = [
+    pickFirstStringArg(ship.id, ship.ship_id),
+    pickFirstStringArg(gameState?.current_ship_id),
+    pickFirstStringArg((gameState?.player as Record<string, unknown> | undefined)?.current_ship_id),
+  ]
+  for (const value of rawIds) {
+    if (value) ids.add(value)
+  }
+
+  const name = pickFirstStringArg(ship.custom_name, ship.name, ship.class_name, ship.class_id, ship.class)
+  const names = new Set<string>()
+  if (name) names.add(normalizeShipReference(name))
+  const kb = name ? lookupShipKbRecord(name) : null
+  const modules = Array.isArray(gameState?.modules) ? gameState.modules : []
+  const fitKind = classifyMiningFit(modules)
+
+  return {
+    ids,
+    names,
+    isMiningHull: kb?.purpose === 'mining' || fitKind === 'ore' || fitKind === 'ice' || fitKind === 'gas' || fitKind === 'mixed',
+    label: name || [...ids][0] || null,
+  }
+}
+
+function normalizeShipReference(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')
 }
 
 function normalizeSellOrderArgs(
@@ -1272,6 +1429,28 @@ export function resolveExplicitCommandAlias(input: string, names: string[]): str
 
   if (input === 'get_market' || input === 'market_view') {
     return chooseFirstAvailable('view_market')
+  }
+
+  if (input === 'view_market' || input === 'analyze_market' || input === 'estimate_purchase' || input === 'view_orders') {
+    return chooseFirstAvailable(input, `market_${input}`)
+  }
+
+  if (input === 'browse_ships' || input === 'list_ships' || input === 'quote') {
+    const shipMapped = input === 'quote' ? 'commission_quote' : input
+    return chooseFirstAvailable(input, shipMapped, `ship_${shipMapped}`)
+  }
+
+  if (input === 'wrecks' || input === 'salvage_quote') {
+    const salvageMapped = input === 'wrecks' ? 'salvage_wrecks' : input
+    return chooseFirstAvailable(input, salvageMapped)
+  }
+
+  if (
+    input === 'forum_list' || input === 'forum_get_thread' ||
+    input === 'captains_log_list' || input === 'captains_log_get' ||
+    input === 'get_action_log'
+  ) {
+    return chooseFirstAvailable(input, `social_${input}`)
   }
 
   if (input === 'storage_deposit' || input === 'storage_withdraw' || input === 'storage_view') {
@@ -2069,12 +2248,28 @@ function normalizeFacilityArgs(
     changes.push(`facility_id=${normalizedId}`)
   }
 
+  if (!normalizedType) {
+    if (action === 'personal_build') {
+      next.action = 'types'
+      next.category = 'personal'
+      changes.push('action=types', 'category=personal')
+    } else if (action === 'faction_build') {
+      next.action = 'types'
+      next.category = 'faction'
+      changes.push('action=types', 'category=faction')
+    } else if (action === 'build') {
+      next.action = 'types'
+      changes.push('action=types')
+    }
+  }
+
+  const finalAction = typeof next.action === 'string' ? next.action.toLowerCase() : action
   const keysToDelete = new Set<string>()
-  if (typeActions.has(action) && normalizedType) {
+  if (typeActions.has(finalAction) && normalizedType) {
     for (const key of ['type', 'base_type', 'station_type', 'upgrade_to'] as const) keysToDelete.add(key)
     if (next.facility === normalizedType) keysToDelete.add('facility')
   }
-  if (idActions.has(action) && normalizedId) {
+  if (idActions.has(finalAction) && normalizedId) {
     for (const key of ['id', 'target', 'target_id'] as const) keysToDelete.add(key)
     if (next.facility === normalizedId) keysToDelete.add('facility')
   }

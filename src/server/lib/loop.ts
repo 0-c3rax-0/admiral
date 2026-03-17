@@ -158,7 +158,7 @@ export async function runAgentTurn(
       return
     }
 
-    sanitizeMessageToolIdentifiers([response])
+    sanitizeProviderContextMessages([response as unknown as Message])
 
     // Log rich LLM call metadata
     {
@@ -434,6 +434,10 @@ function isValidProviderToolCallId(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9]{9}$/.test(value)
 }
 
+function isValidProviderToolName(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
 export function sanitizeMessageToolIdentifiers(messages: Message[]): void {
   const fallbackIds = new Set<string>()
   const currentIds = new Set<string>()
@@ -488,6 +492,32 @@ export function sanitizeMessageToolIdentifiers(messages: Message[]): void {
   }
 }
 
+export function sanitizeAssistantToolCalls(messages: Message[]): void {
+  for (const msg of messages) {
+    if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue
+
+    const rewrittenBlocks = (msg.content as any[]).map((block) => {
+      if (block?.type !== 'toolCall') return block
+      if (isValidProviderToolName(block.name)) return block
+
+      const argsText = (() => {
+        try {
+          return JSON.stringify(block.arguments ?? {})
+        } catch {
+          return '{}'
+        }
+      })()
+
+      return {
+        type: 'text',
+        text: `Dropped invalid tool call with missing name. Arguments: ${argsText}`,
+      }
+    })
+
+    ;(msg as any).content = rewrittenBlocks
+  }
+}
+
 export function sanitizeProviderMessageSequence(messages: Message[]): void {
   for (let i = 1; i < messages.length; i++) {
     const previous = messages[i - 1]
@@ -513,6 +543,7 @@ export function sanitizeProviderMessageSequence(messages: Message[]): void {
 }
 
 export function sanitizeProviderContextMessages(messages: Message[]): void {
+  sanitizeAssistantToolCalls(messages)
   sanitizeMessageToolIdentifiers(messages)
   sanitizeProviderMessageSequence(messages)
 }

@@ -1,10 +1,13 @@
 import { Agent, clearProfileMemory, readProfileMemory, writeProfileMemory, type MutationState, type NavigationState } from './agent'
-import { getProfile, addLogEntry } from './db'
+import { getProfile, addLogEntry, listProfiles } from './db'
 import { getPendingNavigation } from './navigation-guard'
+import { listBrokerSessions, setBrokerRunningIntent } from './broker-client'
+import type { BrokerSessionState } from '../../shared/broker-types'
 
 const BACKOFF_BASE = 12_000     // 12 seconds (must exceed PROFILE_CONNECT_COOLDOWN_MS)
 const BACKOFF_MAX = 5 * 60_000  // 5 minutes
 const BACKOFF_RESET = 60_000    // Reset backoff after 1 min of successful running
+const BROKER_STATUS_STALE_MS = 15_000
 
 type SlimGameState = {
   credits?: unknown
@@ -61,6 +64,7 @@ function slimGameState(raw: Record<string, unknown> | null): SlimGameState {
 
 class AgentManager {
   private agents = new Map<string, Agent>()
+  private brokerSessions = new Map<string, BrokerSessionState>()
   private stopRequested = new Set<string>()
   private backoff = new Map<string, { attempts: number; timer: ReturnType<typeof setTimeout> | null }>()
   private connecting = new Map<string, Promise<Agent>>()
@@ -74,14 +78,36 @@ class AgentManager {
     return this.agents.get(profileId)
   }
 
-  async connect(profileId: string): Promise<Agent> {
+  async refreshBrokerSessionCache(): Promise<void> {
+    if (process.env.ADMIRAL_DISABLE_BROKER === 'true') return
+    try {
+      const sessions = await listBrokerSessions()
+      this.brokerSessions = new Map(sessions.map((session) => [session.profileId, session]))
+    } catch {
+      // Keep the last known broker snapshot if the broker is briefly unavailable.
+    }
+  }
+
+  private getBrokerRuntime(profileId: string): { connected: boolean; running: boolean } {
+    const broker = this.brokerSessions.get(profileId)
+    if (!broker) return { connected: false, running: false }
+
+    const isFresh = broker.updatedAt > 0 && (Date.now() - broker.updatedAt) <= BROKER_STATUS_STALE_MS
+    const connected = broker.connected && broker.connectedIntent && isFresh
+    const running = broker.runningIntent && (connected || broker.connectedIntent)
+
+    return { connected, running }
+  }
+
+  async connect(profileId: string, options?: { bypassCooldown?: boolean }): Promise<Agent> {
+    const bypassCooldown = options?.bypassCooldown === true
     const now = Date.now()
     const lastProfile = this.lastConnectAtByProfile.get(profileId) || 0
-    if (now - lastProfile < AgentManager.PROFILE_CONNECT_COOLDOWN_MS) {
+    if (!bypassCooldown && now - lastProfile < AgentManager.PROFILE_CONNECT_COOLDOWN_MS) {
       const waitMs = AgentManager.PROFILE_CONNECT_COOLDOWN_MS - (now - lastProfile)
       throw new Error(`CONNECT_THROTTLED: Profile connect cooldown active (${Math.ceil(waitMs / 1000)}s)`)
     }
-    if (now - this.lastConnectAtGlobal < AgentManager.GLOBAL_CONNECT_COOLDOWN_MS) {
+    if (!bypassCooldown && now - this.lastConnectAtGlobal < AgentManager.GLOBAL_CONNECT_COOLDOWN_MS) {
       const waitMs = AgentManager.GLOBAL_CONNECT_COOLDOWN_MS - (now - this.lastConnectAtGlobal)
       throw new Error(`CONNECT_THROTTLED: Global connect cooldown active (${Math.ceil(waitMs / 1000)}s)`)
     }
@@ -121,6 +147,7 @@ class AgentManager {
 
     this.stopRequested.delete(profileId)
     this.resetBackoff(profileId)
+    void setBrokerRunningIntent(profileId, true).catch(() => {})
 
     // Run in background (don't await)
     const loopStarted = Date.now()
@@ -187,6 +214,7 @@ class AgentManager {
   async disconnect(profileId: string): Promise<void> {
     this.stopRequested.add(profileId)
     this.resetBackoff(profileId)
+    void setBrokerRunningIntent(profileId, false).catch(() => {})
 
     const agent = this.agents.get(profileId)
     if (!agent) return
@@ -222,10 +250,11 @@ class AgentManager {
     effective_context_budget_ratio: number | null
   } {
     const agent = this.agents.get(profileId)
+    const brokerRuntime = this.getBrokerRuntime(profileId)
     const persistedNavigation = !agent ? getPendingNavigation(profileId) : null
     return {
-      connected: agent?.isConnected ?? false,
-      running: agent?.isRunning ?? false,
+      connected: agent?.isConnected ?? brokerRuntime.connected,
+      running: agent?.isRunning ?? brokerRuntime.running,
       activity: agent?.activity ?? 'idle',
       gameState: slimGameState(agent?.gameState ?? null),
       mutation_state: agent?.mutationState ?? (persistedNavigation ? 'navigation_pending' : 'idle'),
@@ -293,6 +322,35 @@ class AgentManager {
       return
     }
     clearProfileMemory(profileId)
+  }
+
+  async reattachBrokerSessions(): Promise<void> {
+    if (process.env.ADMIRAL_DISABLE_BROKER === 'true') return
+
+    let sessions
+      : Awaited<ReturnType<typeof listBrokerSessions>>
+    try {
+      sessions = await listBrokerSessions()
+      this.brokerSessions = new Map(sessions.map((session) => [session.profileId, session]))
+    } catch {
+      return
+    }
+
+    const profilesById = new Map(listProfiles().map((profile) => [profile.id, profile]))
+    for (const session of sessions) {
+      if (session.mode !== 'websocket_v2' || !session.connectedIntent) continue
+      const profile = profilesById.get(session.profileId)
+      if (!profile || !profile.enabled || profile.connection_mode !== 'websocket_v2') continue
+      try {
+        await this.connect(profile.id, { bypassCooldown: true })
+        addLogEntry(profile.id, 'system', 'Reattached to live broker-managed websocket_v2 session after server startup')
+        if (session.runningIntent && profile.provider && profile.provider !== 'manual' && profile.model) {
+          await this.startLLM(profile.id)
+        }
+      } catch (err) {
+        addLogEntry(profile.id, 'error', `Broker reattach failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
   }
 }
 

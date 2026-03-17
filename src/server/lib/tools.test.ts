@@ -830,7 +830,9 @@ describe('tool argument normalization', () => {
     ])
   })
 
-  test('blocks facility personal_build without facility_type with a clearer local error', async () => {
+  test('reroutes empty facility personal_build to types with category=personal', async () => {
+    const calls: Array<{ command: string; args: Record<string, unknown> | undefined }> = []
+
     const result = await executeTool(
       'game',
       {
@@ -838,7 +840,7 @@ describe('tool argument normalization', () => {
         args: { action: 'personal_build' },
       },
       {
-        profileId: `test-${Date.now()}-facility-build-missing-type`,
+        profileId: `test-${Date.now()}-facility-personal-build-empty`,
         todo: '',
         log: () => {},
         connection: {
@@ -846,7 +848,10 @@ describe('tool argument normalization', () => {
           connect: async () => {},
           login: async () => ({ success: true }),
           register: async () => ({ success: true }),
-          execute: async () => ({ result: { ok: true } }),
+          execute: async (command, args) => {
+            calls.push({ command, args })
+            return { result: { ok: true } }
+          },
           onNotification: () => {},
           disconnect: async () => {},
           isConnected: () => true,
@@ -854,11 +859,18 @@ describe('tool argument normalization', () => {
       },
     )
 
-    expect(result).toContain("Must specify 'facility_type'")
-    expect(result).toContain('category="personal"')
+    expect(calls).toEqual([
+      {
+        command: 'facility',
+        args: { action: 'types', category: 'personal' },
+      },
+    ])
+    expect(result).toContain('ok: true')
   })
 
-  test('blocks facility build without facility_type with a clearer local error', async () => {
+  test('reroutes empty facility build to types', async () => {
+    const calls: Array<{ command: string; args: Record<string, unknown> | undefined }> = []
+
     const result = await executeTool(
       'game',
       {
@@ -866,7 +878,7 @@ describe('tool argument normalization', () => {
         args: { action: 'build' },
       },
       {
-        profileId: `test-${Date.now()}-facility-build-missing-type`,
+        profileId: `test-${Date.now()}-facility-build-empty`,
         todo: '',
         log: () => {},
         connection: {
@@ -874,7 +886,10 @@ describe('tool argument normalization', () => {
           connect: async () => {},
           login: async () => ({ success: true }),
           register: async () => ({ success: true }),
-          execute: async () => ({ result: { ok: true } }),
+          execute: async (command, args) => {
+            calls.push({ command, args })
+            return { result: { ok: true } }
+          },
           onNotification: () => {},
           disconnect: async () => {},
           isConnected: () => true,
@@ -882,8 +897,13 @@ describe('tool argument normalization', () => {
       },
     )
 
-    expect(result).toContain("Must specify 'facility_type'")
-    expect(result).toContain('action="types"')
+    expect(calls).toEqual([
+      {
+        command: 'facility',
+        args: { action: 'types' },
+      },
+    ])
+    expect(result).toContain('ok: true')
   })
 })
 

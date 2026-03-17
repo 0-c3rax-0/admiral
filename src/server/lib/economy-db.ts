@@ -137,6 +137,18 @@ export interface RecipeEconomicsRow extends RecipeRow {
   estimated_profit: number | null
 }
 
+export interface AvailableMaterialInput {
+  item_name: string
+  quantity: number
+}
+
+export interface CraftableRecipeEconomicsRow extends RecipeEconomicsRow {
+  max_craftable: number
+  estimated_raw_input_bid_value: number | null
+  estimated_profit_vs_raw_inputs: number | null
+  estimated_total_profit_vs_raw_inputs: number | null
+}
+
 export interface ItemTradeSummaryRow {
   item_name: string
   buy_quantity: number
@@ -194,11 +206,6 @@ function migrate(db: Database): void {
       occurred_at TEXT DEFAULT (datetime('now'))
     );
 
-    CREATE INDEX IF NOT EXISTS idx_trade_events_profile_time ON trade_events(profile_id, occurred_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_trade_events_item_time ON trade_events(item_name, occurred_at DESC);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_events_action_log_dedupe
-      ON trade_events(profile_id, source_command, source_event_id, trade_type, item_name, quantity, total_price);
-
     CREATE TABLE IF NOT EXISTS ledger_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       profile_id TEXT NOT NULL,
@@ -213,11 +220,6 @@ function migrate(db: Database): void {
       raw_json TEXT,
       occurred_at TEXT DEFAULT (datetime('now'))
     );
-
-    CREATE INDEX IF NOT EXISTS idx_ledger_events_profile_time ON ledger_events(profile_id, occurred_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_ledger_events_event_type_time ON ledger_events(event_type, occurred_at DESC);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_events_action_log_dedupe
-      ON ledger_events(profile_id, source_command, source_event_id, event_type, amount);
 
     CREATE TABLE IF NOT EXISTS market_snapshots (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -279,6 +281,42 @@ function migrate(db: Database): void {
   if (!tradeCols.some(c => c.name === 'source_event_type')) {
     db.exec('ALTER TABLE trade_events ADD COLUMN source_event_type TEXT')
   }
+
+  const tables = db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>
+  if (!tables.some((table) => table.name === 'ledger_events')) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS ledger_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        profile_id TEXT NOT NULL,
+        category TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        amount REAL,
+        system_name TEXT,
+        poi_name TEXT,
+        source_command TEXT,
+        source_event_id INTEGER,
+        summary TEXT,
+        raw_json TEXT,
+        occurred_at TEXT DEFAULT (datetime('now'))
+      );
+    `)
+  }
+
+  const ledgerCols = db.query("PRAGMA table_info(ledger_events)").all() as Array<{ name: string }>
+  if (ledgerCols.length > 0 && !ledgerCols.some((c) => c.name === 'source_event_id')) {
+    db.exec('ALTER TABLE ledger_events ADD COLUMN source_event_id INTEGER')
+  }
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_trade_events_profile_time ON trade_events(profile_id, occurred_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_trade_events_item_time ON trade_events(item_name, occurred_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_events_action_log_dedupe
+      ON trade_events(profile_id, source_command, source_event_id, trade_type, item_name, quantity, total_price);
+    CREATE INDEX IF NOT EXISTS idx_ledger_events_profile_time ON ledger_events(profile_id, occurred_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_ledger_events_event_type_time ON ledger_events(event_type, occurred_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_events_action_log_dedupe
+      ON ledger_events(profile_id, source_command, source_event_id, event_type, amount);
+  `)
 }
 
 export function addTradeEvent(input: TradeEventInput): number {
@@ -641,6 +679,70 @@ export function listRecipeEconomics(limit: number = 50): RecipeEconomicsRow[] {
   }).sort((a, b) => (b.estimated_profit ?? -Infinity) - (a.estimated_profit ?? -Infinity))
 }
 
+export function listCraftableRecipeEconomics(
+  availableItems: AvailableMaterialInput[],
+  profileId?: string,
+  limit: number = 20,
+): CraftableRecipeEconomicsRow[] {
+  const availableByName = new Map<string, number>()
+  for (const item of availableItems) {
+    const normalized = normalizeItemName(item.item_name)
+    if (!normalized) continue
+    availableByName.set(normalized, (availableByName.get(normalized) || 0) + item.quantity)
+  }
+
+  const recipes = listRecipes(1000)
+  const craftable = recipes.map((recipe) => {
+    let maxCraftable = Number.POSITIVE_INFINITY
+    for (const input of recipe.inputs) {
+      const available = availableByName.get(normalizeItemName(input.item_name)) || 0
+      maxCraftable = Math.min(maxCraftable, Math.floor(available / input.quantity))
+    }
+
+    if (!Number.isFinite(maxCraftable) || maxCraftable <= 0) return null
+
+    let rawInputBidValue: number | null = 0
+    for (const input of recipe.inputs) {
+      const price = getKnownPrice(input.item_name, profileId)
+      const unitBid = price?.best_bid ?? price?.best_ask ?? null
+      if (unitBid === null) {
+        rawInputBidValue = null
+        break
+      }
+      rawInputBidValue += unitBid * input.quantity
+    }
+
+    const outputPrice = getKnownPrice(recipe.output_item_name, profileId)
+    const outputBid = outputPrice?.best_bid ?? outputPrice?.best_ask ?? null
+    const revenue = outputBid !== null ? outputBid * recipe.output_quantity : null
+    const profitVsRawInputs = revenue !== null && rawInputBidValue !== null ? revenue - rawInputBidValue : null
+
+    return {
+      ...recipe,
+      max_craftable: maxCraftable,
+      estimated_input_cost: rawInputBidValue,
+      last_known_output_bid: outputBid,
+      estimated_revenue: revenue,
+      estimated_profit: profitVsRawInputs,
+      estimated_raw_input_bid_value: rawInputBidValue,
+      estimated_profit_vs_raw_inputs: profitVsRawInputs,
+      estimated_total_profit_vs_raw_inputs: profitVsRawInputs !== null ? profitVsRawInputs * maxCraftable : null,
+    } satisfies CraftableRecipeEconomicsRow
+  }).filter((row): row is CraftableRecipeEconomicsRow => !!row)
+
+  return craftable
+    .sort((a, b) => {
+      const totalDiff = (b.estimated_total_profit_vs_raw_inputs ?? -Infinity) - (a.estimated_total_profit_vs_raw_inputs ?? -Infinity)
+      if (totalDiff !== 0) return totalDiff
+      return (b.estimated_profit_vs_raw_inputs ?? -Infinity) - (a.estimated_profit_vs_raw_inputs ?? -Infinity)
+    })
+    .slice(0, limit)
+}
+
+function normalizeItemName(value: string): string {
+  return value.trim().toLowerCase().replace(/_/g, ' ')
+}
+
 export function upsertShipPrices(offers: Array<{ name: string; classId: string; price: number | null }>): number {
   if (offers.length === 0) return 0
   const database = getEconomyDb()
@@ -756,19 +858,28 @@ function toFiniteNumber(value: unknown): number | null {
 export function pruneEconomyRows(): void {
   const database = getEconomyDb()
   const cutoffModifier = `-${ECONOMY_RETENTION_DAYS} days`
+  const tables = new Set(
+    (database.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name),
+  )
 
-  database.query(
-    `DELETE FROM trade_events
-     WHERE occurred_at < datetime('now', ?)`
-  ).run(cutoffModifier)
+  if (tables.has('trade_events')) {
+    database.query(
+      `DELETE FROM trade_events
+       WHERE occurred_at < datetime('now', ?)`
+    ).run(cutoffModifier)
+  }
 
-  database.query(
-    `DELETE FROM market_snapshots
-     WHERE captured_at < datetime('now', ?)`
-  ).run(cutoffModifier)
+  if (tables.has('market_snapshots')) {
+    database.query(
+      `DELETE FROM market_snapshots
+       WHERE captured_at < datetime('now', ?)`
+    ).run(cutoffModifier)
+  }
 
-  database.query(
-    `DELETE FROM ledger_events
-     WHERE occurred_at < datetime('now', ?)`
-  ).run(cutoffModifier)
+  if (tables.has('ledger_events')) {
+    database.query(
+      `DELETE FROM ledger_events
+       WHERE occurred_at < datetime('now', ?)`
+    ).run(cutoffModifier)
+  }
 }

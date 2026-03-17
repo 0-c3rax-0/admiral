@@ -3,6 +3,7 @@ import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile }
 import { overwriteProfileAgentsFromDirective } from '../lib/agent'
 import { agentManager } from '../lib/agent-manager'
 import { setAgentRole } from '../lib/agent-learning'
+import { createGameConnection } from '../lib/game-connection'
 import { buildProfileResponse, handleProfileCommandSideEffects } from '../../fork/server'
 
 const profiles = new Hono()
@@ -102,10 +103,33 @@ profiles.post('/:id/command', async (c) => {
   const id = c.req.param('id')
   const { command, args } = await c.req.json()
   if (!command) return c.json({ error: 'Missing command' }, 400)
-  const agent = agentManager.getAgent(id)
-  if (!agent || !agent.isConnected) return c.json({ error: 'Agent not connected' }, 400)
   try {
-    const result = await agent.executeCommand(command, args)
+    let agent = agentManager.getAgent(id)
+    if (!agent || !agent.isConnected) {
+      agent = await agentManager.connect(id, { bypassCooldown: true })
+    }
+    let result
+    if (agent && agent.isConnected) {
+      result = await agent.executeCommand(command, args)
+    } else {
+      const profile = getProfile(id)
+      if (!profile) return c.json({ error: 'Profile not found' }, 404)
+      const connection = createGameConnection(profile)
+      try {
+        await connection.connect()
+        if (profile.username && profile.password) {
+          const login = await connection.login(profile.username, profile.password)
+          if (!login.success) return c.json({ error: login.error || 'Login failed' }, 400)
+        }
+        result = await connection.execute(command, args)
+      } finally {
+        try {
+          await connection.disconnect()
+        } catch {
+          // best-effort cleanup for one-shot manual command connections
+        }
+      }
+    }
     handleProfileCommandSideEffects(id, command, args, result)
     return c.json(result)
   } catch (err) {

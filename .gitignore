@@ -18,4 +18,5 @@ tsconfig.tsbuildinfo
 dist/
 src/frontend/dist/
 admiral
+admiral-broker
 test-results/

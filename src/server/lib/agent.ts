@@ -5,7 +5,6 @@ import type { Profile } from '../../shared/types'
 import { HttpConnection } from './connections/http'
 import { HttpV2Connection } from './connections/http_v2'
 import { WebSocketConnection } from './connections/websocket'
-import { WebSocketV2Connection } from './connections/websocket_v2'
 import { McpConnection } from './connections/mcp'
 import { McpV2Connection } from './connections/mcp_v2'
 import { resolveModel } from './model'
@@ -53,6 +52,8 @@ import {
   formatMaterialRequirements,
   formatRequiredSkills,
 } from './catalog'
+import { getKnownPrice, listCraftableRecipeEconomics, listRecipes } from './economy-db'
+import { getLatestStorageSnapshot } from './agent-learning'
 
 const TURN_INTERVAL = 5000
 const PROMPT_PATH = path.join(process.cwd(), 'prompt.md')
@@ -64,6 +65,7 @@ const MARKET_TELEMETRY_INTERVAL = 3
 const SHIP_TELEMETRY_INTERVAL = 8
 const RECIPE_TELEMETRY_INTERVAL = 12
 const MODULE_TELEMETRY_INTERVAL = 6
+const CRAFTING_TELEMETRY_INTERVAL = 4
 const MUTATION_STALL_NUDGE_THRESHOLD = 4
 const LOCAL_MUTATION_STUCK_THRESHOLD = 6
 const PENDING_WAIT_SLEEP_MS = 1500
@@ -576,6 +578,11 @@ export class Agent {
       if (modInfo) sections.push(modInfo)
     }
 
+    if (likelyDocked && (this.telemetryCycle % CRAFTING_TELEMETRY_INTERVAL === 0 || (cargoRatio !== null && cargoRatio >= 0.4))) {
+      const craftingInfo = await this.collectCraftingTelemetry()
+      if (craftingInfo) sections.push(craftingInfo)
+    }
+
     if (likelyDocked && this.telemetryCycle % RECIPE_TELEMETRY_INTERVAL === 0) {
       await this.collectRecipeTelemetry()
     }
@@ -725,6 +732,68 @@ export class Agent {
     return sections.length > 0 ? sections.join('\n\n') : null
   }
 
+  private async collectCraftingTelemetry(): Promise<string | null> {
+    const cargoResp = await this.executeSilentQuery('get_cargo')
+    if (!cargoResp || cargoResp.error) return null
+
+    const cargoData = ((cargoResp.structuredContent ?? cargoResp.result) as Record<string, unknown> | undefined) || {}
+    const cargoEntries = extractCargoEntries(cargoData)
+
+    const storageResp = await this.executeSilentQuery('storage_view')
+    let storageItems: Array<{ item_id: string; quantity: number | null }> = []
+    if (storageResp && !storageResp.error) {
+      const storageData = ((storageResp.structuredContent ?? storageResp.result) as Record<string, unknown> | undefined) || {}
+      storageItems = extractStorageItems(storageData)
+    } else {
+      storageItems = getLatestStorageSnapshot(this.profileId)?.items || []
+    }
+
+    if (cargoEntries.length === 0 && storageItems.length === 0) return null
+
+    if (listRecipes(1).length === 0) {
+      await this.collectRecipeTelemetry()
+    }
+
+    const materialCounts = new Map<string, number>()
+    for (const entry of cargoEntries) {
+      const normalized = normalizeRecipeItemKey(entry.name || entry.id)
+      if (!normalized) continue
+      materialCounts.set(normalized, (materialCounts.get(normalized) || 0) + entry.quantity)
+    }
+    for (const entry of storageItems) {
+      const normalized = normalizeRecipeItemKey(entry.item_id)
+      if (!normalized) continue
+      materialCounts.set(normalized, (materialCounts.get(normalized) || 0) + (entry.quantity || 0))
+    }
+
+    const craftable = listCraftableRecipeEconomics(
+      [...materialCounts.entries()].map(([item_name, quantity]) => ({ item_name, quantity })),
+      this.profileId,
+      8,
+    )
+
+    const actionable = craftable.filter((recipe) => (recipe.estimated_profit_vs_raw_inputs ?? -Infinity) > 0)
+    if (actionable.length === 0) return null
+
+    const lines = actionable.slice(0, 4).map((recipe) => {
+      const outputBid = recipe.last_known_output_bid !== null ? `${Math.round(recipe.last_known_output_bid)}/unit` : 'unknown market'
+      const perCraft = recipe.estimated_profit_vs_raw_inputs !== null ? `${formatSignedNumber(recipe.estimated_profit_vs_raw_inputs)} uplift/craft` : 'unknown uplift'
+      const total = recipe.estimated_total_profit_vs_raw_inputs !== null ? `${formatSignedNumber(recipe.estimated_total_profit_vs_raw_inputs)} total` : 'unknown total'
+      return `- ${recipe.recipe_name} -> ${recipe.output_item_name} x${recipe.output_quantity}; craftable ${recipe.max_craftable}x; ${perCraft}; ${total}; bid ${outputBid}`
+    })
+
+    const top = actionable[0]
+    const topRecipePrice = getKnownPrice(top.output_item_name, this.profileId)
+    const marketFreshness = topRecipePrice?.captured_at ? ` Latest known output price: ${topRecipePrice.captured_at}.` : ''
+
+    return [
+      '## Crafting Opportunities',
+      'Known recipes, current held materials, and local market data indicate that these craft paths beat selling the raw inputs directly.',
+      ...lines,
+      `Prefer crafting only if the station supports it and the recipe is still valid here.${marketFreshness}`,
+    ].join('\n')
+  }
+
   private async fetchBestSellSummary(category: string): Promise<string | null> {
     const stationId = getCurrentStationId(this._gameState)
     if (!stationId) return null
@@ -806,13 +875,13 @@ export class Agent {
     this.connection = createConnection(profile)
 
     // Wire up spec log for connections that fetch OpenAPI specs
-    if (this.connection instanceof HttpV2Connection) {
-      this.connection.setSpecLog((type, msg) => {
+    if ('setSpecLog' in this.connection && typeof this.connection.setSpecLog === 'function') {
+      this.connection.setSpecLog((type: 'info' | 'warn' | 'error', msg: string) => {
         this.log(type === 'error' ? 'error' : 'system', msg)
       })
     }
-    if (this.connection instanceof WebSocketV2Connection) {
-      this.connection.setTransportLog((type, msg) => {
+    if ('setTransportLog' in this.connection && typeof this.connection.setTransportLog === 'function') {
+      this.connection.setTransportLog((type: 'info' | 'warn' | 'error', msg: string) => {
         if (this.hasPendingServerResolution()) {
           const lower = msg.toLowerCase()
           if (lower.includes('closed') || lower.includes('error')) {
@@ -1821,6 +1890,43 @@ function extractCargoEntries(data: Record<string, unknown> | undefined): Array<{
   }
 
   return []
+}
+
+function extractStorageItems(data: Record<string, unknown> | undefined): Array<{ item_id: string; quantity: number | null }> {
+  if (!data) return []
+  const candidates = [
+    data.items,
+    data.storage,
+    data.inventory,
+    (data.result as Record<string, unknown> | undefined)?.items,
+    (data.result as Record<string, unknown> | undefined)?.storage,
+  ]
+
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) continue
+    const entries = candidate
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null
+        const record = item as Record<string, unknown>
+        const itemId = String(record.item_id || record.id || record.name || '').trim()
+        const quantity = toFiniteNumber(record.quantity ?? record.qty ?? record.amount ?? record.count)
+        if (!itemId || !quantity || quantity <= 0) return null
+        return { item_id: itemId, quantity }
+      })
+      .filter((entry): entry is { item_id: string; quantity: number } => Boolean(entry))
+    if (entries.length > 0) return entries
+  }
+
+  return []
+}
+
+function normalizeRecipeItemKey(value: string): string {
+  return value.trim().toLowerCase().replace(/_/g, ' ')
+}
+
+function formatSignedNumber(value: number): string {
+  const rounded = Math.round(value)
+  return `${rounded >= 0 ? '+' : ''}${rounded}`
 }
 
 function summarizeMarket(data: Record<string, unknown> | undefined): string {

@@ -3,6 +3,7 @@ import {
   extractCompactionResponseDiagnostics,
   extractFallbackSummaryText,
   isSessionHistorySummaryMessage,
+  sanitizeAssistantToolCalls,
   sanitizeProviderContextMessages,
   sanitizeProviderMessageSequence,
   sanitizeMessageToolIdentifiers,
@@ -145,6 +146,28 @@ describe('sanitizeMessageToolIdentifiers', () => {
   })
 })
 
+describe('sanitizeAssistantToolCalls', () => {
+  test('rewrites assistant tool calls with missing names into text blocks', () => {
+    const messages = [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'toolCall', id: 'fallback-tool-1', name: '', arguments: { command: 'get_status' } },
+        ],
+      },
+    ] as any
+
+    sanitizeAssistantToolCalls(messages)
+
+    expect(messages[0].content).toEqual([
+      {
+        type: 'text',
+        text: 'Dropped invalid tool call with missing name. Arguments: {"command":"get_status"}',
+      },
+    ])
+  })
+})
+
 describe('sanitizeProviderMessageSequence', () => {
   test('rewrites user messages that directly follow tool results', () => {
     const messages = [
@@ -205,5 +228,25 @@ describe('sanitizeProviderContextMessages', () => {
       content: [{ type: 'text', text: '## Automatic Telemetry\n\nVerified state: furud / furud_belt' }],
       timestamp: 456,
     })
+  })
+
+  test('drops invalid assistant tool calls before provider normalization', () => {
+    const messages = [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'toolCall', id: '', name: '', arguments: { command: 'travel' } },
+        ],
+      },
+    ] as any
+
+    sanitizeProviderContextMessages(messages)
+
+    expect(messages[0].content).toEqual([
+      {
+        type: 'text',
+        text: 'Dropped invalid tool call with missing name. Arguments: {"command":"travel"}',
+      },
+    ])
   })
 })

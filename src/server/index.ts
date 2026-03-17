@@ -95,6 +95,7 @@ function scheduleAutoConnectOnStartup(): void {
   const enabledPref = getPreference('startup_autoconnect_enabled')
   const enabled = enabledPref === null ? true : enabledPref === 'true'
   if (!enabled) return
+  const brokerEnabled = process.env.ADMIRAL_DISABLE_BROKER !== 'true'
 
   const minSec = parsePositiveInt(getPreference('startup_autoconnect_min_delay_sec'), 60)
   const maxSec = parsePositiveInt(getPreference('startup_autoconnect_max_delay_sec'), 120)
@@ -106,7 +107,11 @@ function scheduleAutoConnectOnStartup(): void {
     return minDelayMs + Math.floor(Math.random() * (span + 1))
   }
 
-  const candidates = listProfiles().filter((p) => p.autoconnect && p.enabled)
+  const candidates = listProfiles().filter((p) => {
+    if (!p.autoconnect || !p.enabled) return false
+    if (brokerEnabled && p.connection_mode === 'websocket_v2') return false
+    return true
+  })
   if (candidates.length === 0) return
 
   let accumulatedDelay = 0
@@ -128,6 +133,15 @@ function scheduleAutoConnectOnStartup(): void {
 }
 
 scheduleAutoConnectOnStartup()
+void agentManager.reattachBrokerSessions().catch((err) => {
+  const msg = err instanceof Error ? err.message : String(err)
+  console.error(`[startup] Broker reattach failed: ${msg}`)
+})
+void agentManager.refreshBrokerSessionCache().catch(() => {})
+
+setInterval(() => {
+  void agentManager.refreshBrokerSessionCache().catch(() => {})
+}, 5_000)
 
 type RuntimeSnapshot = { connected: boolean; running: boolean }
 const lastRuntimeState = new Map<string, RuntimeSnapshot>()
