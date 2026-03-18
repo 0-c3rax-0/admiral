@@ -25,6 +25,9 @@ const RESPONSE_TYPES = new Set([
 
 const AUTH_RECOVERABLE_ERRORS = new Set(['not_authenticated', 'session_invalid', 'session_expired'])
 const SUPPORTS_UNEXPECTED_RESPONSE = typeof (globalThis as { Bun?: unknown }).Bun === 'undefined'
+const SOCKET_V2_COMMAND_ALIASES = new Map<string, string>([
+  ['get_queue', 'v2_get_queue'],
+])
 
 interface PendingCommand {
   resolve: (value: CommandResult) => void
@@ -219,7 +222,7 @@ export class WebSocketV2Connection implements GameConnection {
   }
 
   async execute(command: string, args?: Record<string, unknown>): Promise<CommandResult> {
-    return this.sendCommand(command, args, true)
+    return this.sendCommand(this.resolveSocketCommand(command), args, true)
   }
 
   onNotification(handler: NotificationHandler): void {
@@ -252,6 +255,10 @@ export class WebSocketV2Connection implements GameConnection {
 
   isConnected(): boolean {
     return this.connected && !!this.ws && this.ws.readyState === WebSocket.OPEN
+  }
+
+  private resolveSocketCommand(command: string): string {
+    return SOCKET_V2_COMMAND_ALIASES.get(command) || command
   }
 
   private async sendCommand(command: string, args?: Record<string, unknown>, canRetryAuth = true): Promise<CommandResult> {

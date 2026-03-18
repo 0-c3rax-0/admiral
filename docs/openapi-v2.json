@@ -1,6 +1,26 @@
 {
   "components": {
     "schemas": {
+      "AbandonMissionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "mission_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mission_id",
+          "title",
+          "message"
+        ],
+        "type": "object"
+      },
       "AcceptMissionResponse": {
         "additionalProperties": false,
         "properties": {
@@ -1603,6 +1623,42 @@
           "quantity",
           "price_each",
           "listing_fee",
+          "message"
+        ],
+        "type": "object"
+      },
+      "DeclineMissionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "giver": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "title"
+            ],
+            "type": "object"
+          },
+          "message": {
+            "type": "string"
+          },
+          "template_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "template_id",
+          "title",
           "message"
         ],
         "type": "object"
@@ -3440,6 +3496,12 @@
             },
             "type": "array"
           },
+          "target_poi": {
+            "type": "string"
+          },
+          "target_poi_name": {
+            "type": "string"
+          },
           "target_system": {
             "type": "string"
           },
@@ -3480,6 +3542,65 @@
           "fleet_id",
           "max_size",
           "message"
+        ],
+        "type": "object"
+      },
+      "FleetResponse": {
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "fleet_id": {
+            "type": "string"
+          },
+          "in_fleet": {
+            "type": "boolean"
+          },
+          "invite_fleet": {
+            "type": "string"
+          },
+          "invite_from": {
+            "type": "string"
+          },
+          "invites": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "is_leader": {
+            "type": "boolean"
+          },
+          "leader": {
+            "type": "string"
+          },
+          "leader_name": {
+            "type": "string"
+          },
+          "max_size": {
+            "type": "integer"
+          },
+          "members": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "pending_invite": {
+            "type": "boolean"
+          },
+          "poi_id": {
+            "type": "string"
+          },
+          "system_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
         ],
         "type": "object"
       },
@@ -4720,6 +4841,46 @@
           "count": {
             "type": "integer"
           },
+          "empire_npc_count": {
+            "type": "integer"
+          },
+          "empire_npcs": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "empire": {
+                  "type": "string"
+                },
+                "in_combat": {
+                  "type": "boolean"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "npc_id": {
+                  "type": "string"
+                },
+                "role": {
+                  "type": "string"
+                },
+                "ship_class": {
+                  "type": "string"
+                },
+                "ship_name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "npc_id",
+                "name",
+                "role",
+                "empire",
+                "in_combat"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
           "nearby": {
             "items": {
               "additionalProperties": false,
@@ -4818,8 +4979,10 @@
         "required": [
           "nearby",
           "pirates",
+          "empire_npcs",
           "count",
           "pirate_count",
+          "empire_npc_count",
           "poi_id"
         ],
         "type": "object"
@@ -5100,12 +5263,6 @@
                   "position"
                 ],
                 "type": "object"
-              },
-              "police_drones": {
-                "type": "integer"
-              },
-              "police_warning": {
-                "type": "string"
               },
               "resources": {
                 "items": {
@@ -11077,7 +11234,7 @@
                     {
                       "properties": {
                         "structuredContent": {
-                          "$ref": "#/components/schemas/MessageResponse"
+                          "$ref": "#/components/schemas/AbandonMissionResponse"
                         }
                       },
                       "type": "object"
@@ -11086,7 +11243,7 @@
                 }
               }
             },
-            "description": "Result. structuredContent type: MessageResponse"
+            "description": "Result. structuredContent type: AbandonMissionResponse"
           },
           "400": {
             "description": "Bad request — invalid params, unknown command, or game error"
@@ -11725,7 +11882,7 @@
                     {
                       "properties": {
                         "structuredContent": {
-                          "$ref": "#/components/schemas/MessageResponse"
+                          "$ref": "#/components/schemas/DeclineMissionResponse"
                         }
                       },
                       "type": "object"
@@ -11734,7 +11891,7 @@
                 }
               }
             },
-            "description": "Result. structuredContent type: MessageResponse"
+            "description": "Result. structuredContent type: DeclineMissionResponse"
           },
           "400": {
             "description": "Bad request — invalid params, unknown command, or game error"
@@ -18933,7 +19090,7 @@
                     {
                       "properties": {
                         "structuredContent": {
-                          "$ref": "#/components/schemas/MessageResponse"
+                          "$ref": "#/components/schemas/FleetResponse"
                         }
                       },
                       "type": "object"
@@ -18942,7 +19099,7 @@
                 }
               }
             },
-            "description": "Result. structuredContent type: MessageResponse"
+            "description": "Result. structuredContent type: FleetResponse"
           },
           "400": {
             "description": "Bad request — invalid params, unknown command, or game error"
@@ -19059,7 +19216,7 @@
                     {
                       "properties": {
                         "structuredContent": {
-                          "$ref": "#/components/schemas/MessageResponse"
+                          "$ref": "#/components/schemas/FleetResponse"
                         }
                       },
                       "type": "object"
@@ -19068,7 +19225,7 @@
                 }
               }
             },
-            "description": "Result. structuredContent type: MessageResponse"
+            "description": "Result. structuredContent type: FleetResponse"
           },
           "400": {
             "description": "Bad request — invalid params, unknown command, or game error"
@@ -19122,7 +19279,7 @@
                     {
                       "properties": {
                         "structuredContent": {
-                          "$ref": "#/components/schemas/MessageResponse"
+                          "$ref": "#/components/schemas/FleetResponse"
                         }
                       },
                       "type": "object"
@@ -19131,7 +19288,7 @@
                 }
               }
             },
-            "description": "Result. structuredContent type: MessageResponse"
+            "description": "Result. structuredContent type: FleetResponse"
           },
           "400": {
             "description": "Bad request — invalid params, unknown command, or game error"
@@ -19207,7 +19364,7 @@
                     {
                       "properties": {
                         "structuredContent": {
-                          "$ref": "#/components/schemas/MessageResponse"
+                          "$ref": "#/components/schemas/FleetResponse"
                         }
                       },
                       "type": "object"
@@ -19216,7 +19373,7 @@
                 }
               }
             },
-            "description": "Result. structuredContent type: MessageResponse"
+            "description": "Result. structuredContent type: FleetResponse"
           },
           "400": {
             "description": "Bad request — invalid params, unknown command, or game error"
@@ -19270,7 +19427,7 @@
                     {
                       "properties": {
                         "structuredContent": {
-                          "$ref": "#/components/schemas/MessageResponse"
+                          "$ref": "#/components/schemas/FleetResponse"
                         }
                       },
                       "type": "object"
@@ -19279,7 +19436,7 @@
                 }
               }
             },
-            "description": "Result. structuredContent type: MessageResponse"
+            "description": "Result. structuredContent type: FleetResponse"
           },
           "400": {
             "description": "Bad request — invalid params, unknown command, or game error"
@@ -19333,7 +19490,7 @@
                     {
                       "properties": {
                         "structuredContent": {
-                          "$ref": "#/components/schemas/MessageResponse"
+                          "$ref": "#/components/schemas/FleetResponse"
                         }
                       },
                       "type": "object"
@@ -19342,7 +19499,7 @@
                 }
               }
             },
-            "description": "Result. structuredContent type: MessageResponse"
+            "description": "Result. structuredContent type: FleetResponse"
           },
           "400": {
             "description": "Bad request — invalid params, unknown command, or game error"

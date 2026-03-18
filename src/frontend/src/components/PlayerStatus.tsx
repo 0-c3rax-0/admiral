@@ -64,6 +64,14 @@ export function PlayerStatus({ data, storage = null }: Props) {
     ?.filter((item) => (item.quantity ?? 0) > 0)
     .sort((a, b) => (b.quantity ?? 0) - (a.quantity ?? 0))[0] || null
   const storedUnits = storage?.items.reduce((sum, item) => sum + toNum(item.quantity), 0) || 0
+  const hasStorageSnapshot = Boolean(
+    storage && (
+      storage.station_name ||
+      storage.station_id ||
+      storage.storage_credits !== null ||
+      storedUnits > 0
+    )
+  )
 
   const stats: { icon: React.ReactNode; label: string; value: string; sub?: string; color?: string }[] = [
     { icon: <MapPin size={12} />, label: 'Location', value: `${systemName}`, sub: String(poiName) },
@@ -71,9 +79,9 @@ export function PlayerStatus({ data, storage = null }: Props) {
     {
       icon: <Package size={12} />,
       label: 'Storage',
-      value: storage ? storedUnits.toLocaleString() : '-',
-      sub: storage
-        ? `${storage.station_name || storage.station_id || 'unknown'}${topStoredItem ? ` | ${topStoredItem.item_id} x${toNum(topStoredItem.quantity)}` : ''}`
+      value: hasStorageSnapshot ? storedUnits.toLocaleString() : '-',
+      sub: hasStorageSnapshot
+        ? `${storage?.station_name || storage?.station_id || 'unknown'}${topStoredItem ? ` | ${topStoredItem.item_id} x${toNum(topStoredItem.quantity)}` : ''}`
         : 'no snapshot',
       color: 'var(--smui-frost-2)',
     },

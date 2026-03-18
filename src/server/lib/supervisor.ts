@@ -27,6 +27,7 @@ import {
   type SkillMap,
 } from './catalog'
 import { lookupShipKbRecord } from './ship-kb'
+import { getDecisionPressureSnapshot, getAgentRole } from './agent-learning'
 
 const DEFAULT_INTERVAL_SEC = 45
 const MAX_CANDIDATES = 5
@@ -40,11 +41,19 @@ const SHIP_KB_URL = 'https://rsned.github.io/spacemolt-kb/ships/'
 type Candidate = {
   profileId: string
   profileName: string
+  role: string
   mutationState: string
   mutationDetail: string | null
   navigationState: string
   navigationDetail: string | null
   gameState: unknown
+  decisionPressure: {
+    queryStreak: number
+    sameQueryStreak: number
+    noProgressStreak: number
+    lastQueryCommand: string | null
+    recommendation: string | null
+  }
   recentSignals: string[]
   routeSignals: string[]
   shipUpgradeSignals: string[]
@@ -263,6 +272,7 @@ class FleetSupervisor {
 
       const logs = getLogEntries(profile.id, undefined, 18)
       const recentSignals = buildRecentSignals(logs.map((entry) => entry.summary))
+      const decisionPressure = getDecisionPressureSnapshot(profile.id)
       const loopSignal = detectReplanningLoop(logs, status)
       const routeSignals = await this.buildRouteSignals(profile.server_url, status)
       const shipUpgradeSignals = await this.buildShipUpgradeSignals(profile, status)
@@ -271,7 +281,7 @@ class FleetSupervisor {
       const moduleUpgradeSignals = await this.buildModuleUpgradeSignals(profile, status)
       const verifiedCommands = await this.getVerifiedCommands(profile)
       const commandHintSignals = buildCommandHintSignals(logs, verifiedCommands)
-      const adviceSignals = buildAdviceSignals(status, recentSignals, routeSignals, shipUpgradeSignals, ownedShipSignals, fleetCleanupSignals, moduleUpgradeSignals, verifiedCommands, loopSignal, commandHintSignals)
+      const adviceSignals = buildAdviceSignals(status, recentSignals, routeSignals, shipUpgradeSignals, ownedShipSignals, fleetCleanupSignals, moduleUpgradeSignals, verifiedCommands, loopSignal, commandHintSignals, decisionPressure)
       const noisyState =
         status.mutation_state !== 'idle' ||
         recentSignals.length > 0 ||
@@ -287,11 +297,13 @@ class FleetSupervisor {
       candidates.push({
         profileId: profile.id,
         profileName: profile.name,
+        role: getAgentRole(profile.id),
         mutationState: status.mutation_state as MutationState,
         mutationDetail: status.mutation_state_detail,
         navigationState: status.navigation_state as NavigationState,
         navigationDetail: status.navigation_state_detail,
         gameState: status.gameState,
+        decisionPressure,
         recentSignals,
         routeSignals,
         shipUpgradeSignals,
@@ -620,6 +632,7 @@ function buildAdviceSignals(
   verifiedCommands: VerifiedCommands | null,
   loopSignal: LoopSignal,
   commandHintSignals: CommandHintSignal[],
+  decisionPressure: ReturnType<typeof getDecisionPressureSnapshot>,
 ): AdviceSignal[] {
   const signals: AdviceSignal[] = []
   const ship = status.gameState?.ship
@@ -690,6 +703,24 @@ function buildAdviceSignals(
       recommendedChecks: loopSignal.recommendedChecks,
       recommendedActions: loopSignal.recommendedActions,
       whyNow: 'recent turns are repeating checks or retries without producing state progress',
+    })
+  }
+
+  if (decisionPressure.recommendation) {
+    signals.push({
+      kind: 'agent_learning_pressure',
+      priority: 89,
+      summary: 'Agent-learning indicates a local decision-pressure pattern that should be corrected before more routine querying.',
+      evidence: [
+        `query_streak=${decisionPressure.queryStreak}`,
+        `same_query_streak=${decisionPressure.sameQueryStreak}`,
+        `no_progress_streak=${decisionPressure.noProgressStreak}`,
+        ...(decisionPressure.lastQueryCommand ? [`last_query=${decisionPressure.lastQueryCommand}`] : []),
+        decisionPressure.recommendation,
+      ],
+      recommendedChecks: decisionPressure.lastQueryCommand ? [decisionPressure.lastQueryCommand] : ['get_status'],
+      recommendedActions: [],
+      whyNow: 'agent-learning has already observed a repeated low-progress pattern in this session',
     })
   }
 

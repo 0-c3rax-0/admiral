@@ -21,6 +21,9 @@ describe('openapi v2 command extraction', () => {
     expect(names.has('facility_build')).toBe(true)
     expect(names.has('facility_upgrade')).toBe(true)
     expect(names.has('fleet_status')).toBe(true)
+    expect(names.has('fleet_accept')).toBe(true)
+    expect(names.has('fleet_decline')).toBe(true)
+    expect(names.has('fleet_disband')).toBe(true)
   })
 
   test('covers critical Admiral-used query commands from the checked-in spec', () => {

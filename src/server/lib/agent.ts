@@ -66,6 +66,8 @@ const SHIP_TELEMETRY_INTERVAL = 8
 const RECIPE_TELEMETRY_INTERVAL = 12
 const MODULE_TELEMETRY_INTERVAL = 6
 const CRAFTING_TELEMETRY_INTERVAL = 4
+const MISSION_TELEMETRY_INTERVAL = 5
+const CHAT_TELEMETRY_INTERVAL = 6
 const MUTATION_STALL_NUDGE_THRESHOLD = 4
 const LOCAL_MUTATION_STUCK_THRESHOLD = 6
 const PENDING_WAIT_SLEEP_MS = 1500
@@ -196,6 +198,13 @@ export class Agent {
   get navigationStateDetail(): string | null {
     return describeNavigationState(this._gameState, this.navigationState, this.mutationStateDetail)
   }
+
+  async reassertBrokerConnectionIntent(): Promise<void> {
+    if (!this.connection || this.connection.mode !== 'websocket_v2') return
+    if (!this.connection.isConnected()) return
+    await this.connection.connect()
+  }
+
   private setActivity(activity: string) {
     this._activity = activity
     this.events.emit('activity', activity)
@@ -583,6 +592,16 @@ export class Agent {
       if (craftingInfo) sections.push(craftingInfo)
     }
 
+    if (likelyDocked && (this.telemetryCycle % MISSION_TELEMETRY_INTERVAL === 0 || (cargoRatio !== null && cargoRatio >= 0.4))) {
+      const missionInfo = await this.collectMissionTelemetry()
+      if (missionInfo) sections.push(missionInfo)
+    }
+
+    if (this.telemetryCycle % CHAT_TELEMETRY_INTERVAL === 0) {
+      const chatInfo = await this.collectFactionChatTelemetry()
+      if (chatInfo) sections.push(chatInfo)
+    }
+
     if (likelyDocked && this.telemetryCycle % RECIPE_TELEMETRY_INTERVAL === 0) {
       await this.collectRecipeTelemetry()
     }
@@ -706,17 +725,18 @@ export class Agent {
   }
 
   private async collectMarketTelemetry(): Promise<string | null> {
-    const [marketResp, personalOrdersResp, bestSellSummary] = await Promise.all([
-      this.executeSilentQuery('view_market', { category: 'ore' }),
+    const [marketResp, personalOrdersResp, bestOreSummary, bestProcessedSummary] = await Promise.all([
+      this.executeSilentQuery('view_market', {}),
       this.executeSilentQuery('view_orders', { scope: 'personal', order_type: 'sell', sort_by: 'price_asc', page: 1, page_size: 20 }),
       this.fetchBestSellSummary('ore'),
+      this.fetchBestSellSummary('processed'),
     ])
 
     const sections: string[] = []
     if (marketResp && !marketResp.error) {
       const data = ((marketResp.structuredContent ?? marketResp.result) as Record<string, unknown> | undefined) || {}
       const summary = summarizeMarket(data)
-      if (summary) sections.push(`Ore market snapshot:\n${summary}`)
+      if (summary) sections.push(`Station market snapshot:\n${summary}`)
     }
 
     if (personalOrdersResp && !personalOrdersResp.error) {
@@ -725,8 +745,12 @@ export class Agent {
       if (summary) sections.push(`Personal sell orders:\n${summary}`)
     }
 
-    if (bestSellSummary) {
-      sections.push(`Best sell hints:\n${bestSellSummary}`)
+    if (bestOreSummary) {
+      sections.push(`Best raw-material sell hints:\n${bestOreSummary}`)
+    }
+
+    if (bestProcessedSummary) {
+      sections.push(`Best processed-goods sell hints:\n${bestProcessedSummary}`)
     }
 
     return sections.length > 0 ? sections.join('\n\n') : null
@@ -791,6 +815,138 @@ export class Agent {
       'Known recipes, current held materials, and local market data indicate that these craft paths beat selling the raw inputs directly.',
       ...lines,
       `Prefer crafting only if the station supports it and the recipe is still valid here.${marketFreshness}`,
+    ].join('\n')
+  }
+
+  private async collectMissionTelemetry(): Promise<string | null> {
+    const missionsResp = await this.executeSilentQuery('get_missions')
+    if (!missionsResp || missionsResp.error) return null
+
+    const cargoResp = await this.executeSilentQuery('get_cargo')
+    if (!cargoResp || cargoResp.error) return null
+
+    const cargoData = ((cargoResp.structuredContent ?? cargoResp.result) as Record<string, unknown> | undefined) || {}
+    const cargoEntries = extractCargoEntries(cargoData)
+
+    const storageResp = await this.executeSilentQuery('storage_view')
+    let storageItems: Array<{ item_id: string; quantity: number | null }> = []
+    if (storageResp && !storageResp.error) {
+      const storageData = ((storageResp.structuredContent ?? storageResp.result) as Record<string, unknown> | undefined) || {}
+      storageItems = extractStorageItems(storageData)
+    } else {
+      storageItems = getLatestStorageSnapshot(this.profileId)?.items || []
+    }
+
+    const availableByName = new Map<string, number>()
+    for (const entry of cargoEntries) {
+      const normalized = normalizeRecipeItemKey(entry.name || entry.id)
+      if (!normalized) continue
+      availableByName.set(normalized, (availableByName.get(normalized) || 0) + entry.quantity)
+    }
+    for (const entry of storageItems) {
+      const normalized = normalizeRecipeItemKey(entry.item_id)
+      if (!normalized) continue
+      availableByName.set(normalized, (availableByName.get(normalized) || 0) + (entry.quantity || 0))
+    }
+
+    if (listRecipes(1).length === 0) {
+      await this.collectRecipeTelemetry()
+    }
+
+    const craftableRecipes = listCraftableRecipeEconomics(
+      [...availableByName.entries()].map(([item_name, quantity]) => ({ item_name, quantity })),
+      this.profileId,
+      100,
+    )
+    const craftableByOutput = new Map<string, typeof craftableRecipes[number]>()
+    for (const recipe of craftableRecipes) {
+      const normalizedOutput = normalizeRecipeItemKey(recipe.output_item_name)
+      if (!normalizedOutput) continue
+      const existing = craftableByOutput.get(normalizedOutput)
+      if (!existing || (recipe.estimated_total_profit_vs_raw_inputs ?? -Infinity) > (existing.estimated_total_profit_vs_raw_inputs ?? -Infinity)) {
+        craftableByOutput.set(normalizedOutput, recipe)
+      }
+    }
+
+    const missionData = ((missionsResp.structuredContent ?? missionsResp.result) as Record<string, unknown> | undefined) || {}
+    const missions = extractMissionOffers(missionData)
+    if (missions.length === 0) return null
+
+    const lines: string[] = []
+    for (const mission of missions) {
+      for (const objective of mission.objectives) {
+        if (!objective.itemId || !objective.quantity || objective.quantity <= 0) continue
+        const objectiveType = objective.type.toLowerCase()
+        if (!objectiveType.includes('deliver') && !objectiveType.includes('supply') && !objectiveType.includes('bring')) continue
+
+        const normalizedItem = normalizeRecipeItemKey(objective.itemId)
+        if (!normalizedItem) continue
+
+        const prettyItem = prettifyItemId(objective.itemId)
+        const knownPrice = getKnownPrice(prettyItem, this.profileId) || getKnownPrice(objective.itemId, this.profileId)
+        const marketUnitValue = knownPrice?.best_bid ?? knownPrice?.best_ask ?? null
+        const missionUnitValue = mission.rewardCredits !== null ? mission.rewardCredits / objective.quantity : null
+        const availableNow = availableByName.get(normalizedItem) || 0
+        const craftable = craftableByOutput.get(normalizedItem) || null
+
+        const comparisons: string[] = []
+        if (mission.rewardCredits !== null) comparisons.push(`reward ${mission.rewardCredits} cr`)
+        comparisons.push(`${prettyItem} x${objective.quantity}`)
+        if (objective.targetBaseName) comparisons.push(`deliver to ${objective.targetBaseName}`)
+        if (availableNow > 0) comparisons.push(`held ${availableNow}`)
+        if (craftable && craftable.max_craftable > 0) comparisons.push(`craftable ${craftable.max_craftable * craftable.output_quantity}`)
+        if (missionUnitValue !== null) comparisons.push(`mission ${Math.round(missionUnitValue)}/unit`)
+        if (marketUnitValue !== null) comparisons.push(`market ${Math.round(marketUnitValue)}/unit`)
+        if (missionUnitValue !== null && marketUnitValue !== null) {
+          const delta = missionUnitValue - marketUnitValue
+          comparisons.push(`${delta >= 0 ? 'vs market +' : 'vs market '}${Math.round(delta)}/unit`)
+        }
+        if (craftable && craftable.estimated_profit_vs_raw_inputs !== null) {
+          comparisons.push(`craft uplift ${formatSignedNumber(craftable.estimated_profit_vs_raw_inputs)}/craft`)
+        }
+
+        lines.push(`- ${mission.title}: ${comparisons.join('; ')}`)
+      }
+    }
+
+    if (lines.length === 0) return null
+
+    return [
+      '## Mission Delivery Opportunities',
+      'Available station missions were checked against known market prices and craftable outputs. Prefer delivery missions when their effective credit per item beats local sell value or when you already hold/can craft the requested item.',
+      ...lines.slice(0, 4),
+    ].join('\n')
+  }
+
+  private async collectFactionChatTelemetry(): Promise<string | null> {
+    const player = (this._gameState?.player as Record<string, unknown> | undefined) || {}
+    const factionId = typeof player.faction_id === 'string' ? player.faction_id.trim() : ''
+    if (!factionId) return null
+
+    const chatResp = await this.executeSilentQuery('get_chat_history', { channel: 'faction' })
+    if (!chatResp || chatResp.error) return null
+
+    const data = ((chatResp.structuredContent ?? chatResp.result) as Record<string, unknown> | undefined) || {}
+    const messages = extractChatHistoryEntries(data)
+    const ownName = typeof player.username === 'string' ? player.username.trim().toLowerCase() : ''
+    const recent = messages.slice(-4)
+    const recentForeign = recent.filter((message) => message.sender.trim().toLowerCase() !== ownName)
+
+    if (recentForeign.length > 0) {
+      const lines = recentForeign.map((message) => {
+        const sender = message.sender || 'Unknown'
+        return `- ${sender}: ${message.content}`
+      })
+      return [
+        '## Faction Chat',
+        'Recent faction chat activity is available. Reply directly when relevant and share concise, concrete updates that help coordination.',
+        ...lines,
+      ].join('\n')
+    }
+
+    return [
+      '## Faction Chat',
+      'Faction chat is currently quiet. If you have a meaningful update about route, cargo, prices, missions, threats, or material needs, send one brief faction chat message this cycle.',
     ].join('\n')
   }
 
@@ -1773,8 +1929,8 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - If an action returns \`pending: true\`, the command was accepted and queued for the next tick. Treat that as progress. Do not call it a deadlock just because the world state has not updated yet.
 - Jump and travel can legitimately take multiple ticks. Travel time now depends on distance and ship speed; jump time depends on ship speed. A long \`navigation_pending\` period is not by itself evidence of a stall.
 - Travel and jump fuel costs now scale with ship mass, speed, and distance. Cargo weight no longer increases fuel burn. Heavy or fast ships, especially with afterburners fitted, can still burn much more fuel than before.
-- Before major travel or jumps, prefer checking route and fuel feasibility. Use \`find_route\` when planning multi-system movement, and re-check fuel after ship or module changes. Do not assume a fuller cargo hold will increase fuel cost.
-- For any destination outside the current system, use a strict routing workflow: if the system name is uncertain, resolve it with \`search_systems\`; then call \`find_route(target_system=...)\`; then jump only to the immediate next hop from the returned route. After each jump or in-system travel step, refresh with \`get_status\` or \`get_location\` before issuing the next navigation mutation. Do not skip directly to a far-away system name when a route has multiple hops.
+- Before major travel or jumps, prefer checking route and fuel feasibility. Use \`find_route\` when planning multi-system movement, and re-check fuel after ship or module changes. \`find_route(target_system=...)\` accepts a system ID, base ID, or POI ID. Do not assume a fuller cargo hold will increase fuel cost.
+- For any destination outside the current system, use a strict routing workflow: if the system name is uncertain, resolve it with \`search_systems\`; otherwise call \`find_route(target_system=...)\` directly with the known system ID, base ID, or POI ID; then jump only to the immediate next hop from the returned route. After each jump or in-system travel step, refresh with \`get_status\` or \`get_location\` before issuing the next navigation mutation. Do not skip directly to a far-away system name when a route has multiple hops.
 - Never describe the situation as a deadlock, stuck mutation queue, or server freeze unless you have strong evidence: at least 4 consecutive fresh verification cycles after a pending mutation, no \`ACTION_RESULT\` notification, and no meaningful state change despite repeated \`get_status\` checks.
 - If one specific account appears blocked for several verification cycles, describe it as a local mutation stall for that account/session only. Do not generalize that to the whole server unless multiple independent accounts show the same evidence.
 - If Admiral provides a \`Mutation State\` block, use it as a strong operational hint. Prefer those exact labels (\`idle\`, \`mutation_pending\`, \`navigation_pending\`, \`local_stall\`) instead of inventing stronger terms like deadlock or server-wide freeze, but choose the narrowest verification query that resolves the uncertainty instead of defaulting to \`get_status\`.
@@ -1813,6 +1969,7 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - NEVER chain multiple \`jump\` or \`travel\` commands in a single response. Take exactly one movement step per turn and wait for the result.
 - Existing ships may have new speed values after a server restart. Do not rely on stale assumptions about jump duration, travel duration, or fuel burn from earlier runs.
 - If attacked by NPC pirates and escape is legal, \`jump\` or \`travel\` can be a valid recovery option. Treat navigation as a possible escape tool when combat pressure is non-player and leaving is feasible.
+- In empire-controlled space, avoid initiating attacks on players, pirates, or empire NPCs unless combat is an explicit objective and you are prepared for a police response.
 - Mining loops should be practical: mine until cargo is near full (roughly 95%), but stop early if yields fail, the location lacks resources, the node mismatches the current mining fit, cargo is full, or a better unload/travel opportunity appears.
 - Prefer a stable default miner route when no stronger local constraint applies: mine in the Furud system, and use Nova Terra / Nova Terra Central as the default unload, storage, refuel, and market station.
 - If the ship is already running a normal ore-mining loop and no mission, fuel, cargo, combat, or market constraint overrides it, bias route planning back toward Furud belts for mining and Nova Terra Central for docking/selling.
@@ -1922,6 +2079,117 @@ function extractStorageItems(data: Record<string, unknown> | undefined): Array<{
 
 function normalizeRecipeItemKey(value: string): string {
   return value.trim().toLowerCase().replace(/_/g, ' ')
+}
+
+function prettifyItemId(value: string): string {
+  const trimmed = value.trim()
+  if (!trimmed) return value
+  return trimmed
+    .split('_')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ')
+}
+
+type MissionObjective = {
+  type: string
+  description: string
+  itemId: string | null
+  quantity: number | null
+  targetBaseName: string | null
+}
+
+type MissionOffer = {
+  missionId: string
+  title: string
+  type: string
+  rewardCredits: number | null
+  objectives: MissionObjective[]
+}
+
+type ChatHistoryEntry = {
+  sender: string
+  channel: string
+  content: string
+  timestamp: string | null
+}
+
+function extractMissionOffers(data: Record<string, unknown> | undefined): MissionOffer[] {
+  if (!data) return []
+  const candidates = [
+    data.missions,
+    (data.result as Record<string, unknown> | undefined)?.missions,
+  ]
+
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) continue
+    const missions = candidate
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null
+        const record = item as Record<string, unknown>
+        const missionId = String(record.mission_id || '').trim()
+        const title = String(record.title || '').trim()
+        const type = String(record.type || '').trim()
+        const rewardCredits = toFiniteNumber((record.rewards as Record<string, unknown> | undefined)?.credits)
+        const rawObjectives = Array.isArray(record.objectives) ? record.objectives : []
+        const objectives = rawObjectives
+          .map((objective) => {
+            if (!objective || typeof objective !== 'object') return null
+            const obj = objective as Record<string, unknown>
+            return {
+              type: String(obj.type || '').trim(),
+              description: String(obj.description || '').trim(),
+              itemId: typeof obj.item_id === 'string' && obj.item_id.trim() ? obj.item_id.trim() : null,
+              quantity: toFiniteNumber(obj.quantity),
+              targetBaseName: typeof obj.target_base_name === 'string' && obj.target_base_name.trim() ? obj.target_base_name.trim() : null,
+            } satisfies MissionObjective
+          })
+          .filter((objective): objective is MissionObjective => Boolean(objective))
+        if (!missionId || !title) return null
+        return {
+          missionId,
+          title,
+          type,
+          rewardCredits,
+          objectives,
+        } satisfies MissionOffer
+      })
+      .filter((mission): mission is MissionOffer => Boolean(mission))
+    if (missions.length > 0) return missions
+  }
+
+  return []
+}
+
+function extractChatHistoryEntries(data: Record<string, unknown> | undefined): ChatHistoryEntry[] {
+  if (!data) return []
+  const candidates = [
+    data.messages,
+    (data.result as Record<string, unknown> | undefined)?.messages,
+  ]
+
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) continue
+    const messages = candidate
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null
+        const record = item as Record<string, unknown>
+        const sender = String(record.sender || record.username || record.player_name || '').trim()
+        const channel = String(record.channel || '').trim()
+        const content = String(record.content || record.message || record.text || '').trim()
+        const timestamp = typeof record.timestamp === 'string'
+          ? record.timestamp
+          : typeof record.created_at === 'string'
+            ? record.created_at
+            : null
+        if (!content) return null
+        return { sender, channel, content, timestamp } satisfies ChatHistoryEntry
+      })
+      .filter((message): message is ChatHistoryEntry => Boolean(message))
+    if (messages.length > 0) return messages
+  }
+
+  return []
 }
 
 function formatSignedNumber(value: number): string {

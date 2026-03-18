@@ -14,7 +14,7 @@ const QUERY_COMMANDS = new Set([
   'estimate_purchase', 'catalog', 'browse_ships', 'list_ships', 'quote', 'wrecks', 'forum_list', 'forum_get_thread',
   'captains_log_list', 'captains_log_get', 'social_captains_log_list', 'social_captains_log_get',
   'get_commands', 'get_base', 'view_orders', 'search_systems', 'find_route', 'storage_view', 'salvage_quote',
-  'fleet_status',
+  'fleet_status', 'get_chat_history',
 ])
 const MUTATION_COMMANDS = new Set([
   'undock', 'travel', 'jump', 'dock', 'mine', 'sell', 'refuel', 'repair', 'craft', 'install_mod', 'accept_mission',
@@ -22,7 +22,8 @@ const MUTATION_COMMANDS = new Set([
   'insure', 'loot', 'salvage', 'join', 'chat', 'captains_log_add', 'social_chat', 'social_captains_log_add', 'buy',
   'storage_deposit', 'storage_withdraw', 'market_create_sell_order', 'market_create_buy_order',
   'faction_commerce_create_sell_order', 'faction_commerce_create_buy_order',
-  'fleet_create', 'fleet_invite', 'fleet_join', 'fleet_leave', 'fleet_kick', 'use_item', 'transfer',
+  'fleet_create', 'fleet_accept', 'fleet_decline', 'fleet_invite', 'fleet_join', 'fleet_leave', 'fleet_kick', 'fleet_disband',
+  'use_item', 'transfer',
 ])
 
 export interface AgentIdentity {
@@ -523,6 +524,20 @@ export function recordCommandOutcome(
         ts,
       ) || changed
     }
+    if (normalized === 'craft' && (result.error.code === 'insufficient_materials' || result.error.code === 'not_docked')) {
+      skillsChanged = adjustSkill(skills, 'crafting_efficiency', -0.8) || skillsChanged
+      changed = confirmFailure(
+        memory,
+        `craft_blocked:${result.error.code}`,
+        result.error.code === 'insufficient_materials'
+          ? 'Before crafting, verify missing inputs and decide whether to buy, mine, or abandon the recipe path.'
+          : 'Before crafting, verify you are docked at a valid station with crafting access.',
+        ts,
+      ) || changed
+    }
+    if (normalized === 'accept_mission' || normalized === 'complete_mission' || normalized === 'abandon_mission') {
+      skillsChanged = adjustSkill(skills, 'mission_selection', -0.4) || skillsChanged
+    }
   } else {
     memory.last_action = {
       command: normalized,
@@ -578,8 +593,79 @@ export function recordCommandOutcome(
       if (location) {
         changed = confirmRule(memory, `${location} is a reliable station for crafting operations.`, 0.65, ts) || changed
       }
+      changed = confirmRule(
+        memory,
+        'When crafting succeeds, re-check output value versus raw-input sale value before repeating the recipe at scale.',
+        0.66,
+        ts,
+      ) || changed
+    } else if (normalized === 'accept_mission') {
+      const title = extractMissionTitle(result)
+      changed = pushEpisode(memory, {
+        id: episodeId('mission_accept'),
+        kind: 'mission_accept',
+        summary: `Accepted mission${title ? `: ${title}` : ''}${location ? ` at ${location}` : ''}.`,
+        confidence: 0.78,
+        ts,
+      }) || changed
+      skillsChanged = adjustSkill(skills, 'mission_selection', 0.8) || skillsChanged
+      if (location) {
+        changed = confirmRule(memory, `${location} is a viable mission board when docked and capacity exists.`, 0.62, ts) || changed
+      }
+    } else if (normalized === 'complete_mission') {
+      const title = extractMissionTitle(result)
+      const credits = extractMissionCredits(result)
+      changed = pushEpisode(memory, {
+        id: episodeId('mission_complete'),
+        kind: 'mission_complete',
+        summary: `Completed mission${title ? `: ${title}` : ''}${credits !== null ? ` for ${credits} credits` : ''}.`,
+        confidence: 0.84,
+        reward: credits ?? undefined,
+        ts,
+      }) || changed
+      skillsChanged = adjustSkill(skills, 'mission_selection', 1.3) || skillsChanged
+      skillsChanged = adjustSkill(skills, 'decision_efficiency', 0.4) || skillsChanged
+      changed = confirmRule(
+        memory,
+        'Finish economically ready missions promptly instead of letting slots stay blocked after the objectives are already met.',
+        0.74,
+        ts,
+      ) || changed
+    } else if (normalized === 'abandon_mission') {
+      changed = pushEpisode(memory, {
+        id: episodeId('mission_abandon'),
+        kind: 'mission_abandon',
+        summary: 'Abandoned a mission to free capacity for a better plan.',
+        confidence: 0.68,
+        ts,
+      }) || changed
+      skillsChanged = adjustSkill(skills, 'mission_selection', 0.5) || skillsChanged
+      changed = confirmRule(
+        memory,
+        'Abandon impractical or low-ROI missions promptly so mission slots stay available for better opportunities.',
+        0.72,
+        ts,
+      ) || changed
     } else if (normalized === 'refuel' || normalized === 'repair' || normalized === 'dock') {
       skillsChanged = adjustSkill(skills, 'risk_management', 0.5) || skillsChanged
+    } else if (normalized === 'chat' || normalized === 'social_chat') {
+      const channel = extractChatChannel(args, result) || 'unknown'
+      changed = pushEpisode(memory, {
+        id: episodeId('chat'),
+        kind: 'social_execution',
+        summary: `Sent a ${channel} chat message${location ? ` near ${location}` : ''}.`,
+        confidence: 0.7,
+        ts,
+      }) || changed
+      skillsChanged = adjustSkill(skills, 'decision_efficiency', 0.2) || skillsChanged
+      if (channel === 'faction') {
+        changed = confirmRule(
+          memory,
+          'Faction chat should carry concise operational updates: route, cargo, threats, prices, mission needs, or requests for help.',
+          0.73,
+          ts,
+        ) || changed
+      }
     } else if (normalized === 'storage_view') {
       const storage = extractStorageSnapshot(result, gameState)
       if (storage) {
@@ -681,7 +767,27 @@ export function getLatestStorageSnapshot(profileId: string): {
   storage_credits: number | null
   items: Array<{ item_id: string; quantity: number | null }>
 } | null {
-  return loadStructuredMemory(profileId).last_storage
+  return normalizeStorageSnapshot(loadStructuredMemory(profileId).last_storage)
+}
+
+function normalizeStorageSnapshot(storage: StorageSnapshot | null): StorageSnapshot | null {
+  if (!storage) return null
+  const stationId = toText(storage.station_id)
+  const stationName = toText(storage.station_name) || prettifyLocationId(stationId)
+  return {
+    ...storage,
+    station_id: stationId,
+    station_name: stationName,
+  }
+}
+
+function prettifyLocationId(value: string | null): string | null {
+  if (!value) return null
+  return value
+    .split('_')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ')
 }
 
 function ensureAgentIdentity(profileId: string): AgentIdentity {
@@ -833,6 +939,23 @@ function deriveLocation(gameState: Record<string, unknown> | null): string | nul
   return toText(location.poi_name) || toText(player.current_poi) || toText(player.current_system)
 }
 
+function extractMissionTitle(result: CommandResult): string | null {
+  const record = ((result.structuredContent ?? result.result) as Record<string, unknown> | undefined) || {}
+  return toText(record.title) || toText(record.mission_title) || null
+}
+
+function extractMissionCredits(result: CommandResult): number | null {
+  const record = ((result.structuredContent ?? result.result) as Record<string, unknown> | undefined) || {}
+  return toNum(record.credits_earned ?? record.credits ?? record.reward_credits)
+}
+
+function extractChatChannel(args: Record<string, unknown> | undefined, result: CommandResult): string | null {
+  const argChannel = toText(args?.channel)
+  if (argChannel) return argChannel
+  const record = ((result.structuredContent ?? result.result) as Record<string, unknown> | undefined) || {}
+  return toText(record.channel)
+}
+
 function extractDestination(args: Record<string, unknown> | undefined, result: CommandResult): string | null {
   const fromArgs = toText(args?.destination) || toText(args?.target_system) || toText(args?.system_name)
   const meta = result.meta || {}
@@ -866,6 +989,7 @@ function canonicalizeLearningCommand(command: string, args?: Record<string, unkn
   if (command === 'deposit_items') return 'storage_deposit'
   if (command === 'withdraw_items') return 'storage_withdraw'
   if (command === 'view_storage') return 'storage_view'
+  if (command === 'chat_history') return 'get_chat_history'
   if (command === 'storage') {
     const action = typeof args?.action === 'string' ? args.action.trim().toLowerCase() : ''
     if (action === 'deposit') return 'storage_deposit'
@@ -903,6 +1027,7 @@ function extractStorageSnapshot(result: CommandResult, gameState: Record<string,
   if (!record || typeof record !== 'object') return null
 
   const player = ((gameState?.player as Record<string, unknown> | undefined) || {})
+  const location = ((gameState?.location as Record<string, unknown> | undefined) || {})
   const itemCandidates = [record.items, record.storage, record.inventory]
   let items: StorageItemSnapshot[] = []
   for (const candidate of itemCandidates) {
@@ -916,10 +1041,24 @@ function extractStorageSnapshot(result: CommandResult, gameState: Record<string,
     if (items.length > 0) break
   }
 
+  const fallbackStationId = (
+    toText(location.docked_at)
+    || toText(location.station_id)
+    || toText(location.base_id)
+    || toText(location.poi_id)
+    || toText(player.current_poi)
+  )
+  const fallbackStationName = (
+    toText(location.station_name)
+    || toText(location.base_name)
+    || toText(location.poi_name)
+    || toText(record.location_name)
+  )
+
   return {
     ts: new Date().toISOString(),
-    station_id: toText(record.station_id) || toText(record.base_id),
-    station_name: toText(record.station_name) || toText(record.base_name) || toText(record.station),
+    station_id: toText(record.station_id) || toText(record.base_id) || fallbackStationId,
+    station_name: toText(record.station_name) || toText(record.base_name) || toText(record.station) || fallbackStationName,
     wallet_credits: toNum(player.credits),
     storage_credits: toNum(record.credits ?? record.storage_credits ?? record.balance),
     items,

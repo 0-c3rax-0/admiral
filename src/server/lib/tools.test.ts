@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { rememberMarketSnapshot, rememberZeroFillSell } from './runtime-guards'
 import { executeTool, findCanonicalAlias, mergeGameStateSnapshot } from './tools'
-import { createProfile } from './db'
+import { createProfile, deleteProfile } from './db'
 
 describe('sell rerouting', () => {
   test('reroutes repeated zero-fill sell attempts to create_sell_order', async () => {
@@ -380,69 +380,73 @@ describe('command aliases', () => {
     const storedPassword = 'stored-password'
     const suppliedUsername = 'mismatched_model_user'
     const suppliedPassword = 'wrong-password'
-    createProfile({
-      id: profileId,
-      name: profileId,
-      username: storedUsername,
-      password: storedPassword,
-      empire: 'solarian',
-      player_id: '',
-      provider: 'openrouter',
-      model: 'openrouter/free',
-      failover_provider: 'nvidia',
-      failover_model: 'mistralai/ministral-14b-instruct-2512',
-      directive: '',
-      todo: '',
-      connection_mode: 'http_v2',
-      server_url: 'https://game.spacemolt.com',
-      autoconnect: false,
-      enabled: true,
-      context_budget: null,
-    })
-
-    const calls: Array<{ command: string; args: Record<string, unknown> | undefined }> = []
-
-    await executeTool(
-      'game',
-      {
-        command: 'login',
-        args: { username: suppliedUsername, password: suppliedPassword, empire: 'pirate' },
-      },
-      {
-        profileId,
+    try {
+      createProfile({
+        id: profileId,
+        name: profileId,
+        username: storedUsername,
+        password: storedPassword,
+        empire: 'solarian',
+        player_id: '',
+        provider: 'openrouter',
+        model: 'openrouter/free',
+        failover_provider: 'nvidia',
+        failover_model: 'mistralai/ministral-14b-instruct-2512',
+        directive: '',
         todo: '',
-        log: () => {},
-        connection: {
-          mode: 'websocket_v2',
-          connect: async () => {},
-          login: async () => ({ success: true }),
-          register: async () => ({ success: true }),
-          execute: async (command, args) => {
-            if (command === 'get_commands') {
-              return {
-                result: {
-                  commands: [
-                    { name: 'login' },
-                  ],
-                },
-              } as any
-            }
-            calls.push({ command, args })
-            return { result: { ok: true } }
-          },
-          onNotification: () => {},
-          disconnect: async () => {},
-          isConnected: () => true,
-        },
-      },
-    )
+        connection_mode: 'http_v2',
+        server_url: 'https://game.spacemolt.com',
+        autoconnect: false,
+        enabled: true,
+        context_budget: null,
+      })
 
-    expect(calls).toEqual([
-      {
-        command: 'login',
-        args: { username: storedUsername, password: storedPassword, empire: 'solarian' },
-      },
-    ])
+      const calls: Array<{ command: string; args: Record<string, unknown> | undefined }> = []
+
+      await executeTool(
+        'game',
+        {
+          command: 'login',
+          args: { username: suppliedUsername, password: suppliedPassword, empire: 'pirate' },
+        },
+        {
+          profileId,
+          todo: '',
+          log: () => {},
+          connection: {
+            mode: 'websocket_v2',
+            connect: async () => {},
+            login: async () => ({ success: true }),
+            register: async () => ({ success: true }),
+            execute: async (command, args) => {
+              if (command === 'get_commands') {
+                return {
+                  result: {
+                    commands: [
+                      { name: 'login' },
+                    ],
+                  },
+                } as any
+              }
+              calls.push({ command, args })
+              return { result: { ok: true } }
+            },
+            onNotification: () => {},
+            disconnect: async () => {},
+            isConnected: () => true,
+          },
+        },
+      )
+
+      expect(calls).toEqual([
+        {
+          command: 'login',
+          args: { username: storedUsername, password: storedPassword, empire: 'solarian' },
+        },
+      ])
+    } finally {
+      deleteProfile(profileId)
+    }
   })
 })
 

@@ -62,6 +62,17 @@ function slimGameState(raw: Record<string, unknown> | null): SlimGameState {
   }
 }
 
+function shouldAutoStartLlm(profile: ReturnType<typeof getProfile>): boolean {
+  return Boolean(
+    profile
+    && profile.enabled
+    && profile.autoconnect
+    && profile.provider
+    && profile.provider !== 'manual'
+    && profile.model,
+  )
+}
+
 class AgentManager {
   private agents = new Map<string, Agent>()
   private brokerSessions = new Map<string, BrokerSessionState>()
@@ -100,6 +111,8 @@ class AgentManager {
   }
 
   async connect(profileId: string, options?: { bypassCooldown?: boolean }): Promise<Agent> {
+    const profile = getProfile(profileId)
+    if (!profile) throw new Error('Profile not found')
     const bypassCooldown = options?.bypassCooldown === true
     const now = Date.now()
     const lastProfile = this.lastConnectAtByProfile.get(profileId) || 0
@@ -114,7 +127,12 @@ class AgentManager {
 
     // If already connected, return existing
     let agent = this.agents.get(profileId)
-    if (agent?.isConnected) return agent
+    if (agent?.isConnected) {
+      if (profile.connection_mode === 'websocket_v2') {
+        await agent.reassertBrokerConnectionIntent()
+      }
+      return agent
+    }
     const inFlight = this.connecting.get(profileId)
     if (inFlight) return inFlight
 
@@ -143,11 +161,12 @@ class AgentManager {
   async startLLM(profileId: string): Promise<void> {
     const agent = this.agents.get(profileId)
     if (!agent) throw new Error('Agent not connected')
-    if (agent.isRunning) return
 
     this.stopRequested.delete(profileId)
     this.resetBackoff(profileId)
     void setBrokerRunningIntent(profileId, true).catch(() => {})
+
+    if (agent.isRunning) return
 
     // Run in background (don't await)
     const loopStarted = Date.now()
@@ -344,7 +363,7 @@ class AgentManager {
       try {
         await this.connect(profile.id, { bypassCooldown: true })
         addLogEntry(profile.id, 'system', 'Reattached to live broker-managed websocket_v2 session after server startup')
-        if (session.runningIntent && profile.provider && profile.provider !== 'manual' && profile.model) {
+        if (shouldAutoStartLlm(profile)) {
           await this.startLLM(profile.id)
         }
       } catch (err) {

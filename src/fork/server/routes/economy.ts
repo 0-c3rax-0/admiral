@@ -45,9 +45,18 @@ type UpstreamStationItem = {
 }
 
 const CATEGORY_MATCHERS: Record<string, (itemId: string) => boolean> = {
+  all: (itemId) => Boolean(itemId.trim()),
   ore: (itemId) => itemId.endsWith('_ore'),
   ice: (itemId) => itemId.includes('ice'),
   gas: (itemId) => itemId.endsWith('_gas') || itemId.includes('gas'),
+  processed: (itemId) => {
+    const normalized = itemId.trim()
+    if (!normalized) return false
+    if (normalized.endsWith('_ore')) return false
+    if (normalized.includes('ice')) return false
+    if (normalized.endsWith('_gas') || normalized.includes('gas')) return false
+    return true
+  },
 }
 
 economy.get('/profiles/:id/trades', (c) => {

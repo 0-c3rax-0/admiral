@@ -56,6 +56,12 @@ class BrokerSession {
   private loggedIn = false
   private events: BrokerEvent[] = []
   private requestCache = new Map<string, CachedRequest>()
+  private connectInFlight: Promise<void> | null = null
+  private authInFlight: Promise<boolean> | null = null
+
+  private debug(message: string): void {
+    console.log(`[broker:${this.profileId}] ${message}`)
+  }
 
   constructor(record: PersistedSession) {
     this.profileId = record.profileId
@@ -107,6 +113,7 @@ class BrokerSession {
   }
 
   async connect(req: BrokerConnectRequest): Promise<BrokerSessionState> {
+    this.debug(`connect requested serverUrl=${req.serverUrl}`)
     this.serverUrl = req.serverUrl
     this.connectedIntent = true
     this.updatedAt = Date.now()
@@ -115,6 +122,7 @@ class BrokerSession {
   }
 
   async login(req: BrokerLoginRequest): Promise<LoginResult> {
+    this.debug(`login requested username=${req.username}`)
     this.username = req.username
     this.password = req.password
     this.updatedAt = Date.now()
@@ -153,6 +161,7 @@ class BrokerSession {
   }
 
   async execute(req: BrokerExecuteRequest): Promise<CommandResult> {
+    this.debug(`execute requested command=${req.command}`)
     this.pruneRequestCache()
     const cached = this.requestCache.get(req.requestId)
     if (cached?.result) return cached.result
@@ -181,11 +190,14 @@ class BrokerSession {
   }
 
   async disconnect(): Promise<void> {
+    this.debug('disconnect requested')
     this.connectedIntent = false
     this.runningIntent = false
     this.updatedAt = Date.now()
     this.loggedIn = false
     this.lastError = null
+    this.connectInFlight = null
+    this.authInFlight = null
     const connection = this.connection
     this.connection = null
     this.connected = false
@@ -200,6 +212,7 @@ class BrokerSession {
 
   async restore(): Promise<void> {
     if (!this.connectedIntent) return
+    this.debug('restore requested')
     try {
       await this.ensureConnected()
       if (this.username && this.password) {
@@ -214,44 +227,61 @@ class BrokerSession {
   }
 
   private async ensureConnected(): Promise<void> {
+    if (this.connectInFlight) {
+      this.debug('ensureConnected awaiting in-flight connect')
+      await this.connectInFlight
+      return
+    }
     if (this.connection?.isConnected()) {
+      this.debug('ensureConnected reused existing live socket')
       this.connected = true
       return
     }
+    this.connectInFlight = (async () => {
+      if (this.connection) {
+        this.debug('ensureConnected found stale socket; disconnecting existing transport before reconnect')
+        try {
+          await this.connection.disconnect()
+        } catch {
+          // ignore
+        }
+      }
 
-    if (this.connection) {
-      try {
-        await this.connection.disconnect()
-      } catch {
-        // ignore
-      }
-    }
-
-    const next = new WebSocketV2Connection(this.serverUrl)
-    next.setTransportLog((type, msg) => {
-      this.updatedAt = Date.now()
-      if (type === 'error') this.lastError = msg
-      if (msg.toLowerCase().includes('opened')) {
-        this.connected = true
-      }
-      if (msg.toLowerCase().includes('closed') || msg.toLowerCase().includes('disconnect')) {
-        this.connected = false
-        this.loggedIn = false
-      }
-      this.pushConnectionEvent({
-        connected: type === 'error' ? this.connected : next.isConnected(),
-        loggedIn: this.loggedIn,
-        message: msg,
+      const next = new WebSocketV2Connection(this.serverUrl)
+      next.setTransportLog((type, msg) => {
+        this.updatedAt = Date.now()
+        if (type === 'error') this.lastError = msg
+        if (msg.toLowerCase().includes('opened')) {
+          this.connected = true
+        }
+        if (msg.toLowerCase().includes('closed') || msg.toLowerCase().includes('disconnect')) {
+          this.connected = false
+          this.loggedIn = false
+        }
+        this.pushConnectionEvent({
+          connected: type === 'error' ? this.connected : next.isConnected(),
+          loggedIn: this.loggedIn,
+          message: msg,
+        })
+        this.debug(`transport ${type}: ${msg}`)
       })
-    })
-    next.onNotification(this.handleNotification)
+      next.onNotification(this.handleNotification)
 
-    await next.connect()
-    this.connection = next
-    this.connected = true
-    this.lastError = null
-    this.updatedAt = Date.now()
-    this.pushConnectionEvent({ connected: true, loggedIn: this.loggedIn, message: 'connected' })
+      this.debug(`ensureConnected opening new socket to ${this.serverUrl}`)
+      await next.connect()
+      this.connection = next
+      this.connected = true
+      this.lastError = null
+      this.updatedAt = Date.now()
+      this.pushConnectionEvent({ connected: true, loggedIn: this.loggedIn, message: 'connected' })
+      this.debug('ensureConnected socket open and broker session marked connected')
+    })()
+
+    try {
+      await this.connectInFlight
+    } finally {
+      this.connectInFlight = null
+    }
   }
 
   private handleNotification: NotificationHandler = (notification) => {
@@ -317,20 +347,33 @@ class BrokerSession {
   private async ensureAuthenticated(): Promise<boolean> {
     if (this.loggedIn) return true
     if (!this.username || !this.password || !this.connection) return false
-    const result = this.normalizeLoginResult(await this.connection.login(this.username, this.password), this.username)
-    this.loggedIn = result.success
-    this.lastError = result.success ? null : (result.error || 'login_failed')
-    if (result.success) {
-      this.pushConnectionEvent({
-        connected: this.connected,
-        loggedIn: true,
-        message: 'logged_in',
-      })
+    if (this.authInFlight) {
+      this.debug('ensureAuthenticated awaiting in-flight login')
+      return this.authInFlight
     }
-    return result.success
+    this.authInFlight = (async () => {
+      this.debug(`ensureAuthenticated logging in cached username=${this.username}`)
+      const result = this.normalizeLoginResult(await this.connection!.login(this.username!, this.password!), this.username!)
+      this.loggedIn = result.success
+      this.lastError = result.success ? null : (result.error || 'login_failed')
+      if (result.success) {
+        this.pushConnectionEvent({
+          connected: this.connected,
+          loggedIn: true,
+          message: 'logged_in',
+        })
+      }
+      return result.success
+    })()
+    try {
+      return await this.authInFlight
+    } finally {
+      this.authInFlight = null
+    }
   }
 
   private async retryAfterBrokerRelogin(req: BrokerExecuteRequest, original: CommandResult): Promise<CommandResult> {
+    this.debug(`retryAfterBrokerRelogin command=${req.command}`)
     const reauthed = await this.ensureAuthenticated()
     if (!reauthed) return original
     const retried = await this.connection!.execute(req.command, req.args)
