@@ -23,6 +23,21 @@ export interface BrokerSessionState {
   lastSeq: number
   lastSnapshot: Record<string, unknown> | null
   lastError: string | null
+  tickTiming?: {
+    current_tick: number | null
+    estimated_next_tick_utc: string | null
+    estimated_next_tick_local: string | null
+    next_mutation_at_utc: string | null
+    next_mutation_at_local: string | null
+    arrival_tick: number | null
+    ticks_until_arrival: number | null
+    arrival_at_utc: string | null
+    arrival_at_local: string | null
+    health_updated_at_utc: string | null
+    health_error: string | null
+    source_timezone: 'UTC'
+    display_timezone: 'Europe/Berlin'
+  } | null
   updatedAt: number
 }
 

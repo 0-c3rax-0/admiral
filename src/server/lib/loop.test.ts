@@ -6,6 +6,7 @@ import {
   sanitizeAssistantToolCalls,
   sanitizeProviderContextMessages,
   sanitizeProviderMessageSequence,
+  sanitizeTerminalAssistantMessage,
   sanitizeMessageToolIdentifiers,
   shouldRetryUninterpretableResponse,
 } from './loop'
@@ -248,5 +249,46 @@ describe('sanitizeProviderContextMessages', () => {
         text: 'Dropped invalid tool call with missing name. Arguments: {"command":"travel"}',
       },
     ])
+  })
+
+  test('drops a trailing assistant text message before provider submission', () => {
+    const messages = [
+      {
+        role: 'user',
+        content: 'Plot a route to the station.',
+      },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Route plotted. Approaching docking range.' },
+        ],
+      },
+    ] as any
+
+    sanitizeProviderContextMessages(messages)
+
+    expect(messages).toEqual([
+      {
+        role: 'user',
+        content: 'Plot a route to the station.',
+      },
+    ])
+  })
+})
+
+describe('sanitizeTerminalAssistantMessage', () => {
+  test('preserves a trailing assistant tool call message', () => {
+    const messages = [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'toolCall', id: 'AbC123xyz', name: 'game', arguments: { command: 'get_status' } },
+        ],
+      },
+    ] as any
+
+    sanitizeTerminalAssistantMessage(messages)
+
+    expect(messages).toHaveLength(1)
   })
 })

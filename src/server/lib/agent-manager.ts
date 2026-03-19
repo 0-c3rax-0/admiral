@@ -3,6 +3,7 @@ import { getProfile, addLogEntry, listProfiles } from './db'
 import { getPendingNavigation } from './navigation-guard'
 import { listBrokerSessions, setBrokerRunningIntent } from './broker-client'
 import type { BrokerSessionState } from '../../shared/broker-types'
+import { buildTickTiming, type TickTiming } from './tick-health'
 
 const BACKOFF_BASE = 12_000     // 12 seconds (must exceed PROFILE_CONNECT_COOLDOWN_MS)
 const BACKOFF_MAX = 5 * 60_000  // 5 minutes
@@ -267,8 +268,10 @@ class AgentManager {
     navigation_state_detail: string | null
     adaptive_mode: 'normal' | 'soft' | 'high' | 'critical'
     effective_context_budget_ratio: number | null
+    tick_timing: TickTiming
   } {
     const agent = this.agents.get(profileId)
+    const profile = getProfile(profileId)
     const brokerRuntime = this.getBrokerRuntime(profileId)
     const persistedNavigation = !agent ? getPendingNavigation(profileId) : null
     return {
@@ -282,6 +285,7 @@ class AgentManager {
       navigation_state_detail: agent?.navigationStateDetail ?? (persistedNavigation ? `${persistedNavigation.command}${persistedNavigation.destination ? ` to ${persistedNavigation.destination}` : ''} pending` : null),
       adaptive_mode: agent?.adaptiveMode ?? 'normal',
       effective_context_budget_ratio: agent?.effectiveContextBudgetRatio ?? null,
+      tick_timing: buildTickTiming(profile?.server_url || null, agent?.gameState ?? null),
     }
   }
 

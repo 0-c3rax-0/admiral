@@ -11,12 +11,22 @@ import type {
   BrokerSessionState,
   BrokerSessionMode,
 } from '../shared/broker-types'
+import { buildTickTiming } from '../server/lib/tick-health'
 
 const DATA_DIR = path.join(process.cwd(), 'data')
 const SESSIONS_PATH = path.join(DATA_DIR, 'broker-sessions.json')
 const MAX_EVENTS_PER_SESSION = 500
 const REQUEST_RESULT_TTL_MS = 5 * 60_000
 const AUTH_RECOVERABLE_ERRORS = new Set(['not_authenticated', 'session_invalid', 'session_expired'])
+const NOTIFICATION_BURST_DEDUPE_MS = 1_500
+
+export function getNotificationBurstFingerprint(notification: unknown): string {
+  try {
+    return JSON.stringify(notification)
+  } catch {
+    return String(notification)
+  }
+}
 
 interface PersistedSession {
   profileId: string
@@ -58,6 +68,8 @@ class BrokerSession {
   private requestCache = new Map<string, CachedRequest>()
   private connectInFlight: Promise<void> | null = null
   private authInFlight: Promise<boolean> | null = null
+  private lastNotificationFingerprint: string | null = null
+  private lastNotificationAt = 0
 
   private debug(message: string): void {
     console.log(`[broker:${this.profileId}] ${message}`)
@@ -88,6 +100,7 @@ class BrokerSession {
       lastSeq: this.lastSeq,
       lastSnapshot: this.lastSnapshot,
       lastError: this.lastError,
+      tickTiming: buildTickTiming(this.serverUrl, this.lastSnapshot),
       updatedAt: this.updatedAt,
     }
   }
@@ -286,6 +299,15 @@ class BrokerSession {
 
   private handleNotification: NotificationHandler = (notification) => {
     this.updatedAt = Date.now()
+    const fingerprint = getNotificationBurstFingerprint(notification)
+    if (
+      this.lastNotificationFingerprint === fingerprint &&
+      this.updatedAt - this.lastNotificationAt <= NOTIFICATION_BURST_DEDUPE_MS
+    ) {
+      return
+    }
+    this.lastNotificationFingerprint = fingerprint
+    this.lastNotificationAt = this.updatedAt
     this.events.push({
       seq: ++this.lastSeq,
       profileId: this.profileId,

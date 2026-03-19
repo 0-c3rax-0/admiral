@@ -505,8 +505,25 @@ export function buildRecentSignals(summaries: string[]): string[] {
     if (lower.includes('error: [no_resources]') && lower.includes('nothing to mine here')) add('mine location mismatch observed recently')
     if (lower.includes('error: [no_equipment]') && lower.includes('ice harvester')) add('mine equipment mismatch observed recently')
     if (lower.includes('error: [invalid_payload]') && lower.includes('quantity must be greater than 0')) add('sell quantity zero error observed recently')
+    if (
+      lower.includes('error: [invalid_payload]')
+      && lower.includes('view_market only accepts item_id or category')
+      && lower.includes('cannot target a remote `station_id`')
+    ) {
+      add('remote view_market misuse observed recently')
+    }
+    if (
+      lower.includes('build_failed')
+      && lower.includes('already have a')
+      && lower.includes(`use action 'upgrade'`)
+    ) {
+      add('facility upgrade suggested by server recently')
+    }
     if (lower.includes('produced zero fill') || (lower.includes('"command":"sell"') && lower.includes('"quantity_sold":0'))) {
       add('sell zero fill observed recently')
+    }
+    if (lower.includes('"command":"facility"') || lower.includes('facility pending;') || lower.includes('facility(action=')) {
+      add('facility action observed recently')
     }
     if (lower.includes('[action_result]')) add('recent action_result observed')
     if (lower.includes('"action":"jumped"')) add('recent jumped confirmation observed')
@@ -787,6 +804,65 @@ function buildAdviceSignals(
         ? ['refuel', 'find_route']
         : ['dock', 'find_route'],
       whyNow: 'repeating the same movement will fail again until fuel constraints change',
+    })
+  }
+
+  if (recentSignals.includes('remote view_market misuse observed recently')) {
+    signals.push({
+      kind: 'market_requires_local_docking',
+      priority: 83,
+      summary: 'The market query targeted a remote station; verify whether you are already docked locally before changing location.',
+      evidence: [
+        'recent view_market invalid_payload explicitly rejected remote station_id usage',
+        ...(poi ? [`poi=${poi}`] : []),
+        ...(system ? [`system=${system}`] : []),
+      ],
+      recommendedChecks: ['get_status'],
+      recommendedActions: looksDocked(poi) ? ['view_market'] : ['dock'],
+      whyNow: looksDocked(poi)
+        ? 'if the ship is already docked, continue locally and rerun view_market without station_id instead of traveling anywhere'
+        : 'only re-plan toward docking if fresh status confirms the ship is not already docked at the local market location',
+    })
+  }
+
+  const facilityPending =
+    status.mutation_state === 'mutation_pending'
+    && typeof status.mutation_state_detail === 'string'
+    && status.mutation_state_detail.toLowerCase().includes('facility')
+
+  if (facilityPending || recentSignals.includes('facility action observed recently')) {
+    signals.push({
+      kind: 'facility_station_flow',
+      priority: facilityPending ? 86 : 78,
+      summary: facilityPending
+        ? 'A station facility action is already pending; let that build/craft flow resolve before switching plans.'
+        : 'Recent station facility activity suggests the next step should stay on the station build/craft flow, not jump back to mining immediately.',
+      evidence: [
+        ...(facilityPending && status.mutation_state_detail ? [status.mutation_state_detail] : ['recent facility action observed']),
+        ...(poi ? [`poi=${poi}`] : []),
+        ...(system ? [`system=${system}`] : []),
+      ],
+      recommendedChecks: ['get_status'],
+      recommendedActions: facilityPending ? [] : ['facility'],
+      whyNow: facilityPending
+        ? 'stacking unrelated actions on top of an in-flight station build/craft step creates local confusion'
+        : 'station crafting/building should be completed or re-checked before resuming the normal mining loop',
+    })
+  }
+
+  if (recentSignals.includes('facility upgrade suggested by server recently')) {
+    signals.push({
+      kind: 'facility_upgrade_available',
+      priority: 87,
+      summary: 'The server reported that this facility already exists here; switch from build to upgrade.',
+      evidence: [
+        'recent facility build_failed error explicitly suggested action=upgrade',
+        ...(poi ? [`poi=${poi}`] : []),
+        ...(system ? [`system=${system}`] : []),
+      ],
+      recommendedChecks: ['get_status'],
+      recommendedActions: ['facility'],
+      whyNow: 'retrying the same build will fail again until the plan switches to facility(action="upgrade")',
     })
   }
 

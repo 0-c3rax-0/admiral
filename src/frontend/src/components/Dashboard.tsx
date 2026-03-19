@@ -96,6 +96,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
   const pollSeqRef = useRef(0)
   const appliedPollSeqRef = useRef(0)
   const lastConnectedAtRef = useRef<Record<string, number>>({})
+  const autoConnectAttemptAtRef = useRef<Record<string, number>>({})
 
   const activeProfile = profiles.find(p => p.id === activeId)
   const runningProfiles = profiles.filter(p => statuses[p.id]?.running).length
@@ -221,6 +222,53 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
       // ignore
     }
   }, [])
+
+  useEffect(() => {
+    const AUTO_CONNECT_COOLDOWN_MS = 30_000
+    const candidates = profiles.filter((profile) => {
+      if (!profile.enabled || !profile.autoconnect) return false
+      if (profile.connection_mode !== 'websocket_v2') return false
+      if (!profile.server_url) return false
+      if (!statuses[profile.id] || statuses[profile.id]?.connected) return false
+      return true
+    })
+    if (candidates.length === 0) return
+
+    let cancelled = false
+
+    void (async () => {
+      for (const profile of candidates) {
+        const lastAttempt = autoConnectAttemptAtRef.current[profile.id] || 0
+        if (Date.now() - lastAttempt < AUTO_CONNECT_COOLDOWN_MS) continue
+        autoConnectAttemptAtRef.current[profile.id] = Date.now()
+
+        const isManual = !profile.provider || profile.provider === 'manual'
+        const action = isManual ? 'connect' : 'connect_llm'
+
+        try {
+          await fetch(`/api/profiles/${profile.id}/connect`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action }),
+          })
+        } catch {
+          // ignore and let the cooldown prevent hot-loop retries
+        }
+
+        if (cancelled) return
+      }
+
+      if (!cancelled) {
+        setTimeout(() => {
+          if (!cancelled) void refreshProfiles()
+        }, 1200)
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [profiles, statuses, refreshProfiles])
 
   function handleNewProfile() {
     setShowWizard(true)

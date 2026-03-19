@@ -15,6 +15,7 @@ import { agentManager } from './lib/agent-manager'
 import { syncKbMirrorOnStartup } from './lib/kb-mirror'
 import { syncShipKbCacheOnStartup } from './lib/ship-kb'
 import { syncSystemKbCacheOnStartup } from './lib/system-kb'
+import { ensureTickHealthPolling, getTickHealthSnapshot } from './lib/tick-health'
 import { registerServerForkRoutes, startServerForkServices } from '../fork/server'
 
 const app = new Hono()
@@ -33,7 +34,18 @@ app.route('/api/preferences', preferences)
 registerServerForkRoutes(app)
 
 // Health check
-app.get('/api/health', (c) => c.json({ ok: true }))
+app.get('/api/health', (c) => {
+  const tick = getTickHealthSnapshot('https://game.spacemolt.com')
+  return c.json({
+    ok: true,
+    estimated_next_tick: tick.estimatedNextTickUtc,
+    tick: tick.tick,
+    status: tick.status,
+    version: tick.version,
+    updated_at: tick.updatedAt > 0 ? new Date(tick.updatedAt).toISOString() : null,
+    error: tick.error,
+  })
+})
 
 // Static file serving (production) or dev proxy
 // Detect production by checking for dist/ directory alongside the binary/entrypoint.
@@ -138,6 +150,7 @@ void agentManager.reattachBrokerSessions().catch((err) => {
   console.error(`[startup] Broker reattach failed: ${msg}`)
 })
 void agentManager.refreshBrokerSessionCache().catch(() => {})
+ensureTickHealthPolling(listProfiles().map((profile) => profile.server_url))
 
 setInterval(() => {
   void agentManager.refreshBrokerSessionCache().catch(() => {})

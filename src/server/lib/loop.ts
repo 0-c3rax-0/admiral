@@ -542,10 +542,26 @@ export function sanitizeProviderMessageSequence(messages: Message[]): void {
   }
 }
 
+export function sanitizeTerminalAssistantMessage(messages: Message[]): void {
+  const last = messages[messages.length - 1]
+  if (!last || last.role !== 'assistant' || !Array.isArray((last as any).content)) return
+  if (messages.length < 2) return
+
+  const previous = messages[messages.length - 2]
+  if (previous?.role === 'toolResult') return
+
+  const blocks = (last as any).content as any[]
+  const hasToolCalls = blocks.some((block) => block?.type === 'toolCall')
+  if (hasToolCalls) return
+
+  messages.pop()
+}
+
 export function sanitizeProviderContextMessages(messages: Message[]): void {
   sanitizeAssistantToolCalls(messages)
   sanitizeMessageToolIdentifiers(messages)
   sanitizeProviderMessageSequence(messages)
+  sanitizeTerminalAssistantMessage(messages)
 }
 
 function estimateRequestTokens(context: Context): number {

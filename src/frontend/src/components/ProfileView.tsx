@@ -116,6 +116,9 @@ interface Props {
     navigation_state_detail?: string | null
     adaptive_mode?: 'normal' | 'soft' | 'high' | 'critical'
     effective_context_budget_ratio?: number | null
+    tick_timing?: {
+      current_tick: number | null
+    } | null
   }
   registrationCode?: string
   playerData: Record<string, unknown> | null
@@ -175,6 +178,7 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
   const effectiveBudget = typeof status.effective_context_budget_ratio === 'number'
     ? `${Math.round(status.effective_context_budget_ratio * 100)}%`
     : null
+  const currentTick = typeof status.tick_timing?.current_tick === 'number' ? status.tick_timing.current_tick : null
   const filteredCatalogRows = useMemo(() => {
     if (!catalogPanel) return []
     const query = catalogFilter.trim().toLowerCase()
@@ -854,6 +858,11 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
               {status.running && (
                 <span className="text-muted-foreground/60 ml-1.5">
                   mem:{adaptiveMode}{effectiveBudget ? `:${effectiveBudget}` : ''}
+                </span>
+              )}
+              {currentTick !== null && (
+                <span className="text-muted-foreground/60 ml-1.5">
+                  tick:{currentTick}
                 </span>
               )}
               {mutationState !== 'idle' && (

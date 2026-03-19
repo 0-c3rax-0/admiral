@@ -475,6 +475,10 @@ async function validateLocalGameCommand(
     return validateCancelOrderCommand(args)
   }
 
+  if (command === 'view_market') {
+    return validateViewMarketCommand(args)
+  }
+
   if (command === 'mine') {
     const mineGuard = validateMineAgainstLiveState(profileId, gameState)
     if (mineGuard) return mineGuard
@@ -533,7 +537,14 @@ async function validateLocalGameCommand(
   }
 
   const quantity = toFiniteNumber(args.quantity ?? args.qty ?? args.amount ?? args.quantity_sold)
-  if (quantity === null || quantity > 0) return null
+  if (quantity !== null && quantity > 0) return null
+
+  if (quantity === null) {
+    return {
+      systemMessage: 'Blocked sell locally: quantity is missing. Refresh cargo/state and submit an explicit positive quantity before trying to sell.',
+      errorMessage: formatCommandError('sell', 'invalid_payload', 'invalid_payload: Sell requires item_id and a quantity greater than 0.'),
+    }
+  }
 
   return {
     systemMessage: 'Blocked sell locally: requested quantity is 0 or negative. Refresh cargo/state before trying to sell again.',
@@ -678,6 +689,27 @@ function validateCancelOrderCommand(
   }
 
   return null
+}
+
+function validateViewMarketCommand(
+  args: Record<string, unknown> | undefined,
+): { systemMessage: string; errorMessage: string } | null {
+  if (!args || Object.keys(args).length === 0) return null
+
+  const unsupportedKeys = Object.keys(args).filter((key) => !['item_id', 'item', 'item_name', 'category'].includes(key))
+  if (unsupportedKeys.length === 0) return null
+
+  const mentionsRemoteStation = unsupportedKeys.includes('station_id')
+  const mentionsPaging = unsupportedKeys.includes('page') || unsupportedKeys.includes('page_size')
+  const correction: string[] = []
+  if (mentionsRemoteStation) correction.push('`view_market` cannot target a remote `station_id`; dock there first')
+  if (mentionsPaging) correction.push('`view_market` is not paginated; drop `page`/`page_size`')
+  correction.push('use only `item_id` or `category` with `view_market`')
+
+  return {
+    systemMessage: `Blocked view_market locally: unsupported args ${unsupportedKeys.join(', ')}.`,
+    errorMessage: `Error: [invalid_payload] view_market only accepts item_id or category. ${correction.join('; ')}.`,
+  }
 }
 
 function validateCraftCommand(
@@ -1198,6 +1230,15 @@ function rewriteLegacyCommandInvocation(
     }
   }
 
+  if (normalized === 'get_storage' || normalized === 'view_storage') {
+    return {
+      changed: true,
+      command: 'storage_view',
+      args,
+      message: `Rewrote legacy command alias: ${command} -> storage_view`,
+    }
+  }
+
   return { changed: false, command, args, message: '' }
 }
 
@@ -1268,6 +1309,7 @@ function stripNamespacedAlias(name: string): string {
     'auth',
     'combat',
     'faction',
+    'intel',
     'market',
     'salvage',
     'ship',
@@ -1433,6 +1475,36 @@ export function resolveExplicitCommandAlias(input: string, names: string[]): str
 
   if (input === 'view_market' || input === 'analyze_market' || input === 'estimate_purchase' || input === 'view_orders') {
     return chooseFirstAvailable(input, `market_${input}`)
+  }
+
+  if (
+    input === 'query_intel' || input === 'intel_query_intel' || input === 'spacemolt_intel_query_intel' ||
+    input === 'submit_intel' || input === 'intel_submit_intel' || input === 'spacemolt_intel_submit_intel' ||
+    input === 'query_trade_intel' || input === 'intel_query_trade_intel' || input === 'spacemolt_intel_query_trade_intel' ||
+    input === 'submit_trade_intel' || input === 'intel_submit_trade_intel' || input === 'spacemolt_intel_submit_trade_intel' ||
+    input === 'trade_intel_status' || input === 'intel_trade_intel_status' || input === 'spacemolt_intel_trade_intel_status' ||
+    input === 'intel_status' || input === 'spacemolt_intel_intel_status'
+  ) {
+    const intelAliasMap: Record<string, string[]> = {
+      query_intel: ['faction_query_intel'],
+      intel_query_intel: ['faction_query_intel'],
+      spacemolt_intel_query_intel: ['faction_query_intel'],
+      submit_intel: ['faction_submit_intel'],
+      intel_submit_intel: ['faction_submit_intel'],
+      spacemolt_intel_submit_intel: ['faction_submit_intel'],
+      query_trade_intel: ['faction_query_trade_intel'],
+      intel_query_trade_intel: ['faction_query_trade_intel'],
+      spacemolt_intel_query_trade_intel: ['faction_query_trade_intel'],
+      submit_trade_intel: ['faction_submit_trade_intel'],
+      intel_submit_trade_intel: ['faction_submit_trade_intel'],
+      spacemolt_intel_submit_trade_intel: ['faction_submit_trade_intel'],
+      trade_intel_status: ['faction_trade_intel_status'],
+      intel_trade_intel_status: ['faction_trade_intel_status'],
+      spacemolt_intel_trade_intel_status: ['faction_trade_intel_status'],
+      intel_status: ['faction_intel_status'],
+      spacemolt_intel_intel_status: ['faction_intel_status'],
+    }
+    return chooseFirstAvailable(input, ...(intelAliasMap[input] || []))
   }
 
   if (input === 'browse_ships' || input === 'list_ships' || input === 'quote') {
@@ -2025,6 +2097,9 @@ function annotateNotification(tag: string, message: string): string {
   const upperTag = tag.trim().toUpperCase()
   if (upperTag === 'ACTION_ERROR' && /\bnot_docked\b/i.test(message)) {
     return `${message} Interpretation: the ship is already undocked or an earlier undock already completed. Refresh state before retrying and do not infer a stuck mutation queue from this alone.`
+  }
+  if (upperTag === 'ACTION_ERROR' && /\balready_docked\b/i.test(message)) {
+    return `${message} Interpretation: the ship is already docked or an earlier dock already completed. Treat the intended dock state as satisfied, refresh state if needed, and continue from the docked state instead of retrying dock.`
   }
   if (upperTag === 'ACTION_ERROR' && /\balready_in_system\b/i.test(message)) {
     return `${message} Interpretation: travel is already satisfied because the ship is already in the target system. Continue with the next step instead of retrying travel.`

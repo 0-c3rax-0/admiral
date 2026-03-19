@@ -4,6 +4,83 @@ import { executeTool, findCanonicalAlias, mergeGameStateSnapshot } from './tools
 import { createProfile, deleteProfile } from './db'
 
 describe('sell rerouting', () => {
+  test('blocks unsupported remote-station args on view_market before hitting the server', async () => {
+    const toolCalls: Array<{ command: string; args: Record<string, unknown> | undefined }> = []
+
+    const result = await executeTool(
+      'game',
+      {
+        command: 'view_market',
+        args: {
+          station_id: 'nova_terra_central',
+          page_size: 50,
+        },
+      },
+      {
+        profileId: `test-${Date.now()}-view-market-invalid-args`,
+        todo: '',
+        log: () => {},
+        connection: {
+          mode: 'http_v2',
+          connect: async () => {},
+          login: async () => ({ success: true }),
+          register: async () => ({ success: true }),
+          execute: async (command, args) => {
+            toolCalls.push({ command, args })
+            return { result: { ok: true } }
+          },
+          onNotification: () => {},
+          disconnect: async () => {},
+          isConnected: () => true,
+        },
+      },
+    )
+
+    expect(toolCalls).toHaveLength(0)
+    expect(result).toContain('view_market only accepts item_id or category')
+    expect(result).toContain('station_id')
+  })
+
+  test('blocks sell without explicit quantity', async () => {
+    const toolCalls: Array<{ command: string; args: Record<string, unknown> | undefined }> = []
+
+    const result = await executeTool(
+      'game',
+      {
+        command: 'sell',
+        args: {
+          item_id: 'legacy_ore',
+        },
+      },
+      {
+        profileId: `test-${Date.now()}-sell-missing-quantity`,
+        todo: '',
+        log: () => {},
+        gameState: {
+          location: {
+            poi_name: 'Nova Terra Central',
+          },
+        },
+        connection: {
+          mode: 'http_v2',
+          connect: async () => {},
+          login: async () => ({ success: true }),
+          register: async () => ({ success: true }),
+          execute: async (command, args) => {
+            toolCalls.push({ command, args })
+            return { result: { ok: true } }
+          },
+          onNotification: () => {},
+          disconnect: async () => {},
+          isConnected: () => true,
+        },
+      },
+    )
+
+    expect(toolCalls).toHaveLength(0)
+    expect(result).toContain('Sell requires item_id and a quantity greater than 0')
+  })
+
   test('reroutes repeated zero-fill sell attempts to create_sell_order', async () => {
     const profileId = `test-${Date.now()}-sell-reroute`
     const toolCalls: Array<{ command: string; args: Record<string, unknown> | undefined }> = []

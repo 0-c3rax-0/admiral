@@ -134,6 +134,7 @@ export class Agent {
   private miningAutopilotArmed = false
   private miningAutopilotRunning = false
   private miningAutopilotChainCount = 0
+  private miningAutopilotNextTick: number | null = null
   constructor(profileId: string) {
     this.profileId = profileId
   }
@@ -306,7 +307,7 @@ export class Agent {
   }
 
   private noteCommandOutcome(command: string, result: CommandResult): void {
-    if (command === 'undock' || command === 'dock' || command === 'travel' || command === 'jump' || command === 'mine' || command === 'sell' || command === 'refuel' || command === 'repair') {
+    if (command === 'undock' || command === 'dock' || command === 'travel' || command === 'jump' || command === 'mine' || command === 'sell' || command === 'refuel' || command === 'repair' || command === 'facility') {
       this.lastMutationCommand = command
       this.lastMutationAt = Date.now()
     }
@@ -317,17 +318,21 @@ export class Agent {
         this.log('system', 'Mining autopilot armed: first mine accepted, local chaining enabled until cargo/state stop condition.')
       }
       this.miningAutopilotArmed = true
-    } else if (command !== 'mine' && command !== 'get_status' && command !== 'get_location' && command !== 'get_cargo') {
     } else if (command !== 'mine' && !HTTP_V2_FALLBACK_QUERY_COMMANDS.has(command)) {
       if (this.miningAutopilotArmed) {
         this.log('system', `Mining autopilot disarmed by command change: ${command}. chained_mines=${this.miningAutopilotChainCount}`)
       }
       this.miningAutopilotArmed = false
+      this.miningAutopilotNextTick = null
       this.miningAutopilotChainCount = 0
     }
 
-    if (command === 'undock' && !result.error && (result.meta?.pending || (result.result && typeof result.result === 'object' && (result.result as Record<string, unknown>).pending === true))) {
-      this.notePendingMutationObserved('undock pending; waiting for state change')
+    if (
+      !result.error &&
+      (result.meta?.pending || (result.result && typeof result.result === 'object' && (result.result as Record<string, unknown>).pending === true)) &&
+      (command === 'undock' || command === 'facility')
+    ) {
+      this.notePendingMutationObserved(`${command} pending; waiting for state change`)
     }
   }
 
@@ -340,6 +345,18 @@ export class Agent {
     const payload = record.payload && typeof record.payload === 'object' ? record.payload as Record<string, unknown> : null
     const command = typeof payload?.command === 'string' ? payload.command.trim().toLowerCase() : ''
     return command || null
+  }
+
+  private extractNotificationTick(notification: unknown): number | null {
+    if (!notification || typeof notification !== 'object') return null
+    const record = notification as Record<string, unknown>
+    const payload = record.payload && typeof record.payload === 'object' ? record.payload as Record<string, unknown> : null
+    return toFiniteNumber(
+      record.current_tick
+      ?? record.tick
+      ?? payload?.current_tick
+      ?? payload?.tick,
+    )
   }
 
   private getCargoRatio(): number | null {
@@ -374,12 +391,43 @@ export class Agent {
 
     this.miningAutopilotRunning = true
     try {
+      const notificationTick = this.extractNotificationTick(notification)
+      if (notificationTick !== null) {
+        this.miningAutopilotNextTick = notificationTick + 1
+      }
+
       const cargoResp = await this.executeSilentQuery('get_cargo')
       if (cargoResp) this.cacheGameState(cargoResp, 'get_cargo')
+
+      const cargoData = ((cargoResp?.structuredContent ?? cargoResp?.result) as Record<string, unknown> | undefined) || {}
+      const cargoLocation = (cargoData.location as Record<string, unknown> | undefined) || {}
+      const currentTick = toFiniteNumber(
+        cargoData.current_tick
+        ?? cargoData.tick
+        ?? cargoLocation.current_tick
+        ?? cargoLocation.tick
+        ?? notificationTick,
+      )
+
+      if (
+        this.miningAutopilotNextTick !== null &&
+        currentTick !== null &&
+        currentTick < this.miningAutopilotNextTick
+      ) {
+        const ticksToWait = Math.max(1, this.miningAutopilotNextTick - currentTick)
+        const waitMs = ticksToWait * 10_000
+        this.log('system', `Mining autopilot waiting for tick ${this.miningAutopilotNextTick} before next mine. current_tick=${currentTick}`)
+        if (this.abortController?.signal) {
+          await abortableSleep(waitMs, this.abortController.signal)
+        } else {
+          await abortableSleep(waitMs)
+        }
+      }
 
       const cargoRatio = this.getCargoRatio()
       if (cargoRatio !== null && cargoRatio >= 0.95) {
         this.miningAutopilotArmed = false
+        this.miningAutopilotNextTick = null
         this.log('system', `Mining autopilot stopped: cargo reached ${Math.round(cargoRatio * 100)}%. chained_mines=${this.miningAutopilotChainCount}`)
         this.miningAutopilotChainCount = 0
         this.injectNudge('Cargo is full (>= 95%). Mining autopilot disarmed. Return to your designated unload station. If it is in another system, use find_route and take ONLY the first jump. NEVER issue multiple jumps in the same turn.')
@@ -388,6 +436,7 @@ export class Agent {
 
       if (!this.canContinueMiningFromGameState()) {
         this.miningAutopilotArmed = false
+        this.miningAutopilotNextTick = null
         this.log('system', `Mining autopilot stopped: current live state is no longer a compatible mining situation. chained_mines=${this.miningAutopilotChainCount}`)
         this.miningAutopilotChainCount = 0
         this.injectNudge('Mining autopilot stopped because the location or ship state is no longer valid for mining. Verify your status and plan the next step.')
@@ -409,6 +458,7 @@ export class Agent {
       if (result.error) {
         this.log('system', `Mining autopilot stopped: mine execution failed. chained_mines=${this.miningAutopilotChainCount}`)
         this.miningAutopilotArmed = false
+        this.miningAutopilotNextTick = null
         this.miningAutopilotChainCount = 0
       }
     } finally {
@@ -1951,9 +2001,9 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - When using the storage fallback, use the station's personal/local storage, confirm the cargo actually moved, and keep a note of what was stored and where.
 - For normal station storage, use \`storage(action="deposit", item_id=..., quantity?...)\`, \`storage(action="withdraw", item_id=..., quantity?...)\`, or \`storage(action="view")\` / \`storage_view()\`. Do not invent \`target="station"\`, \`player="station"\`, or similar placeholders; station storage is the default and should omit \`target\`.
 - Reserve \`target="self"\` only for carrier-bay transfers on carrier ships. If you are not explicitly loading a ship into your own carrier bay, do not set \`target\` on storage deposit/withdraw commands.
-- Treat \`create_sell_order\` as fee-bearing. Before listing, inspect the listing fee and compare it to the expected total sale value and expected margin. Do not create tiny low-value orders where the fee eats a meaningful share of proceeds, and prefer larger batched listings when that materially improves fee efficiency.
-- Prefer batching sale inventory in local station storage and waiting until you have a meaningfully larger stack before creating a sell order. Note: creating multiple orders for the same item at the exact same price will automatically consolidate them into one order.
-- "Batching" can include running multiple mining trips first: if the current station and route are still good for the same ore family, it is often better to unload to local storage, return to the belt for more, and combine several trips into one later sell order instead of listing every small haul immediately.
+- Treat \`create_sell_order\` as fee-bearing. Before listing, inspect the listing fee and compare it to the expected total sale value and expected margin. Avoid tiny low-value orders, but do not let large ore stacks sit idle in storage just because the fee is nonzero.
+- Use station storage mainly as a short-term unloading buffer, not as a long-term ore sink. If a station already holds a meaningful stack of a saleable ore or refined material, prefer liquidating that stack on the same dock visit instead of adding more and postponing the sale again.
+- Prefer batching only until you have a clearly worthwhile order size. Once storage already contains a meaningful stack, stop extending the batch and create the sell order. Note: creating multiple orders for the same item at the exact same price will automatically consolidate them into one order.
 - After creating a sell order, let it run for at least 3 ticks (about 30 seconds) before considering \`cancel_order\` or \`modify_order\`, unless the order is clearly wrong (wrong item, wrong quantity, obviously bad price, or a strategic emergency requires immediate liquidity).
 - Only create a sell order after the cargo is safely unloaded or when you have explicitly verified that listing it is better than keeping it in local storage for later sale.
 - Do not cancel a newly created order just because it is still unfilled on the first verification. Unfilled for one or two checks is normal.
@@ -1976,8 +2026,8 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - Use a structured ore-mining loop when applicable: if undocked with an ore-mining fit and cargo is below 15%, prefer traveling to a known compatible ore belt and starting the loop there.
 - If already at a compatible ore belt and cargo is below 95%, keep mining unless the location is depleted, yields collapse, cargo is full, no resources are available, or the current fit does not match the node.
 - If cargo reaches roughly 95%, stop mining, return to a known unload station, dock, refuel when needed, unload, and only craft items when a supported crafting action is actually available and worthwhile.
-- If docked with cargo above 15%, process cargo before leaving again: refuel when needed, unload, only craft items when a supported crafting action is actually available and worthwhile, then choose direct sell for small stacks or strong buy-side liquidity; otherwise prefer \`create_sell_order\` once quantity or expected sale value is above your configured threshold.
-- Do not hoard ore blindly. When docked with valuable raw materials, consider refining them into higher-value crafted items (e.g., Steel Plates, Circuit Boards) if you have the recipes. Refined materials usually sell for much more via \`create_sell_order\` than raw ore. Avoid dumping into obviously bad instant bids.
+- If docked with cargo above 15%, process cargo before leaving again: refuel when needed, unload, and then actively convert saleable inventory into credits on that same visit. Use direct \`sell\` when local bid-side liquidity is real and acceptable; otherwise prefer \`create_sell_order\` for any meaningful stack instead of repeatedly postponing liquidation.
+- Do not hoard ore blindly. When docked with valuable raw materials or refined goods, default toward monetizing existing station inventory before resuming more mining. Only craft when the supported recipe path has a clear and timely exit that beats selling the current materials.
 - Periodically check for practical ship upgrades when docked at a shipyard or base. Favor upgrades that materially improve cargo, mining throughput, survivability, or travel efficiency and are affordable without stalling progress.
 - Keep a wallet reserve of at least 10000 credits. Do not spend below that floor on ship purchases, fitting, or optional upgrades unless explicit human guidance overrides it.
 - Before buying another ship, check \`list_ships\` for already-owned hulls. If you already own a larger or clearly better ship than the current active hull, prefer switching into that owned ship before spending more credits on a new purchase.

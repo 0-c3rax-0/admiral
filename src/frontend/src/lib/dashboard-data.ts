@@ -16,6 +16,21 @@ export type RuntimeStatus = {
     errors429Last300s: number
     failoverActivationsLast300s: number
   } | null
+  tick_timing?: {
+    current_tick: number | null
+    estimated_next_tick_utc: string | null
+    estimated_next_tick_local: string | null
+    next_mutation_at_utc: string | null
+    next_mutation_at_local: string | null
+    arrival_tick: number | null
+    ticks_until_arrival: number | null
+    arrival_at_utc: string | null
+    arrival_at_local: string | null
+    health_updated_at_utc: string | null
+    health_error: string | null
+    source_timezone: 'UTC'
+    display_timezone: 'Europe/Berlin'
+  } | null
 }
 
 const WEBSOCKET_STATUS_GRACE_MS = 15_000
@@ -57,6 +72,7 @@ export function buildRuntimeStatuses(
         ? profile.effective_context_budget_ratio
         : null,
       rate_risk: (profile.rate_risk as RuntimeStatus['rate_risk']) || null,
+      tick_timing: (profile.tick_timing as RuntimeStatus['tick_timing']) || null,
     }
 
     if (profile.gameState && typeof profile.gameState === 'object') {

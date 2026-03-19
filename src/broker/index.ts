@@ -8,6 +8,8 @@ import type {
   BrokerRegisterRequest,
   BrokerRunningIntentRequest,
 } from '../shared/broker-types'
+import { listProfiles } from '../server/lib/db'
+import { ensureTickHealthPolling, getTickHealthSnapshot } from '../server/lib/tick-health'
 
 const app = new Hono()
 app.use('*', cors())
@@ -16,8 +18,20 @@ const manager = new BrokerSessionManager()
 void manager.restorePersistedSessions().catch((err) => {
   console.error(`[broker] restore failed: ${err instanceof Error ? err.message : String(err)}`)
 })
+ensureTickHealthPolling(listProfiles().map((profile) => profile.server_url))
 
-app.get('/api/broker/health', (c) => c.json({ ok: true }))
+app.get('/api/broker/health', (c) => {
+  const tick = getTickHealthSnapshot('https://game.spacemolt.com')
+  return c.json({
+    ok: true,
+    estimated_next_tick: tick.estimatedNextTickUtc,
+    tick: tick.tick,
+    status: tick.status,
+    version: tick.version,
+    updated_at: tick.updatedAt > 0 ? new Date(tick.updatedAt).toISOString() : null,
+    error: tick.error,
+  })
+})
 
 app.get('/api/broker/sessions', (c) => {
   return c.json({ sessions: manager.listSessions() })

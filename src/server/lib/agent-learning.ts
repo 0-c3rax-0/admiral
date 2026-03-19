@@ -988,6 +988,7 @@ function canonicalizeLearningCommand(command: string, args?: Record<string, unkn
   if (command === 'get_insurance_quote') return 'salvage_quote'
   if (command === 'deposit_items') return 'storage_deposit'
   if (command === 'withdraw_items') return 'storage_withdraw'
+  if (command === 'get_storage') return 'storage_view'
   if (command === 'view_storage') return 'storage_view'
   if (command === 'chat_history') return 'get_chat_history'
   if (command === 'storage') {

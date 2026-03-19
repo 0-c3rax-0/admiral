@@ -48,6 +48,7 @@ function stripNamespacedAlias(name: string): string {
     'auth',
     'combat',
     'faction',
+    'intel',
     'market',
     'salvage',
     'ship',

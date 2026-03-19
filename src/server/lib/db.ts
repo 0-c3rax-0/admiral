@@ -11,6 +11,8 @@ const MAX_LOG_ROWS_PER_PROFILE = 5000
 const LOG_PRUNE_EVERY_N_INSERTS = 100
 const MAX_STATS_ROWS_PER_PROFILE = 20_000
 const STATS_PRUNE_EVERY_N_INSERTS = 100
+const SQLITE_BUSY_TIMEOUT_MS = 5000
+const SQLITE_BUSY_RETRY_ATTEMPTS = 6
 
 let db: Database | null = null
 
@@ -35,6 +37,8 @@ export function getDb(): Database {
   fs.mkdirSync(DB_DIR, { recursive: true })
   db = new Database(DB_PATH)
   db.exec('PRAGMA journal_mode = WAL')
+  db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`)
+  db.exec('PRAGMA synchronous = NORMAL')
   db.exec('PRAGMA foreign_keys = ON')
 
   migrate(db)
@@ -336,13 +340,13 @@ export function deleteProfile(id: string): void {
 // --- Log CRUD ---
 
 export function addLogEntry(profileId: string, type: string, summary: string, detail?: string): number {
-  const result = getDb().query(
+  const result = runWithBusyRetry(() => getDb().query(
     'INSERT INTO log_entries (profile_id, type, summary, detail) VALUES (?, ?, ?, ?)'
-  ).run(profileId, type, summary, detail ?? null)
+  ).run(profileId, type, summary, detail ?? null))
   const rowId = Number(result.lastInsertRowid)
 
   if (rowId % LOG_PRUNE_EVERY_N_INSERTS === 0) {
-    getDb().query(
+    runWithBusyRetry(() => getDb().query(
       `DELETE FROM log_entries
        WHERE profile_id = ?
          AND id NOT IN (
@@ -351,7 +355,7 @@ export function addLogEntry(profileId: string, type: string, summary: string, de
            ORDER BY id DESC
            LIMIT ?
          )`
-    ).run(profileId, profileId, MAX_LOG_ROWS_PER_PROFILE)
+    ).run(profileId, profileId, MAX_LOG_ROWS_PER_PROFILE))
   }
 
   return rowId
@@ -611,7 +615,7 @@ export interface SupervisorRunRow {
 }
 
 export function addStatsSnapshot(snapshot: StatsSnapshotInput): number {
-  const result = getDb().query(
+  const result = runWithBusyRetry(() => getDb().query(
     `INSERT INTO stats_snapshots (
       profile_id, connected, running, adaptive_mode, effective_context_budget_ratio,
       credits, ore_mined, trades_completed, systems_explored, source
@@ -627,11 +631,11 @@ export function addStatsSnapshot(snapshot: StatsSnapshotInput): number {
     snapshot.trades_completed ?? null,
     snapshot.systems_explored ?? null,
     snapshot.source ?? 'poll',
-  )
+  ))
   const rowId = Number(result.lastInsertRowid)
 
   if (rowId % STATS_PRUNE_EVERY_N_INSERTS === 0) {
-    getDb().query(
+    runWithBusyRetry(() => getDb().query(
       `DELETE FROM stats_snapshots
        WHERE profile_id = ?
          AND id NOT IN (
@@ -640,7 +644,7 @@ export function addStatsSnapshot(snapshot: StatsSnapshotInput): number {
            ORDER BY id DESC
            LIMIT ?
          )`
-    ).run(snapshot.profile_id, snapshot.profile_id, MAX_STATS_ROWS_PER_PROFILE)
+    ).run(snapshot.profile_id, snapshot.profile_id, MAX_STATS_ROWS_PER_PROFILE))
   }
 
   return rowId
@@ -675,9 +679,9 @@ export function getStatsDelta1h(profileId: string): StatsDelta1h | null {
 }
 
 export function addStatsEvent(profileId: string, type: string, value?: string): number {
-  const result = getDb().query(
+  const result = runWithBusyRetry(() => getDb().query(
     'INSERT INTO stats_events (profile_id, type, value) VALUES (?, ?, ?)'
-  ).run(profileId, type, value ?? null)
+  ).run(profileId, type, value ?? null))
   return Number(result.lastInsertRowid)
 }
 
@@ -688,13 +692,13 @@ export function listStatsEvents(profileId: string, limit: number = 100): StatsEv
 }
 
 export function upsertProfileSkills(profileId: string, skills: Record<string, number>): void {
-  getDb().query(
+  runWithBusyRetry(() => getDb().query(
     `INSERT INTO profile_skills (profile_id, ts, skills_json)
      VALUES (?, datetime('now'), ?)
      ON CONFLICT(profile_id) DO UPDATE SET
        ts = excluded.ts,
        skills_json = excluded.skills_json`
-  ).run(profileId, JSON.stringify(skills))
+  ).run(profileId, JSON.stringify(skills)))
 }
 
 export function getProfileSkills(profileId: string): { ts: string; skills: Record<string, number> } | null {
@@ -876,4 +880,30 @@ export function pruneOldRows(): void {
     `DELETE FROM stats_events
      WHERE ts < datetime('now', ?)`
   ).run(cutoffModifier)
+}
+
+function runWithBusyRetry<T>(fn: () => T): T {
+  let lastError: unknown
+  for (let attempt = 0; attempt < SQLITE_BUSY_RETRY_ATTEMPTS; attempt++) {
+    try {
+      return fn()
+    } catch (error) {
+      lastError = error
+      if (!isSqliteBusyError(error) || attempt === SQLITE_BUSY_RETRY_ATTEMPTS - 1) throw error
+      sleepSync(25 * (attempt + 1))
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError))
+}
+
+function isSqliteBusyError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const record = error as { code?: unknown; message?: unknown }
+  const code = typeof record.code === 'string' ? record.code : ''
+  const message = typeof record.message === 'string' ? record.message : ''
+  return code === 'SQLITE_BUSY' || /database is locked/i.test(message)
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 }
