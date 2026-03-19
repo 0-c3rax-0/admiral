@@ -18,6 +18,8 @@ export interface Profile {
   model: string | null
   failover_provider: string | null
   failover_model: string | null
+  base_station: string | null
+  mining_location: string | null
   directive: string
   todo: string
   context_budget: number | null

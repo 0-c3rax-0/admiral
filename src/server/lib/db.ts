@@ -66,6 +66,8 @@ function migrate(db: Database): void {
       model TEXT,
       failover_provider TEXT,
       failover_model TEXT,
+      base_station TEXT,
+      mining_location TEXT,
       directive TEXT DEFAULT '',
       connection_mode TEXT DEFAULT 'http',
       server_url TEXT DEFAULT 'https://game.spacemolt.com',
@@ -184,6 +186,12 @@ function migrate(db: Database): void {
   if (!profileCols.some(c => c.name === 'context_budget')) {
     db.exec('ALTER TABLE profiles ADD COLUMN context_budget REAL DEFAULT NULL')
   }
+  if (!profileCols.some(c => c.name === 'base_station')) {
+    db.exec('ALTER TABLE profiles ADD COLUMN base_station TEXT')
+  }
+  if (!profileCols.some(c => c.name === 'mining_location')) {
+    db.exec('ALTER TABLE profiles ADD COLUMN mining_location TEXT')
+  }
   if (!profileCols.some(c => c.name === 'failover_provider')) {
     db.exec('ALTER TABLE profiles ADD COLUMN failover_provider TEXT')
   }
@@ -293,12 +301,13 @@ export function getProfile(id: string): Profile | undefined {
 
 export function createProfile(profile: Omit<Profile, 'created_at' | 'updated_at'>): Profile {
   getDb().query(
-    `INSERT INTO profiles (id, name, username, password, empire, player_id, provider, model, failover_provider, failover_model, directive, todo, connection_mode, server_url, autoconnect, enabled, context_budget)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO profiles (id, name, username, password, empire, player_id, provider, model, failover_provider, failover_model, base_station, mining_location, directive, todo, connection_mode, server_url, autoconnect, enabled, context_budget)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     profile.id, profile.name, profile.username, profile.password,
     profile.empire, profile.player_id, profile.provider, profile.model,
     profile.failover_provider ?? null, profile.failover_model ?? null,
+    profile.base_station ?? null, profile.mining_location ?? null,
     profile.directive, profile.todo || '', profile.connection_mode, profile.server_url,
     profile.autoconnect ? 1 : 0, profile.enabled ? 1 : 0, profile.context_budget ?? null,
   )
@@ -309,6 +318,7 @@ export function updateProfile(id: string, updates: Partial<Profile>): Profile | 
   const allowed = [
     'name', 'username', 'password', 'empire', 'player_id',
     'provider', 'model', 'failover_provider', 'failover_model',
+    'base_station', 'mining_location',
     'directive', 'connection_mode', 'server_url',
     'autoconnect', 'enabled', 'todo', 'context_budget',
   ]

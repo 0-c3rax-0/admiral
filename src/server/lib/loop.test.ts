@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  FAILOVER_RULES,
+  extractAssistantResponseDiagnostics,
   extractCompactionResponseDiagnostics,
   extractFallbackSummaryText,
   isSessionHistorySummaryMessage,
@@ -8,6 +10,7 @@ import {
   sanitizeProviderMessageSequence,
   sanitizeTerminalAssistantMessage,
   sanitizeMessageToolIdentifiers,
+  shouldFailover,
   shouldRetryUninterpretableResponse,
 } from './loop'
 
@@ -72,6 +75,68 @@ describe('extractCompactionResponseDiagnostics', () => {
         },
       ],
     })
+  })
+})
+
+describe('extractAssistantResponseDiagnostics', () => {
+  test('captures stop reason and empty response block diagnostics', () => {
+    const diagnostics = extractAssistantResponseDiagnostics({
+      stopReason: 'stop',
+      content: [
+        { type: 'text', text: '   ' },
+        { type: 'toolCall', name: 'noop', arguments: {} },
+      ] as any,
+    })
+
+    expect(diagnostics).toEqual({
+      stopReason: 'stop',
+      responseDiagnostics: {
+        blockCount: 2,
+        blockTypes: ['text', 'toolCall'],
+        blocks: [
+          {
+            type: 'text',
+            hasText: false,
+            textPreview: '',
+            hasThinking: false,
+            thinkingPreview: undefined,
+            hasToolName: false,
+          },
+          {
+            type: 'toolCall',
+            hasText: false,
+            textPreview: undefined,
+            hasThinking: false,
+            thinkingPreview: undefined,
+            hasToolName: true,
+          },
+        ],
+      },
+    })
+  })
+})
+
+describe('shouldFailover', () => {
+  test('covers the expected failover categories', () => {
+    expect(FAILOVER_RULES.map((group) => group.category)).toEqual([
+      'rate_limit',
+      'quota',
+      'transport',
+      'server',
+    ])
+  })
+
+  test('fails over for provider reachability and quota errors', () => {
+    expect(shouldFailover(new Error('429 Too Many Requests'))).toBe(true)
+    expect(shouldFailover(new Error('402 Payment Required'))).toBe(true)
+    expect(shouldFailover(new Error('fetch failed'))).toBe(true)
+    expect(shouldFailover(new Error('503 Service Unavailable'))).toBe(true)
+  })
+
+  test('does not fail over for aborted requests or game/domain errors', () => {
+    expect(shouldFailover(new Error('The operation was aborted'))).toBe(false)
+    expect(shouldFailover(new Error('Error: [no_base] No base at this location'))).toBe(false)
+    expect(shouldFailover(new Error('Error: [invalid_scope] Invalid scope'))).toBe(false)
   })
 })
 
@@ -194,6 +259,55 @@ describe('sanitizeProviderMessageSequence', () => {
       timestamp: 123,
     })
   })
+
+  test('rewrites a contiguous burst of user messages after a tool result', () => {
+    const messages = [
+      {
+        role: 'toolResult',
+        toolCallId: 'AbC123xyz',
+        toolName: 'game',
+        content: [{ type: 'text', text: 'Pending action accepted' }],
+        isError: false,
+      },
+      {
+        role: 'user',
+        content: '## Automatic Telemetry\n\nVerified state: furud / furud_belt',
+        timestamp: 456,
+      },
+      {
+        role: 'user',
+        content: 'Continue your mission.',
+        timestamp: 457,
+      },
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Planning next step.' }],
+      },
+      {
+        role: 'user',
+        content: 'This later user message should stay unchanged.',
+        timestamp: 458,
+      },
+    ] as any
+
+    sanitizeProviderMessageSequence(messages)
+
+    expect(messages[1]).toEqual({
+      role: 'assistant',
+      content: [{ type: 'text', text: '## Automatic Telemetry\n\nVerified state: furud / furud_belt' }],
+      timestamp: 456,
+    })
+    expect(messages[2]).toEqual({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Continue your mission.' }],
+      timestamp: 457,
+    })
+    expect(messages[4]).toEqual({
+      role: 'user',
+      content: 'This later user message should stay unchanged.',
+      timestamp: 458,
+    })
+  })
 })
 
 describe('sanitizeProviderContextMessages', () => {
@@ -229,6 +343,46 @@ describe('sanitizeProviderContextMessages', () => {
       content: [{ type: 'text', text: '## Automatic Telemetry\n\nVerified state: furud / furud_belt' }],
       timestamp: 456,
     })
+  })
+
+  test('rewrites multiple recovery user messages after a tool result in one pass', () => {
+    const messages = [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'toolCall', id: 'fallback-tool-1', name: 'game', arguments: { command: 'dock' } },
+        ],
+      },
+      {
+        role: 'toolResult',
+        toolCallId: 'fallback-tool-1',
+        toolName: 'game',
+        content: [{ type: 'text', text: 'Already docked' }],
+        isError: true,
+      },
+      {
+        role: 'user',
+        content: '## Immediate Recovery Replan\n\nUse get_status now.',
+        timestamp: 123,
+      },
+      {
+        role: 'user',
+        content: 'Continue your mission.',
+        timestamp: 124,
+      },
+    ] as any
+
+    sanitizeProviderContextMessages(messages)
+
+    const toolCallId = messages[0].content[0].id
+    expect(toolCallId).toMatch(/^[A-Za-z0-9]{9}$/)
+    expect(messages[1].toolCallId).toBe(toolCallId)
+    expect(messages[2]).toEqual({
+      role: 'assistant',
+      content: [{ type: 'text', text: '## Immediate Recovery Replan\n\nUse get_status now.' }],
+      timestamp: 123,
+    })
+    expect(messages).toHaveLength(3)
   })
 
   test('drops invalid assistant tool calls before provider normalization', () => {

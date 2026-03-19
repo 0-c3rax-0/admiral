@@ -975,6 +975,7 @@ function deriveCountermeasure(command: string, code: string): string {
   if (code === 'cargo_full') return 'Sell, unload, or change activity before mining again.'
   if (code === 'not_enough_fuel') return 'Check route and fuel before the next navigation mutation.'
   if (code === 'already_in_system') return 'Refresh state before repeating travel or jump.'
+  if (code === 'no_base') return 'Move to a valid base or station, dock if needed, and retry only from there.'
   if (command === 'sell') return 'Run fresh get_status, confirm cargo and docked state, then sell once.'
   return `Treat ${command} ${code} as planning feedback, refresh state, and avoid repeating the blocked action.`
 }

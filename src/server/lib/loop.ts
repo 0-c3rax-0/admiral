@@ -46,6 +46,7 @@ const REQUEST_OUTPUT_TOKEN_RESERVE = 4096
 const REQUEST_TOOL_TOKEN_RESERVE = 512
 const REQUEST_TOKEN_SAFETY_MARGIN = 512
 const MAX_UNINTERPRETABLE_RESPONSE_RETRIES = 1
+const MAX_EMPTY_RESPONSE_RETRIES = 1
 const OPENROUTER_FREE_SOFT_COMPACTION_TOKENS = 40_000
 const OPENROUTER_FREE_HARD_COMPACTION_TOKENS = 55_000
 
@@ -519,10 +520,21 @@ export function sanitizeAssistantToolCalls(messages: Message[]): void {
 }
 
 export function sanitizeProviderMessageSequence(messages: Message[]): void {
-  for (let i = 1; i < messages.length; i++) {
-    const previous = messages[i - 1]
+  let rewriteBurst = false
+
+  for (let i = 0; i < messages.length; i++) {
     const current = messages[i]
-    if (previous.role !== 'toolResult' || current.role !== 'user') continue
+
+    if (current.role === 'toolResult') {
+      rewriteBurst = true
+      continue
+    }
+
+    if (!rewriteBurst) continue
+    if (current.role !== 'user') {
+      rewriteBurst = false
+      continue
+    }
 
     const text = typeof current.content === 'string'
       ? current.content
@@ -905,6 +917,13 @@ export function extractCompactionResponseDiagnostics(content: AssistantMessage['
   }
 }
 
+export function extractAssistantResponseDiagnostics(response: Pick<AssistantMessage, 'content' | 'stopReason'>): Record<string, unknown> {
+  return {
+    stopReason: response.stopReason,
+    responseDiagnostics: extractCompactionResponseDiagnostics(response.content),
+  }
+}
+
 function extractCompactionErrorDiagnostics(err: unknown): Record<string, unknown> | null {
   const anyErr = err as any
   const resp = anyErr?.response || anyErr?.resp || anyErr?.result
@@ -938,6 +957,7 @@ async function completeWithRetry(
   let useFailover = !primaryKey && !!failoverKey
   let moderationRemediations = 0
   let contextOverflowRemediations = 0
+  let emptyResponseRetries = 0
 
   const timeoutMs = options?.llmTimeoutMs || DEFAULT_LLM_TIMEOUT_MS
   const messageCount = context.messages.length
@@ -1022,6 +1042,30 @@ async function completeWithRetry(
           throw new Error(result.errorMessage || 'LLM returned an error response')
         }
         if (result.content.length === 0) {
+          if (emptyResponseRetries < MAX_EMPTY_RESPONSE_RETRIES) {
+            emptyResponseRetries++
+            log(
+              'system',
+              'LLM returned empty content; retrying request once',
+              JSON.stringify({
+                requestId: request.id,
+                idempotencyKey,
+                attempt: attempt + 1,
+                maxEmptyResponseRetries: MAX_EMPTY_RESPONSE_RETRIES,
+                attemptRouting: {
+                  path: useFailover ? 'failover' : 'primary',
+                  provider: resolveProviderName(modelForAttempt),
+                  model: modelForAttemptName,
+                  baseUrl: resolveBaseUrl(modelForAttempt),
+                },
+                messageCount: context.messages.length,
+                estimatedTokens: totalMessageTokens(context.messages),
+                ...extractAssistantResponseDiagnostics(result),
+              }, null, 2),
+            )
+            attempt--
+            continue
+          }
           throw new Error('LLM returned empty response')
         }
 
@@ -1224,6 +1268,57 @@ interface RateRiskAssessment {
   failoverActivationsLast300s: number
 }
 
+interface FailoverRuleGroup {
+  category: 'rate_limit' | 'quota' | 'transport' | 'server'
+  patterns: string[]
+}
+
+export const FAILOVER_RULES: FailoverRuleGroup[] = [
+  {
+    category: 'rate_limit',
+    patterns: [
+      '429',
+      'rate limit',
+      'too many requests',
+    ],
+  },
+  {
+    category: 'quota',
+    patterns: [
+      '402',
+      'payment required',
+      'spend limit exceeded',
+      'usd spend limit exceeded',
+      'insufficient credits',
+    ],
+  },
+  {
+    category: 'transport',
+    patterns: [
+      'fetch failed',
+      'network error',
+      'network request failed',
+      'timeout',
+      'timed out',
+      'econnrefused',
+      'enotfound',
+      'eai_again',
+      'socket hang up',
+      'connection reset',
+      'no body',
+    ],
+  },
+  {
+    category: 'server',
+    patterns: [
+      'internal server error',
+      'bad gateway',
+      'service unavailable',
+      'gateway timeout',
+    ],
+  },
+]
+
 export function predict429Risk(profileId: string): RateRiskAssessment {
   const s = getLlmRateWindowStats(profileId)
 
@@ -1263,33 +1358,13 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-function shouldFailover(err: Error): boolean {
+export function shouldFailover(err: Error): boolean {
   const msg = (err.message || '').toLowerCase()
-  if (msg.includes('429')) return true
-  if (msg.includes('rate limit')) return true
-  if (msg.includes('too many requests')) return true
-  if (msg.includes('402')) return true
-  if (msg.includes('payment required')) return true
-  if (msg.includes('spend limit exceeded')) return true
-  if (msg.includes('usd spend limit exceeded')) return true
-  if (msg.includes('insufficient credits')) return true
 
-  // Treat transport/connectivity failures as "provider unreachable"
-  if (msg.includes('fetch failed')) return true
-  if (msg.includes('network error')) return true
-  if (msg.includes('network request failed')) return true
-  if (msg.includes('timeout')) return true
-  if (msg.includes('timed out')) return true
-  if (msg.includes('econnrefused')) return true
-  if (msg.includes('enotfound')) return true
-  if (msg.includes('eai_again')) return true
-  if (msg.includes('socket hang up')) return true
-  if (msg.includes('connection reset')) return true
-  if (msg.includes('no body')) return true
-  if (msg.includes('internal server error')) return true
-  if (msg.includes('bad gateway')) return true
-  if (msg.includes('service unavailable')) return true
-  if (msg.includes('gateway timeout')) return true
+  for (const group of FAILOVER_RULES) {
+    if (group.patterns.some((pattern) => msg.includes(pattern))) return true
+  }
+
   if (/\b5\d\d\b/.test(msg)) return true
 
   return false

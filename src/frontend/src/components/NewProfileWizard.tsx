@@ -25,6 +25,8 @@ export function NewProfileWizard({ providers, registrationCode, gameserverUrl, o
   const [profileName, setProfileName] = useState('')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [baseStation, setBaseStation] = useState('')
+  const [miningLocation, setMiningLocation] = useState('')
   const nameRef = useRef<HTMLInputElement>(null)
   const usernameRef = useRef<HTMLInputElement>(null)
 
@@ -73,6 +75,8 @@ export function NewProfileWizard({ providers, registrationCode, gameserverUrl, o
       server_url: gameserverUrl,
       username: accountMode === 'existing' ? (username || null) : null,
       password: accountMode === 'existing' ? (password || null) : null,
+      base_station: baseStation.trim() || null,
+      mining_location: miningLocation.trim() || null,
     }
     onCreate(data)
   }
@@ -235,20 +239,41 @@ export function NewProfileWizard({ providers, registrationCode, gameserverUrl, o
               )}
 
               <div className="space-y-3">
-                <div>
-                  <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Profile Name</span>
-                  <Input
+              <div>
+                <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Profile Name</span>
+                <Input
                     ref={nameRef}
                     value={profileName}
                     onChange={e => setProfileName(e.target.value)}
                     placeholder="e.g. Mining Bot, Scout Alpha"
                     className="h-7 text-xs"
-                    onKeyDown={e => { if (e.key === 'Enter' && canCreate) handleCreate() }}
+                  onKeyDown={e => { if (e.key === 'Enter' && canCreate) handleCreate() }}
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div>
+                  <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Base Station</span>
+                  <Input
+                    value={baseStation}
+                    onChange={e => setBaseStation(e.target.value)}
+                    placeholder="e.g. nova_terra_central"
+                    className="h-7 text-xs"
                   />
                 </div>
-
                 <div>
-                  <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Provider</span>
+                  <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Mining Location</span>
+                  <Input
+                    value={miningLocation}
+                    onChange={e => setMiningLocation(e.target.value)}
+                    placeholder="e.g. furud_belt"
+                    className="h-7 text-xs"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Provider</span>
                   <Select
                     value={provider}
                     onChange={e => { setProvider(e.target.value); setModel('') }}

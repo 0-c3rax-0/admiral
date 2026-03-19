@@ -14,7 +14,7 @@ import { agentManager } from './agent-manager'
 import { resolveModel } from './model'
 import type { MutationState, NavigationState } from './agent'
 import { createGameConnection } from './game-connection'
-import { fetchGameCommands, parseRuntimeCommandResult } from './schema'
+import { fetchGameCommands, parseRuntimeCommandResult, type GameCommandInfo } from './schema'
 import type { Profile } from '../../shared/types'
 import {
   applyCommissionQuotes,
@@ -83,12 +83,14 @@ type LoopSignal = {
 
 type VerifiedCommands = {
   names: Set<string>
+  infos: Map<string, GameCommandInfo>
   loadedFrom: string
 }
 
 type CommandHintSignal = {
   attempted: string
   suggestions: string[]
+  usageHints: string[]
   source: string
 }
 
@@ -279,7 +281,8 @@ class FleetSupervisor {
       const ownedShipSignals = await this.buildOwnedShipSignals(profile, status)
       const fleetCleanupSignals = await this.buildFleetCleanupSignals(profile, status)
       const moduleUpgradeSignals = await this.buildModuleUpgradeSignals(profile, status)
-      const verifiedCommands = await this.getVerifiedCommands(profile)
+      const forceCommandRefresh = logs.some((entry) => mentionsUnsupportedCommand(entry.summary || ''))
+      const verifiedCommands = await this.getVerifiedCommands(profile, forceCommandRefresh)
       const commandHintSignals = buildCommandHintSignals(logs, verifiedCommands)
       const adviceSignals = buildAdviceSignals(status, recentSignals, routeSignals, shipUpgradeSignals, ownedShipSignals, fleetCleanupSignals, moduleUpgradeSignals, verifiedCommands, loopSignal, commandHintSignals, decisionPressure)
       const noisyState =
@@ -420,10 +423,10 @@ class FleetSupervisor {
     return signals
   }
 
-  private async getVerifiedCommands(profile: Profile): Promise<VerifiedCommands | null> {
+  private async getVerifiedCommands(profile: Profile, forceRefresh = false): Promise<VerifiedCommands | null> {
     const cacheKey = `${profile.connection_mode}:${profile.server_url}`
     const cached = this.verifiedCommandsCache.get(cacheKey)
-    if (cached && cached.expiresAt > Date.now()) {
+    if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
       return cached.commands
     }
 
@@ -431,6 +434,7 @@ class FleetSupervisor {
     if (runtimeCommands.length > 0) {
       const verified = {
         names: new Set(runtimeCommands.map((command) => command.name.trim()).filter(Boolean)),
+        infos: new Map(runtimeCommands.map((command) => [command.name.trim(), command])),
         loadedFrom: 'runtime:get_commands',
       }
       this.verifiedCommandsCache.set(cacheKey, {
@@ -448,6 +452,7 @@ class FleetSupervisor {
     const verified = commands.length > 0
       ? {
         names: new Set(commands.map((command) => command.name.trim()).filter(Boolean)),
+        infos: new Map(commands.map((command) => [command.name.trim(), command])),
         loadedFrom: `${baseUrl}/api/${apiVersion}/openapi.json`,
       }
       : null
@@ -458,7 +463,7 @@ class FleetSupervisor {
     return verified
   }
 
-  private async fetchRuntimeCommands(profile: Profile): Promise<Array<{ name: string }>> {
+  private async fetchRuntimeCommands(profile: Profile): Promise<GameCommandInfo[]> {
     if (!profile.username || !profile.password) return []
 
     const connection = createGameConnection(profile)
@@ -501,6 +506,9 @@ export function buildRecentSignals(summaries: string[]): string[] {
     if (lower.includes('error: [not_docked]')) add('not_docked error observed recently')
     if (lower.includes('error: [no_base]')) add('no_base error observed recently')
     if (lower.includes('error: [already_in_system]')) add('already_in_system error observed recently')
+    if (lower.includes('error: [invalid_scope]') && lower.includes('use "personal" (default) or "faction"')) {
+      add('view_orders scope options clarified recently')
+    }
     if (lower.includes('error: [not_enough_fuel]')) add('not_enough_fuel error observed recently')
     if (lower.includes('error: [no_resources]') && lower.includes('nothing to mine here')) add('mine location mismatch observed recently')
     if (lower.includes('error: [no_equipment]') && lower.includes('ice harvester')) add('mine equipment mismatch observed recently')
@@ -703,6 +711,7 @@ function buildAdviceSignals(
       evidence: [
         `attempted=${hint.attempted}`,
         hint.suggestions.length > 0 ? `try=${hint.suggestions.join(', ')}` : 'try=use get_commands or a verified command from the current API',
+        ...hint.usageHints,
         `command_validation=${hint.source}`,
       ],
       recommendedChecks: ['get_commands'],
@@ -770,6 +779,21 @@ function buildAdviceSignals(
       recommendedChecks: ['get_status'],
       recommendedActions: ['travel', 'dock'],
       whyNow: 'the action cannot succeed from the current location',
+    })
+  }
+
+  if (recentSignals.includes('view_orders scope options clarified recently')) {
+    signals.push({
+      kind: 'view_orders_scope_choice',
+      priority: 83,
+      summary: 'The last order query used an invalid scope; choose explicitly between personal orders and faction orders.',
+      evidence: [
+        'recent invalid_scope error explicitly listed the only valid scope values',
+        'valid_scopes=personal,faction',
+      ],
+      recommendedChecks: ['view_orders'],
+      recommendedActions: [],
+      whyNow: 'retrying the same invalid scope wastes turns when the API already told you both accepted options',
     })
   }
 
@@ -986,7 +1010,7 @@ function buildAdviceSignals(
     .sort((a, b) => b.priority - a.priority)
 }
 
-function buildCommandHintSignals(
+export function buildCommandHintSignals(
   logs: ReturnType<typeof getLogEntries>,
   verifiedCommands: VerifiedCommands | null,
 ): CommandHintSignal[] {
@@ -1002,17 +1026,37 @@ function buildCommandHintSignals(
     const blockedMatch = summary.match(/unsupported action '([^']+)'|unsupported command '([^']+)'/)
     const name = (unknownMatch?.[1] || blockedMatch?.[1] || blockedMatch?.[2] || '').trim()
     if (!name || attempted.has(name)) continue
+    const normalizedAttempted = normalizeCommandKey(name)
+    const currentlyVerified = [...verifiedCommands.names].some((command) => normalizeCommandKey(command) === normalizedAttempted)
+    if (currentlyVerified) continue
     attempted.add(name)
 
     const suggestions = suggestVerifiedCommands(name, verifiedCommands.names).slice(0, 3)
+    const usageHints = suggestions
+      .map((suggestion) => formatCommandUsageHint(verifiedCommands.infos.get(suggestion)))
+      .filter((hint): hint is string => Boolean(hint))
+      .slice(0, 2)
     signals.push({
       attempted: name,
       suggestions,
+      usageHints,
       source: verifiedCommands.loadedFrom,
     })
   }
 
   return signals
+}
+
+function formatCommandUsageHint(command: GameCommandInfo | undefined): string | null {
+  if (!command) return null
+  const required = command.params.filter((param) => param.required).map((param) => param.name)
+  const optional = command.params.filter((param) => !param.required).map((param) => param.name)
+  const params = [
+    ...required,
+    ...optional.map((name) => `${name}?`),
+  ]
+  const signature = params.length > 0 ? `${command.name}(${params.join(', ')})` : `${command.name}()`
+  return `usage=${signature}`
 }
 
 function suggestVerifiedCommands(inputRaw: string, names: Set<string>): string[] {
@@ -1077,6 +1121,10 @@ function parseSupervisorOutput(text: string): { nudges: Array<{ profile: string;
   } catch {
     return null
   }
+}
+
+function mentionsUnsupportedCommand(summary: string): boolean {
+  return /Unknown command '([^']+)'|unsupported action '([^']+)'|unsupported command '([^']+)'/.test(summary)
 }
 
 function shouldSendNudge(lastAt: number | undefined, lastText: string | undefined, nextText: string): boolean {

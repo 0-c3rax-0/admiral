@@ -215,6 +215,11 @@ export async function executeTool(
       commandArgs = normalizedSearch.args
       ctx.log('system', normalizedSearch.message)
     }
+    const normalizedTradeScope = normalizeTradeScopeArgs(command, commandArgs)
+    if (normalizedTradeScope.changed) {
+      commandArgs = normalizedTradeScope.args
+      ctx.log('system', normalizedTradeScope.message)
+    }
     const normalizedFacility = normalizeFacilityArgs(command, commandArgs)
     if (normalizedFacility.changed) {
       commandArgs = normalizedFacility.args
@@ -479,6 +484,10 @@ async function validateLocalGameCommand(
     return validateViewMarketCommand(args)
   }
 
+  if (command === 'view_orders') {
+    return validateViewOrdersCommand(args)
+  }
+
   if (command === 'mine') {
     const mineGuard = validateMineAgainstLiveState(profileId, gameState)
     if (mineGuard) return mineGuard
@@ -709,6 +718,23 @@ function validateViewMarketCommand(
   return {
     systemMessage: `Blocked view_market locally: unsupported args ${unsupportedKeys.join(', ')}.`,
     errorMessage: `Error: [invalid_payload] view_market only accepts item_id or category. ${correction.join('; ')}.`,
+  }
+}
+
+function validateViewOrdersCommand(
+  args: Record<string, unknown> | undefined,
+): { systemMessage: string; errorMessage: string } | null {
+  if (!args || Object.keys(args).length === 0) return null
+
+  const rawScope = pickFirstStringArg(args.scope)
+  if (!rawScope) return null
+
+  const normalized = rawScope.trim().toLowerCase()
+  if (normalized === 'personal' || normalized === 'faction') return null
+
+  return {
+    systemMessage: `Blocked view_orders locally: unsupported scope '${rawScope}'.`,
+    errorMessage: 'Error: [invalid_scope] Invalid scope. Use "personal" (default) or "faction".\nInterpretation: `view_orders` only accepts the exact scope values `personal` or `faction`. Normalize the scope first instead of retrying the same invalid alias.',
   }
 }
 
@@ -1473,6 +1499,10 @@ export function resolveExplicitCommandAlias(input: string, names: string[]): str
     return chooseFirstAvailable('view_market')
   }
 
+  if (input === 'get_queue' || input === 'queue') {
+    return chooseFirstAvailable('get_queue', 'v2_get_queue')
+  }
+
   if (input === 'view_market' || input === 'analyze_market' || input === 'estimate_purchase' || input === 'view_orders') {
     return chooseFirstAvailable(input, `market_${input}`)
   }
@@ -2045,6 +2075,10 @@ function formatCommandError(command: string, code: string, message: string): str
     return `${prefix}\nInterpretation: the ship lacks fuel for this plan. Stop repeating the same movement action, refresh with get_status, and re-plan around refueling or a shorter route.`
   }
 
+  if (normalized === 'no_base') {
+    return `${prefix}\nInterpretation: this command requires being at a valid base or station location, but the ship is currently away from one. Refresh with get_status or get_location, move to a valid base, dock if needed, and only then retry the base-only action.`
+  }
+
   if (normalized === 'no_resources' && command === 'mine') {
     return `${prefix}\nInterpretation: mining is not available at this exact in-game location right now. This can mean the spot has no mineable resource, the current POI supports different resources than the one you expect, or you are not at the correct ore/ice/resource node. Refresh with get_status or get_location, confirm the POI/resource type, and move to a valid mining location instead of repeating mine blindly.`
   }
@@ -2109,6 +2143,9 @@ function annotateNotification(tag: string, message: string): string {
   }
   if (upperTag === 'ACTION_ERROR' && /\bnot_enough_fuel\b/i.test(message)) {
     return `${message} Interpretation: the current route or action is blocked by fuel. Re-plan around refueling or a nearer destination instead of retrying the same move.`
+  }
+  if (upperTag === 'ACTION_ERROR' && /\bno_base\b/i.test(message)) {
+    return `${message} Interpretation: this action only works from a valid base or station location. Refresh state, move to a base, dock if needed, and then retry instead of repeating it in open space or at the wrong POI.`
   }
   if (upperTag === 'ACTION_ERROR' && /\bno_resources\b/i.test(message) && /nothing to mine here/i.test(message)) {
     return `${message} Interpretation: this exact location is not a valid mining spot for the expected resource right now. The account may be at the wrong ore/ice/resource POI, or this POI may not support mining. Verify the current location and move to a confirmed mining node instead of repeating mine here.`
@@ -2187,6 +2224,33 @@ function normalizeSearchSystemsArgs(
   }
 
   return { changed: false, args, message: '' }
+}
+
+function normalizeTradeScopeArgs(
+  command: string,
+  args: Record<string, unknown> | undefined,
+): { changed: boolean; args: Record<string, unknown> | undefined; message: string } {
+  if (command !== 'view_orders' || !args) return { changed: false, args, message: '' }
+
+  const rawScope = pickFirstStringArg(args.scope)
+  if (!rawScope) return { changed: false, args, message: '' }
+
+  const normalized = rawScope.trim().toLowerCase()
+  let scope: 'personal' | 'faction' | null = null
+
+  if (['personal', 'person', 'self', 'own', 'my', 'private', 'local'].includes(normalized)) {
+    scope = 'personal'
+  } else if (['faction', 'guild', 'corp', 'corporation', 'alliance', 'shared', 'team', 'org', 'organization'].includes(normalized)) {
+    scope = 'faction'
+  }
+
+  if (!scope || scope === rawScope) return { changed: false, args, message: '' }
+
+  return {
+    changed: true,
+    args: { ...args, scope },
+    message: `Normalized view_orders scope: scope=${scope}`,
+  }
 }
 
 function normalizeCatalogArgs(

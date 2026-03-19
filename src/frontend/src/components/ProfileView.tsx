@@ -93,7 +93,7 @@ const CONNECTION_MODES: { value: string; label: string }[] = [
   { value: 'mcp_v2', label: 'MCP v2' },
 ]
 
-type EditingField = 'name' | 'role' | 'mode' | 'provider' | 'credentials' | null
+type EditingField = 'name' | 'role' | 'mode' | 'provider' | 'credentials' | 'base_station' | 'mining_location' | null
 
 const AGENT_ROLE_OPTIONS = [
   { value: 'miner', label: 'Miner' },
@@ -165,6 +165,8 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
   const [editContextBudget, setEditContextBudget] = useState<number | null>(null)
   const [editUsername, setEditUsername] = useState('')
   const [editPassword, setEditPassword] = useState('')
+  const [editBaseStation, setEditBaseStation] = useState('')
+  const [editMiningLocation, setEditMiningLocation] = useState('')
   const editNameRef = useRef<HTMLInputElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
 
@@ -452,6 +454,20 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
     })
   }
 
+  async function handleSaveBaseStation() {
+    setEditing(null)
+    await saveProfileField({
+      base_station: editBaseStation.trim() || null,
+    })
+  }
+
+  async function handleSaveMiningLocation() {
+    setEditing(null)
+    await saveProfileField({
+      mining_location: editMiningLocation.trim() || null,
+    })
+  }
+
   // Fetch player status
   const fetchStatus = useCallback(() => {
     fetch(`/api/profiles/${profile.id}/command`, {
@@ -644,410 +660,496 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
   return (
     <div className="flex flex-col h-full">
       {/* Header bar */}
-      <div data-tour="navbar" className="flex items-center gap-3 h-12 px-3.5 bg-card border-b border-border select-none">
+      <div data-tour="navbar" className="flex items-start gap-3 px-3.5 py-2.5 bg-card border-b border-border select-none">
         {onToggleProfileList && (
           <button
             onClick={onToggleProfileList}
-            className="flex items-center px-2 py-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors shrink-0"
+            className="flex items-center px-2 py-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors shrink-0 mt-0.5"
             title={showProfileList ? 'Hide profiles' : 'Show profiles'}
           >
             {showProfileList ? <PanelLeftClose size={14} /> : <PanelLeft size={14} />}
           </button>
         )}
-        <div className={`status-dot ${
+        <div className={`status-dot mt-[2px] ${
           status.running ? 'status-dot-green' :
           status.connected ? 'status-dot-orange' :
           'status-dot-grey'
         }`} />
 
-        {/* Editable profile name */}
-        <div className="relative" data-tour="profile-name">
-          <h2
-            className="text-sm font-semibold text-foreground tracking-wide cursor-pointer hover:text-primary transition-colors"
-            onClick={() => { setEditing('name'); setEditName(profile.name) }}
-          >
-            {profile.name}
-          </h2>
-          {editing === 'name' && (
-            <div ref={popoverRef} className="absolute z-50 top-full left-0 mt-1.5 bg-card border border-border shadow-lg p-2.5 min-w-[220px]">
-              <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1.5">Profile Name</span>
-              <div className="flex gap-1.5">
-                <Input
-                  ref={editNameRef}
-                  value={editName}
-                  onChange={e => setEditName(e.target.value)}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter') handleSaveName()
-                    if (e.key === 'Escape') setEditing(null)
-                  }}
-                  className="h-7 text-xs"
-                />
-                <Button variant="ghost" size="icon" onClick={handleSaveName} className="h-7 w-7 shrink-0 text-[hsl(var(--smui-green))] hover:bg-[hsl(var(--smui-green)/0.1)]">
-                  <Check size={13} />
-                </Button>
-                <Button variant="ghost" size="icon" onClick={() => setEditing(null)} className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground">
-                  <X size={13} />
-                </Button>
-              </div>
-            </div>
-          )}
-        </div>
-
-        <div className="relative">
-          <span
-            className="text-[10px] text-[hsl(var(--smui-green))] uppercase tracking-[1.5px] px-2 py-0.5 border border-[hsl(var(--smui-green)/0.35)] cursor-pointer hover:bg-[hsl(var(--smui-green)/0.08)] transition-colors"
-            onClick={() => {
-              setEditing('role')
-              setEditRole(profile.agent_role || 'miner')
-            }}
-          >
-            role:{profile.agent_role || 'miner'}
-          </span>
-          {editing === 'role' && (
-            <div ref={popoverRef} className="absolute z-50 top-full left-0 mt-1.5 bg-card border border-border shadow-lg p-2.5 min-w-[180px]">
-              <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1.5">Agent Role</span>
-              <Select value={editRole} onChange={e => setEditRole(e.target.value)} className="h-7 text-xs">
-                {AGENT_ROLE_OPTIONS.map(option => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
-                ))}
-              </Select>
-              <div className="flex justify-end gap-1.5 pt-2">
-                <Button variant="ghost" size="sm" onClick={() => setEditing(null)} className="h-6 text-[10px] px-2">
-                  Cancel
-                </Button>
-                <Button size="sm" onClick={handleSaveRole} className="h-6 text-[10px] px-2 bg-primary text-primary-foreground hover:bg-primary/90">
-                  Save
-                </Button>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Player color swatch + Editable @username / credentials */}
-        {playerData && (playerData.player as Record<string, unknown>)?.color_primary ? (
-          <svg width="12" height="12" viewBox="0 0 12 12" className="shrink-0">
-            <polygon points="0,0 12,0 0,12" fill={(playerData.player as Record<string, unknown>).color_primary as string} />
-            <polygon points="12,0 12,12 0,12" fill={(playerData.player as Record<string, unknown>).color_secondary as string || (playerData.player as Record<string, unknown>).color_primary as string} />
-          </svg>
-        ) : null}
-        <div className="relative" data-tour="credentials">
-          <span
-            className={`text-[11px] cursor-pointer transition-colors ${
-              profile.username
-                ? 'text-muted-foreground hover:text-foreground'
-                : 'text-muted-foreground/40 italic hover:text-muted-foreground'
-            }`}
-            onClick={() => {
-              setEditing('credentials')
-              setEditUsername(profile.username || '')
-              setEditPassword(profile.password || '')
-            }}
-          >
-            {profile.username ? `@${profile.username}` : '@credentials'}
-          </span>
-          {editing === 'credentials' && (
-            <div ref={popoverRef} className="absolute z-50 top-full left-0 mt-1.5 bg-card border border-border shadow-lg p-2.5 min-w-[280px]">
-              <span className="text-[10px] text-[hsl(var(--smui-orange))] uppercase tracking-[1.5px] block mb-2">SpaceMolt Credentials</span>
-              <div className="space-y-2">
-                <div>
-                  <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Username</span>
-                  <Input
-                    value={editUsername}
-                    onChange={e => setEditUsername(e.target.value)}
-                    placeholder="(new player)"
-                    className="h-7 text-xs"
-                    onKeyDown={e => {
-                      if (e.key === 'Enter') handleSaveCredentials()
-                      if (e.key === 'Escape') setEditing(null)
-                    }}
-                  />
-                </div>
-                <div>
-                  <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Password</span>
-                  <Input
-                    type="password"
-                    value={editPassword}
-                    onChange={e => setEditPassword(e.target.value)}
-                    placeholder="256-bit hex"
-                    className="h-7 text-xs"
-                    onKeyDown={e => {
-                      if (e.key === 'Enter') handleSaveCredentials()
-                      if (e.key === 'Escape') setEditing(null)
-                    }}
-                  />
-                </div>
-                <div className="flex justify-end gap-1.5 pt-1 border-t border-border/50">
-                  <Button variant="ghost" size="sm" onClick={() => setEditing(null)} className="h-6 text-[10px] px-2">
-                    Cancel
-                  </Button>
-                  <Button size="sm" onClick={handleSaveCredentials} className="h-6 text-[10px] px-2 bg-primary text-primary-foreground hover:bg-primary/90">
-                    Save
-                  </Button>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-        {profile.stats_delta_1h && (
-          <div className="flex items-center gap-3 text-[10px] tracking-[1.2px] uppercase">
-            <span className={profile.stats_delta_1h.credits >= 0 ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-red))]'}>
-              1h credits {profile.stats_delta_1h.credits >= 0 ? '+' : ''}{Math.round(profile.stats_delta_1h.credits).toLocaleString()}
-            </span>
-            <span className={profile.stats_delta_1h.ore_mined >= 0 ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-red))]'}>
-              ore {profile.stats_delta_1h.ore_mined >= 0 ? '+' : ''}{Math.round(profile.stats_delta_1h.ore_mined).toLocaleString()}
-            </span>
-          </div>
-        )}
-
-        {/* Editable connection mode */}
-        <div className="relative" data-tour="connection-mode">
-          <span
-            className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] px-2 py-0.5 border border-border cursor-pointer hover:border-primary/40 hover:text-foreground transition-colors"
-            onClick={() => setEditing('mode')}
-          >
-            {CONNECTION_MODE_LABELS[profile.connection_mode] || profile.connection_mode}
-          </span>
-          {editing === 'mode' && (
-            <div ref={popoverRef} className="absolute z-50 top-full left-0 mt-1.5 bg-card border border-border shadow-lg min-w-[180px]">
-              <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block px-3 pt-2 pb-1">Connection Mode</span>
-              {CONNECTION_MODES.map(m => (
-                <button
-                  key={m.value}
-                  onClick={() => handleSelectMode(m.value)}
-                  className={`w-full text-left px-3 py-1.5 text-xs transition-colors flex items-center gap-2 ${
-                    m.value === profile.connection_mode
-                      ? 'text-primary bg-primary/5'
-                      : 'text-foreground hover:bg-primary/10'
-                  }`}
-                >
-                  <div className={`w-3 h-3 border flex items-center justify-center shrink-0 ${
-                    m.value === profile.connection_mode ? 'border-primary' : 'border-border bg-background'
-                  }`}>
-                    {m.value === profile.connection_mode && <div className="w-1.5 h-1.5 bg-primary" />}
+        <div className="min-w-0 flex-1 flex flex-col gap-1">
+          <div className="flex items-start justify-between gap-x-4 gap-y-1 min-w-0 flex-wrap">
+            <div className="flex items-center gap-3 min-w-0 flex-wrap">
+            {/* Editable profile name */}
+            <div className="relative" data-tour="profile-name">
+              <h2
+                className="text-sm font-semibold text-foreground tracking-wide cursor-pointer hover:text-primary transition-colors"
+                onClick={() => { setEditing('name'); setEditName(profile.name) }}
+              >
+                {profile.name}
+              </h2>
+              {editing === 'name' && (
+                <div ref={popoverRef} className="absolute z-50 top-full left-0 mt-1.5 bg-card border border-border shadow-lg p-2.5 min-w-[220px]">
+                  <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1.5">Profile Name</span>
+                  <div className="flex gap-1.5">
+                    <Input
+                      ref={editNameRef}
+                      value={editName}
+                      onChange={e => setEditName(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') handleSaveName()
+                        if (e.key === 'Escape') setEditing(null)
+                      }}
+                      className="h-7 text-xs"
+                    />
+                    <Button variant="ghost" size="icon" onClick={handleSaveName} className="h-7 w-7 shrink-0 text-[hsl(var(--smui-green))] hover:bg-[hsl(var(--smui-green)/0.1)]">
+                      <Check size={13} />
+                    </Button>
+                    <Button variant="ghost" size="icon" onClick={() => setEditing(null)} className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground">
+                      <X size={13} />
+                    </Button>
                   </div>
-                  {m.label}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Editable provider/model */}
-        {!isManual && profile.provider && (
-          <div className="relative" data-tour="provider-model">
-            <span
-              className="text-[10px] text-[hsl(var(--smui-purple))] cursor-pointer hover:text-foreground transition-colors"
-              onClick={() => {
-                setEditing('provider')
-                setEditProvider(profile.provider || '')
-                setEditModel(profile.model || '')
-                setEditFailoverProvider(profile.failover_provider || '')
-                setEditFailoverModel(profile.failover_model || '')
-                setEditContextBudget(profile.context_budget ?? null)
-              }}
-            >
-              {profile.provider}/{profile.model}
-              {profile.failover_provider && profile.failover_model && (
-                <span className="text-muted-foreground/60 ml-1.5">
-                  failover:{profile.failover_provider}/{profile.failover_model}
-                </span>
+                </div>
               )}
-              <span className="text-muted-foreground/60 ml-1.5">
-                budget:{profile.context_budget != null && !isNaN(profile.context_budget) ? `${Math.round(profile.context_budget * 100)}%` : '55%'}
+            </div>
+            {profile.stats_delta_1h && (
+              <div className="flex items-center gap-3 text-[10px] tracking-[1.2px] uppercase flex-wrap">
+                <span className={profile.stats_delta_1h.credits >= 0 ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-red))]'}>
+                  1h credits {profile.stats_delta_1h.credits >= 0 ? '+' : ''}{Math.round(profile.stats_delta_1h.credits).toLocaleString()}
+                </span>
+                <span className={profile.stats_delta_1h.ore_mined >= 0 ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-red))]'}>
+                  ore {profile.stats_delta_1h.ore_mined >= 0 ? '+' : ''}{Math.round(profile.stats_delta_1h.ore_mined).toLocaleString()}
+                </span>
+              </div>
+            )}
+
+            {/* Player color swatch + Editable @username / credentials */}
+            {playerData && (playerData.player as Record<string, unknown>)?.color_primary ? (
+              <svg width="12" height="12" viewBox="0 0 12 12" className="shrink-0">
+                <polygon points="0,0 12,0 0,12" fill={(playerData.player as Record<string, unknown>).color_primary as string} />
+                <polygon points="12,0 12,12 0,12" fill={(playerData.player as Record<string, unknown>).color_secondary as string || (playerData.player as Record<string, unknown>).color_primary as string} />
+              </svg>
+            ) : null}
+            <div className="relative" data-tour="credentials">
+              <span
+                className={`text-[11px] cursor-pointer transition-colors ${
+                  profile.username
+                    ? 'text-muted-foreground hover:text-foreground'
+                    : 'text-muted-foreground/40 italic hover:text-muted-foreground'
+                }`}
+                onClick={() => {
+                  setEditing('credentials')
+                  setEditUsername(profile.username || '')
+                  setEditPassword(profile.password || '')
+                }}
+              >
+                {profile.username ? `@${profile.username}` : '@credentials'}
               </span>
-              {status.running && (
-                <span className="text-muted-foreground/60 ml-1.5">
-                  mem:{adaptiveMode}{effectiveBudget ? `:${effectiveBudget}` : ''}
-                </span>
+              {editing === 'credentials' && (
+                <div ref={popoverRef} className="absolute z-50 top-full left-0 mt-1.5 bg-card border border-border shadow-lg p-2.5 min-w-[280px]">
+                  <span className="text-[10px] text-[hsl(var(--smui-orange))] uppercase tracking-[1.5px] block mb-2">SpaceMolt Credentials</span>
+                  <div className="space-y-2">
+                    <div>
+                      <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Username</span>
+                      <Input
+                        value={editUsername}
+                        onChange={e => setEditUsername(e.target.value)}
+                        placeholder="(new player)"
+                        className="h-7 text-xs"
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') handleSaveCredentials()
+                          if (e.key === 'Escape') setEditing(null)
+                        }}
+                      />
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Password</span>
+                      <Input
+                        type="password"
+                        value={editPassword}
+                        onChange={e => setEditPassword(e.target.value)}
+                        placeholder="256-bit hex"
+                        className="h-7 text-xs"
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') handleSaveCredentials()
+                          if (e.key === 'Escape') setEditing(null)
+                        }}
+                      />
+                    </div>
+                    <div className="flex justify-end gap-1.5 pt-1 border-t border-border/50">
+                      <Button variant="ghost" size="sm" onClick={() => setEditing(null)} className="h-6 text-[10px] px-2">
+                        Cancel
+                      </Button>
+                      <Button size="sm" onClick={handleSaveCredentials} className="h-6 text-[10px] px-2 bg-primary text-primary-foreground hover:bg-primary/90">
+                        Save
+                      </Button>
+                    </div>
+                  </div>
+                </div>
               )}
-              {currentTick !== null && (
-                <span className="text-muted-foreground/60 ml-1.5">
-                  tick:{currentTick}
-                </span>
-              )}
-              {mutationState !== 'idle' && (
+            </div>
+            {!isManual && profile.provider && (
+              <div className="relative" data-tour="provider-model">
                 <span
-                  className={`ml-1.5 ${
-                    mutationState === 'local_stall'
-                      ? 'text-[hsl(var(--smui-orange))]'
-                      : 'text-muted-foreground/70'
-                  }`}
-                  title={mutationStateDetail || mutationState}
+                  className="text-[10px] text-[hsl(var(--smui-purple))] cursor-pointer hover:text-foreground transition-colors whitespace-nowrap"
+                  onClick={() => {
+                    setEditing('provider')
+                    setEditProvider(profile.provider || '')
+                    setEditModel(profile.model || '')
+                    setEditFailoverProvider(profile.failover_provider || '')
+                    setEditFailoverModel(profile.failover_model || '')
+                    setEditContextBudget(profile.context_budget ?? null)
+                  }}
                 >
-                  state:{mutationState}
+                  {profile.provider}/{profile.model}
+                  {profile.failover_provider && profile.failover_model && (
+                    <span className="text-muted-foreground/60 ml-1.5">
+                      failover:{profile.failover_provider}/{profile.failover_model}
+                    </span>
+                  )}
+                  <span className="text-muted-foreground/60 ml-1.5">
+                    budget:{profile.context_budget != null && !isNaN(profile.context_budget) ? `${Math.round(profile.context_budget * 100)}%` : '55%'}
+                  </span>
+                  {status.running && (
+                    <span className="text-muted-foreground/60 ml-1.5">
+                      mem:{adaptiveMode}{effectiveBudget ? `:${effectiveBudget}` : ''}
+                    </span>
+                  )}
+                  {currentTick !== null && (
+                    <span className="text-muted-foreground/60 ml-1.5">
+                      tick:{currentTick}
+                    </span>
+                  )}
+                  {mutationState !== 'idle' && (
+                    <span
+                      className={`ml-1.5 ${
+                        mutationState === 'local_stall'
+                          ? 'text-[hsl(var(--smui-orange))]'
+                          : 'text-muted-foreground/70'
+                      }`}
+                      title={mutationStateDetail || mutationState}
+                    >
+                      state:{mutationState}
+                    </span>
+                  )}
+                  {navigationState !== 'unknown' && (
+                    <span className="text-muted-foreground/60 ml-1.5" title={navigationStateDetail || navigationState}>
+                      nav:{navigationState}
+                    </span>
+                  )}
                 </span>
-              )}
-              {navigationState !== 'unknown' && (
-                <span className="text-muted-foreground/60 ml-1.5" title={navigationStateDetail || navigationState}>
-                  nav:{navigationState}
-                </span>
-              )}
-            </span>
-            {editing === 'provider' && (
-              <div ref={popoverRef} className="absolute z-50 top-full left-0 mt-1.5 bg-card border border-border shadow-lg p-2.5 min-w-[300px]">
-                <div className="space-y-2">
-                  <div>
-                    <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Provider</span>
-                    <Select value={editProvider} onChange={e => { setEditProvider(e.target.value); setEditModel('') }} className="h-7 text-xs">
-                      <option value="">Choose...</option>
-                      {availableProviders.map(p => <option key={p} value={p}>{p === 'manual' ? 'Manual (no LLM)' : p}</option>)}
-                    </Select>
-                  </div>
-                  {editProvider && editProvider !== 'manual' && (
-                    <div>
-                      <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Model</span>
-                      <ModelPicker provider={editProvider} value={editModel} onChange={setEditModel} />
-                    </div>
-                  )}
-                  {editProvider && editProvider !== 'manual' && (
-                    <div>
-                      <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Failover Provider</span>
-                      <Select
-                        value={editFailoverProvider}
-                        onChange={e => { setEditFailoverProvider(e.target.value); setEditFailoverModel('') }}
-                        className="h-7 text-xs"
-                      >
-                        <option value="">None</option>
-                        {availableProviders.filter(p => p !== 'manual').map(p => <option key={p} value={p}>{p}</option>)}
-                      </Select>
-                    </div>
-                  )}
-                  {editFailoverProvider && (
-                    <div>
-                      <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Failover Model</span>
-                      <ModelPicker provider={editFailoverProvider} value={editFailoverModel} onChange={setEditFailoverModel} />
-                    </div>
-                  )}
-                  {editProvider && editProvider !== 'manual' && (
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px]">Context Budget</span>
-                        <span className="text-[10px] text-muted-foreground tabular-nums">
-                          {editContextBudget !== null ? `${Math.round(editContextBudget * 100)}%` : '55% (default)'}
-                        </span>
+                {editing === 'provider' && (
+                  <div ref={popoverRef} className="absolute z-50 top-full left-0 mt-1.5 bg-card border border-border shadow-lg p-2.5 min-w-[300px]">
+                    <div className="space-y-2">
+                      <div>
+                        <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Provider</span>
+                        <Select value={editProvider} onChange={e => { setEditProvider(e.target.value); setEditModel('') }} className="h-7 text-xs">
+                          <option value="">Choose...</option>
+                          {availableProviders.map(p => <option key={p} value={p}>{p === 'manual' ? 'Manual (no LLM)' : p}</option>)}
+                        </Select>
                       </div>
-                      <input
-                        type="range"
-                        min={5}
-                        max={90}
-                        step={5}
-                        value={editContextBudget !== null ? Math.round(editContextBudget * 100) : 55}
-                        onChange={e => {
-                          const v = parseInt(e.target.value, 10)
-                          setEditContextBudget(v === 55 ? null : v / 100)
-                        }}
-                        className="w-full h-1.5 accent-[hsl(var(--smui-purple))] cursor-pointer"
-                      />
-                      <div className="flex justify-between text-[9px] text-muted-foreground/50 mt-0.5">
-                        <span>5% (small/local)</span>
-                        <span>90% (large context)</span>
+                      {editProvider && editProvider !== 'manual' && (
+                        <div>
+                          <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Model</span>
+                          <ModelPicker provider={editProvider} value={editModel} onChange={setEditModel} />
+                        </div>
+                      )}
+                      {editProvider && editProvider !== 'manual' && (
+                        <div>
+                          <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Failover Provider</span>
+                          <Select
+                            value={editFailoverProvider}
+                            onChange={e => { setEditFailoverProvider(e.target.value); setEditFailoverModel('') }}
+                            className="h-7 text-xs"
+                          >
+                            <option value="">None</option>
+                            {availableProviders.filter(p => p !== 'manual').map(p => <option key={p} value={p}>{p}</option>)}
+                          </Select>
+                        </div>
+                      )}
+                      {editFailoverProvider && (
+                        <div>
+                          <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Failover Model</span>
+                          <ModelPicker provider={editFailoverProvider} value={editFailoverModel} onChange={setEditFailoverModel} />
+                        </div>
+                      )}
+                      {editProvider && editProvider !== 'manual' && (
+                        <div>
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px]">Context Budget</span>
+                            <span className="text-[10px] text-muted-foreground tabular-nums">
+                              {editContextBudget !== null ? `${Math.round(editContextBudget * 100)}%` : '55% (default)'}
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={5}
+                            max={90}
+                            step={5}
+                            value={editContextBudget !== null ? Math.round(editContextBudget * 100) : 55}
+                            onChange={e => {
+                              const v = parseInt(e.target.value, 10)
+                              setEditContextBudget(v === 55 ? null : v / 100)
+                            }}
+                            className="w-full h-1.5 accent-[hsl(var(--smui-purple))] cursor-pointer"
+                          />
+                          <div className="flex justify-between text-[9px] text-muted-foreground/50 mt-0.5">
+                            <span>5% (small/local)</span>
+                            <span>90% (large context)</span>
+                          </div>
+                        </div>
+                      )}
+                      <div className="flex justify-end gap-1.5 pt-1 border-t border-border/50">
+                        <Button variant="ghost" size="sm" onClick={() => setEditing(null)} className="h-6 text-[10px] px-2">
+                          Cancel
+                        </Button>
+                        <Button size="sm" onClick={handleSaveProvider} className="h-6 text-[10px] px-2 bg-primary text-primary-foreground hover:bg-primary/90">
+                          Save
+                        </Button>
                       </div>
                     </div>
-                  )}
-                  <div className="flex justify-end gap-1.5 pt-1 border-t border-border/50">
-                    <Button variant="ghost" size="sm" onClick={() => setEditing(null)} className="h-6 text-[10px] px-2">
-                      Cancel
-                    </Button>
-                    <Button size="sm" onClick={handleSaveProvider} className="h-6 text-[10px] px-2 bg-primary text-primary-foreground hover:bg-primary/90">
-                      Save
-                    </Button>
                   </div>
-                </div>
+                )}
               </div>
             )}
-          </div>
-        )}
+            {(isManual || !profile.provider) && (
+              <div className="relative" data-tour="provider-model">
+                <span
+                  className="text-[10px] text-muted-foreground/50 italic cursor-pointer hover:text-foreground transition-colors whitespace-nowrap"
+                  onClick={() => {
+                    setEditing('provider')
+                    setEditProvider(profile.provider || '')
+                    setEditModel(profile.model || '')
+                    setEditFailoverProvider(profile.failover_provider || '')
+                    setEditFailoverModel(profile.failover_model || '')
+                    setEditContextBudget(profile.context_budget ?? null)
+                  }}
+                >
+                  {isManual && profile.provider ? 'manual' : 'no provider'}
+                </span>
+                {editing === 'provider' && (
+                  <div ref={popoverRef} className="absolute z-50 top-full left-0 mt-1.5 bg-card border border-border shadow-lg p-2.5 min-w-[300px]">
+                    <div className="space-y-2">
+                      <div>
+                        <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Provider</span>
+                        <Select value={editProvider} onChange={e => { setEditProvider(e.target.value); setEditModel('') }} className="h-7 text-xs">
+                          <option value="">Choose...</option>
+                          {availableProviders.map(p => <option key={p} value={p}>{p === 'manual' ? 'Manual (no LLM)' : p}</option>)}
+                        </Select>
+                      </div>
+                      {editProvider && editProvider !== 'manual' && (
+                        <div>
+                          <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Model</span>
+                          <ModelPicker provider={editProvider} value={editModel} onChange={setEditModel} />
+                        </div>
+                      )}
+                      {editProvider && editProvider !== 'manual' && (
+                        <div>
+                          <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Failover Provider</span>
+                          <Select
+                            value={editFailoverProvider}
+                            onChange={e => { setEditFailoverProvider(e.target.value); setEditFailoverModel('') }}
+                            className="h-7 text-xs"
+                          >
+                            <option value="">None</option>
+                            {availableProviders.filter(p => p !== 'manual').map(p => <option key={p} value={p}>{p}</option>)}
+                          </Select>
+                        </div>
+                      )}
+                      {editFailoverProvider && (
+                        <div>
+                          <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Failover Model</span>
+                          <ModelPicker provider={editFailoverProvider} value={editFailoverModel} onChange={setEditFailoverModel} />
+                        </div>
+                      )}
+                      {editProvider && editProvider !== 'manual' && (
+                        <div>
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px]">Context Budget</span>
+                            <span className="text-[10px] text-muted-foreground tabular-nums">
+                              {editContextBudget !== null ? `${Math.round(editContextBudget * 100)}%` : '55% (default)'}
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={5}
+                            max={90}
+                            step={5}
+                            value={editContextBudget !== null ? Math.round(editContextBudget * 100) : 55}
+                            onChange={e => {
+                              const v = parseInt(e.target.value, 10)
+                              setEditContextBudget(v === 55 ? null : v / 100)
+                            }}
+                            className="w-full h-1.5 accent-[hsl(var(--smui-purple))] cursor-pointer"
+                          />
+                          <div className="flex justify-between text-[9px] text-muted-foreground/50 mt-0.5">
+                            <span>5% (small/local)</span>
+                            <span>90% (large context)</span>
+                          </div>
+                        </div>
+                      )}
+                      <div className="flex justify-end gap-1.5 pt-1 border-t border-border/50">
+                        <Button variant="ghost" size="sm" onClick={() => setEditing(null)} className="h-6 text-[10px] px-2">
+                          Cancel
+                        </Button>
+                        <Button size="sm" onClick={handleSaveProvider} className="h-6 text-[10px] px-2 bg-primary text-primary-foreground hover:bg-primary/90">
+                          Save
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+            </div>
 
-        {/* Show clickable provider/model area when manual or no provider set */}
-        {(isManual || !profile.provider) && (
-          <div className="relative" data-tour="provider-model">
-            <span
-              className="text-[10px] text-muted-foreground/50 italic cursor-pointer hover:text-foreground transition-colors"
-              onClick={() => {
-                setEditing('provider')
-                setEditProvider(profile.provider || '')
-                setEditModel(profile.model || '')
-                setEditFailoverProvider(profile.failover_provider || '')
-                setEditFailoverModel(profile.failover_model || '')
-                setEditContextBudget(profile.context_budget ?? null)
-              }}
-            >
-              {isManual && profile.provider ? 'manual' : 'no provider'}
-            </span>
-            {editing === 'provider' && (
-              <div ref={popoverRef} className="absolute z-50 top-full left-0 mt-1.5 bg-card border border-border shadow-lg p-2.5 min-w-[300px]">
-                <div className="space-y-2">
-                  <div>
-                    <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Provider</span>
-                    <Select value={editProvider} onChange={e => { setEditProvider(e.target.value); setEditModel('') }} className="h-7 text-xs">
-                      <option value="">Choose...</option>
-                      {availableProviders.map(p => <option key={p} value={p}>{p === 'manual' ? 'Manual (no LLM)' : p}</option>)}
-                    </Select>
-                  </div>
-                  {editProvider && editProvider !== 'manual' && (
-                    <div>
-                      <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Model</span>
-                      <ModelPicker provider={editProvider} value={editModel} onChange={setEditModel} />
-                    </div>
-                  )}
-                  {editProvider && editProvider !== 'manual' && (
-                    <div>
-                      <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Failover Provider</span>
-                      <Select
-                        value={editFailoverProvider}
-                        onChange={e => { setEditFailoverProvider(e.target.value); setEditFailoverModel('') }}
-                        className="h-7 text-xs"
-                      >
-                        <option value="">None</option>
-                        {availableProviders.filter(p => p !== 'manual').map(p => <option key={p} value={p}>{p}</option>)}
-                      </Select>
-                    </div>
-                  )}
-                  {editFailoverProvider && (
-                    <div>
-                      <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Failover Model</span>
-                      <ModelPicker provider={editFailoverProvider} value={editFailoverModel} onChange={setEditFailoverModel} />
-                    </div>
-                  )}
-                  {editProvider && editProvider !== 'manual' && (
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px]">Context Budget</span>
-                        <span className="text-[10px] text-muted-foreground tabular-nums">
-                          {editContextBudget !== null ? `${Math.round(editContextBudget * 100)}%` : '55% (default)'}
-                        </span>
-                      </div>
-                      <input
-                        type="range"
-                        min={5}
-                        max={90}
-                        step={5}
-                        value={editContextBudget !== null ? Math.round(editContextBudget * 100) : 55}
-                        onChange={e => {
-                          const v = parseInt(e.target.value, 10)
-                          setEditContextBudget(v === 55 ? null : v / 100)
-                        }}
-                        className="w-full h-1.5 accent-[hsl(var(--smui-purple))] cursor-pointer"
-                      />
-                      <div className="flex justify-between text-[9px] text-muted-foreground/50 mt-0.5">
-                        <span>5% (small/local)</span>
-                        <span>90% (large context)</span>
-                      </div>
-                    </div>
-                  )}
-                  <div className="flex justify-end gap-1.5 pt-1 border-t border-border/50">
+            <div className="flex items-center justify-end gap-3 text-[10px] tracking-[1.2px] uppercase flex-wrap" />
+          </div>
+
+          <div className="flex items-center justify-between gap-x-3 gap-y-1 flex-wrap">
+            <div className="relative">
+              <span
+                className="text-[10px] text-[hsl(var(--smui-green))] uppercase tracking-[1.5px] px-2 py-0.5 border border-[hsl(var(--smui-green)/0.35)] cursor-pointer hover:bg-[hsl(var(--smui-green)/0.08)] transition-colors"
+                onClick={() => {
+                  setEditing('role')
+                  setEditRole(profile.agent_role || 'miner')
+                }}
+              >
+                role:{profile.agent_role || 'miner'}
+              </span>
+              {editing === 'role' && (
+                <div ref={popoverRef} className="absolute z-50 top-full left-0 mt-1.5 bg-card border border-border shadow-lg p-2.5 min-w-[180px]">
+                  <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1.5">Agent Role</span>
+                  <Select value={editRole} onChange={e => setEditRole(e.target.value)} className="h-7 text-xs">
+                    {AGENT_ROLE_OPTIONS.map(option => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </Select>
+                  <div className="flex justify-end gap-1.5 pt-2">
                     <Button variant="ghost" size="sm" onClick={() => setEditing(null)} className="h-6 text-[10px] px-2">
                       Cancel
                     </Button>
-                    <Button size="sm" onClick={handleSaveProvider} className="h-6 text-[10px] px-2 bg-primary text-primary-foreground hover:bg-primary/90">
+                    <Button size="sm" onClick={handleSaveRole} className="h-6 text-[10px] px-2 bg-primary text-primary-foreground hover:bg-primary/90">
                       Save
                     </Button>
                   </div>
                 </div>
-              </div>
-            )}
+              )}
+            </div>
+
+            <div className="relative">
+              <span
+                className={`text-[10px] uppercase tracking-[1.2px] px-2 py-0.5 border cursor-pointer transition-colors ${
+                  profile.base_station
+                    ? 'text-[hsl(var(--smui-cyan))] border-[hsl(var(--smui-cyan)/0.35)] hover:bg-[hsl(var(--smui-cyan)/0.08)]'
+                    : 'text-muted-foreground border-border hover:text-foreground hover:border-primary/40'
+                }`}
+                onClick={() => {
+                  setEditing('base_station')
+                  setEditBaseStation(profile.base_station || '')
+                }}
+                title="Preferred base station"
+              >
+                base:{profile.base_station || 'unset'}
+              </span>
+              {editing === 'base_station' && (
+                <div ref={popoverRef} className="absolute z-50 top-full left-0 mt-1.5 bg-card border border-border shadow-lg p-2.5 min-w-[260px]">
+                  <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1.5">Base Station</span>
+                  <div className="flex gap-1.5">
+                    <Input
+                      value={editBaseStation}
+                      onChange={e => setEditBaseStation(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') handleSaveBaseStation()
+                        if (e.key === 'Escape') setEditing(null)
+                      }}
+                      placeholder="e.g. nova_terra"
+                      className="h-7 text-xs"
+                    />
+                    <Button variant="ghost" size="icon" onClick={handleSaveBaseStation} className="h-7 w-7 shrink-0 text-[hsl(var(--smui-green))] hover:bg-[hsl(var(--smui-green)/0.1)]">
+                      <Check size={13} />
+                    </Button>
+                    <Button variant="ghost" size="icon" onClick={() => setEditing(null)} className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground">
+                      <X size={13} />
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="relative">
+              <span
+                className={`text-[10px] uppercase tracking-[1.2px] px-2 py-0.5 border cursor-pointer transition-colors ${
+                  profile.mining_location
+                    ? 'text-[hsl(var(--smui-orange))] border-[hsl(var(--smui-orange)/0.35)] hover:bg-[hsl(var(--smui-orange)/0.08)]'
+                    : 'text-muted-foreground border-border hover:text-foreground hover:border-primary/40'
+                }`}
+                onClick={() => {
+                  setEditing('mining_location')
+                  setEditMiningLocation(profile.mining_location || '')
+                }}
+                title="Preferred mining location"
+              >
+                mine:{profile.mining_location || 'unset'}
+              </span>
+              {editing === 'mining_location' && (
+                <div ref={popoverRef} className="absolute z-50 top-full left-0 mt-1.5 bg-card border border-border shadow-lg p-2.5 min-w-[260px]">
+                  <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1.5">Mining Location</span>
+                  <div className="flex gap-1.5">
+                    <Input
+                      value={editMiningLocation}
+                      onChange={e => setEditMiningLocation(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') handleSaveMiningLocation()
+                        if (e.key === 'Escape') setEditing(null)
+                      }}
+                      placeholder="e.g. furud"
+                      className="h-7 text-xs"
+                    />
+                    <Button variant="ghost" size="icon" onClick={handleSaveMiningLocation} className="h-7 w-7 shrink-0 text-[hsl(var(--smui-green))] hover:bg-[hsl(var(--smui-green)/0.1)]">
+                      <Check size={13} />
+                    </Button>
+                    <Button variant="ghost" size="icon" onClick={() => setEditing(null)} className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground">
+                      <X size={13} />
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Editable connection mode */}
+            <div className="relative" data-tour="connection-mode">
+              <span
+                className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] px-2 py-0.5 border border-border cursor-pointer hover:border-primary/40 hover:text-foreground transition-colors"
+                onClick={() => setEditing('mode')}
+              >
+                {CONNECTION_MODE_LABELS[profile.connection_mode] || profile.connection_mode}
+              </span>
+              {editing === 'mode' && (
+                <div ref={popoverRef} className="absolute z-50 top-full left-0 mt-1.5 bg-card border border-border shadow-lg min-w-[180px]">
+                  <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block px-3 pt-2 pb-1">Connection Mode</span>
+                  {CONNECTION_MODES.map(m => (
+                    <button
+                      key={m.value}
+                      onClick={() => handleSelectMode(m.value)}
+                      className={`w-full text-left px-3 py-1.5 text-xs transition-colors flex items-center gap-2 ${
+                        m.value === profile.connection_mode
+                          ? 'text-primary bg-primary/5'
+                          : 'text-foreground hover:bg-primary/10'
+                      }`}
+                    >
+                      <div className={`w-3 h-3 border flex items-center justify-center shrink-0 ${
+                        m.value === profile.connection_mode ? 'border-primary' : 'border-border bg-background'
+                      }`}>
+                        {m.value === profile.connection_mode && <div className="w-1.5 h-1.5 bg-primary" />}
+                      </div>
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
-        )}
+        </div>
 
         <div className="flex-1" />
 

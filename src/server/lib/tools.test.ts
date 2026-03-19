@@ -177,6 +177,16 @@ describe('command aliases', () => {
     expect(alias).toBe('view_market')
   })
 
+  test('maps get_queue to v2_get_queue when only the v2 command exists', () => {
+    const alias = findCanonicalAlias('get_queue', [
+      'v2_get_queue',
+      'get_state',
+      'get_base',
+    ])
+
+    expect(alias).toBe('v2_get_queue')
+  })
+
   test('rewrites facility_types to facility(action=types) before execution', async () => {
     const calls: Array<{ command: string; args: Record<string, unknown> | undefined }> = []
 
@@ -799,6 +809,42 @@ describe('state inference from command errors', () => {
   })
 })
 
+describe('command error interpretation', () => {
+  test('explains no_base as a location/base-state problem', async () => {
+    const result = await executeTool(
+      'game',
+      {
+        command: 'facility',
+        args: { action: 'types' },
+      },
+      {
+        profileId: `test-${Date.now()}-no-base-interpretation`,
+        todo: '',
+        log: () => {},
+        connection: {
+          mode: 'http_v2',
+          connect: async () => {},
+          login: async () => ({ success: true }),
+          register: async () => ({ success: true }),
+          execute: async () => ({
+            error: {
+              code: 'no_base',
+              message: 'No base at this location',
+            },
+          }),
+          onNotification: () => {},
+          disconnect: async () => {},
+          isConnected: () => true,
+        },
+      },
+    )
+
+    expect(result).toContain('Error: [no_base] No base at this location')
+    expect(result).toContain('requires being at a valid base or station location')
+    expect(result).toContain('move to a valid base')
+  })
+})
+
 describe('tool argument normalization', () => {
   test('parses stringified JSON args for game tool calls', async () => {
     const calls: Array<{ command: string; args: Record<string, unknown> | undefined }> = []
@@ -985,6 +1031,77 @@ describe('tool argument normalization', () => {
       },
     ])
     expect(result).toContain('ok: true')
+  })
+
+  test('normalizes view_orders scope aliases like self to personal before execution', async () => {
+    const calls: Array<{ command: string; args: Record<string, unknown> | undefined }> = []
+
+    await executeTool(
+      'game',
+      {
+        command: 'view_orders',
+        args: { scope: 'self', order_type: 'sell' },
+      },
+      {
+        profileId: `test-${Date.now()}-view-orders-scope-self`,
+        todo: '',
+        log: () => {},
+        connection: {
+          mode: 'http_v2',
+          connect: async () => {},
+          login: async () => ({ success: true }),
+          register: async () => ({ success: true }),
+          execute: async (command, args) => {
+            calls.push({ command, args })
+            return { result: { ok: true } }
+          },
+          onNotification: () => {},
+          disconnect: async () => {},
+          isConnected: () => true,
+        },
+      },
+    )
+
+    expect(calls).toEqual([
+      {
+        command: 'view_orders',
+        args: { scope: 'personal', order_type: 'sell' },
+      },
+    ])
+  })
+
+  test('blocks unsupported view_orders scope values locally', async () => {
+    let executeCalled = false
+
+    const result = await executeTool(
+      'game',
+      {
+        command: 'view_orders',
+        args: { scope: 'all' },
+      },
+      {
+        profileId: `test-${Date.now()}-view-orders-scope-invalid`,
+        todo: '',
+        log: () => {},
+        connection: {
+          mode: 'http_v2',
+          connect: async () => {},
+          login: async () => ({ success: true }),
+          register: async () => ({ success: true }),
+          execute: async () => {
+            executeCalled = true
+            return { result: { ok: true } }
+          },
+          onNotification: () => {},
+          disconnect: async () => {},
+          isConnected: () => true,
+        },
+      },
+    )
+
+    expect(executeCalled).toBe(false)
+    expect(result).toContain('Error: [invalid_scope] Invalid scope.')
+    expect(result).toContain('exact scope values `personal` or `faction`')
   })
 })
 

@@ -76,6 +76,7 @@ const PENDING_RECOVERY_MAX_WAIT_MS = 25_000
 const RECONNECT_STORM_WINDOW_MS = 10 * 60_000
 const RECONNECT_STORM_THRESHOLD = 3
 const RECONNECT_STORM_COOLDOWN_MS = 60_000
+const NOTIFICATION_LOG_DEDUPE_MS = 1_500
 const HTTP_V2_FALLBACK_QUERY_COMMANDS = new Set([
   'get_status', 'get_location', 'get_system', 'get_poi', 'get_cargo', 'get_ship', 'get_skills',
   'get_missions', 'get_active_missions', 'get_nearby', 'get_action_log', 'view_market', 'analyze_market',
@@ -135,6 +136,8 @@ export class Agent {
   private miningAutopilotRunning = false
   private miningAutopilotChainCount = 0
   private miningAutopilotNextTick: number | null = null
+  private lastNotificationSummary: string | null = null
+  private lastNotificationLoggedAt = 0
   constructor(profileId: string) {
     this.profileId = profileId
   }
@@ -1130,7 +1133,16 @@ export class Agent {
           .catch(() => {})
         return
       }
-      this.log('notification', formatNotificationSummary(n), JSON.stringify(n, null, 2))
+      const notificationSummary = formatNotificationSummary(n)
+      const now = Date.now()
+      const duplicateNotificationBurst =
+        this.lastNotificationSummary === notificationSummary &&
+        now - this.lastNotificationLoggedAt <= NOTIFICATION_LOG_DEDUPE_MS
+      if (!duplicateNotificationBurst) {
+        this.log('notification', notificationSummary, JSON.stringify(n, null, 2))
+        this.lastNotificationSummary = notificationSummary
+        this.lastNotificationLoggedAt = now
+      }
       void this.maybeContinueMiningAutopilot(n).catch((err) => {
         this.miningAutopilotArmed = false
         this.log('error', `Mining autopilot failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -1927,6 +1939,32 @@ function createConnection(profile: Profile): GameConnection {
 function buildSystemPrompt(profile: Profile, commandList: string): string {
   const promptMd = getPromptMd()
   const directive = resolveMissionDirective(profile)
+  const preferredBase = profile.base_station?.trim() || null
+  const preferredMining = profile.mining_location?.trim() || null
+  const miningRouteDirective = (() => {
+    if (preferredMining && preferredBase) {
+      return `- Prefer a stable default miner route when no stronger local constraint applies: bias mining toward the configured mining system or area \`${preferredMining}\`, and use the configured base/station \`${preferredBase}\` as the default unload, storage, refuel, and market location.`
+    }
+    if (preferredMining) {
+      return `- Prefer a stable default miner route when no stronger local constraint applies: bias mining toward the configured mining system or area \`${preferredMining}\`, and use the best practical nearby station/base for unload, storage, refuel, and selling.`
+    }
+    if (preferredBase) {
+      return `- Prefer a stable default miner route when no stronger local constraint applies: use the configured base/station \`${preferredBase}\` as the default unload, storage, refuel, and market location, and choose practical nearby mining areas that fit the current equipment.`
+    }
+    return '- Prefer a stable default miner route when no stronger local constraint applies: choose a practical mining system and a reliable nearby unload/refuel station based on the current profile state, local opportunities, and travel cost.'
+  })()
+  const miningBiasDirective = (() => {
+    if (preferredMining && preferredBase) {
+      return `- If the ship is already running a normal ore-mining loop and no mission, fuel, cargo, combat, or market constraint overrides it, bias route planning back toward \`${preferredMining}\` for mining and \`${preferredBase}\` for docking/selling.`
+    }
+    if (preferredMining) {
+      return `- If the ship is already running a normal ore-mining loop and no mission, fuel, cargo, combat, or market constraint overrides it, bias route planning back toward \`${preferredMining}\` for mining.`
+    }
+    if (preferredBase) {
+      return `- If the ship is already running a normal ore-mining loop and no mission, fuel, cargo, combat, or market constraint overrides it, bias route planning back toward \`${preferredBase}\` as the preferred docking/selling hub.`
+    }
+    return '- If the ship is already running a normal ore-mining loop and no mission, fuel, cargo, combat, or market constraint overrides it, bias route planning back toward the profile’s established mining area and preferred unload hub.'
+  })()
 
   let credentials: string
   if (profile.username && profile.password) {
@@ -2021,8 +2059,8 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - If attacked by NPC pirates and escape is legal, \`jump\` or \`travel\` can be a valid recovery option. Treat navigation as a possible escape tool when combat pressure is non-player and leaving is feasible.
 - In empire-controlled space, avoid initiating attacks on players, pirates, or empire NPCs unless combat is an explicit objective and you are prepared for a police response.
 - Mining loops should be practical: mine until cargo is near full (roughly 95%), but stop early if yields fail, the location lacks resources, the node mismatches the current mining fit, cargo is full, or a better unload/travel opportunity appears.
-- Prefer a stable default miner route when no stronger local constraint applies: mine in the Furud system, and use Nova Terra / Nova Terra Central as the default unload, storage, refuel, and market station.
-- If the ship is already running a normal ore-mining loop and no mission, fuel, cargo, combat, or market constraint overrides it, bias route planning back toward Furud belts for mining and Nova Terra Central for docking/selling.
+${miningRouteDirective}
+${miningBiasDirective}
 - Use a structured ore-mining loop when applicable: if undocked with an ore-mining fit and cargo is below 15%, prefer traveling to a known compatible ore belt and starting the loop there.
 - If already at a compatible ore belt and cargo is below 95%, keep mining unless the location is depleted, yields collapse, cargo is full, no resources are available, or the current fit does not match the node.
 - If cargo reaches roughly 95%, stop mining, return to a known unload station, dock, refuel when needed, unload, and only craft items when a supported crafting action is actually available and worthwhile.

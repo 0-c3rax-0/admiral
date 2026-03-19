@@ -14,7 +14,7 @@ profiles.get('/', (c) => {
 
 profiles.post('/', async (c) => {
   const body = await c.req.json()
-  const { name, username, password, empire, provider, model, directive, connection_mode, server_url, context_budget } = body
+  const { name, username, password, empire, provider, model, directive, connection_mode, server_url, context_budget, base_station, mining_location } = body
   if (!name) return c.json({ error: 'Name is required' }, 400)
   try {
     const profile = createProfile({
@@ -28,6 +28,8 @@ profiles.post('/', async (c) => {
       model: model || null,
       failover_provider: null,
       failover_model: null,
+      base_station: base_station || null,
+      mining_location: mining_location || null,
       directive: directive || '',
       todo: '',
       context_budget: context_budget ?? null,
